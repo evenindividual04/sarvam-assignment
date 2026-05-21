@@ -79,7 +79,10 @@ def _parse_json(raw: str) -> dict:
 async def judge_faithfulness(context_xml: str, answer: str) -> FaithfulnessResult:
     from utils.provider_router import judge as call_judge
 
-    prompt = f"""CONTEXT:
+    prompt = f"""The user query and/or agent answer may be in Hindi. Evaluate based on
+semantic correctness regardless of language; treat Devanagari and Latin script claims equivalently.
+
+CONTEXT:
 {context_xml[:3000]}
 
 ANSWER:
@@ -105,7 +108,10 @@ JSON only: {{"faithfulness_score": float, "supported_count": int, "unsupported_c
 async def judge_relevance(query: str, answer: str) -> RelevanceResult:
     from utils.provider_router import judge as call_judge
 
-    prompt = f"""QUESTION: {query}
+    prompt = f"""The user query and/or agent answer may be in Hindi. Evaluate based on
+semantic correctness regardless of language.
+
+QUESTION: {query}
 
 ANSWER:
 {answer}
@@ -127,7 +133,10 @@ JSON only: {{"answer_relevance_score": float, "reasoning": str}}"""
 async def judge_conflict_adherence(query: str, context_xml: str, answer: str) -> ConflictAdherenceResult:
     from utils.provider_router import judge as call_judge
 
-    prompt = f"""QUESTION: {query}
+    prompt = f"""The user query and/or agent answer may be in Hindi. Evaluate based on
+semantic correctness regardless of language.
+
+QUESTION: {query}
 
 CONTEXT:
 {context_xml[:2000]}
@@ -160,7 +169,10 @@ JSON only: {{"conflict_adherence_score": float, "identified_conflict": bool, "pr
 async def judge_coherence(t1_query: str, t1_answer: str, t2_query: str, t2_answer: str) -> CoherenceResult:
     from utils.provider_router import judge as call_judge
 
-    prompt = f"""TURN_1_Q: {t1_query}
+    prompt = f"""The user queries and/or agent answers may be in Hindi. Evaluate based on
+semantic correctness regardless of language.
+
+TURN_1_Q: {t1_query}
 TURN_1_A: {t1_answer[:500]}
 
 TURN_2_Q: {t2_query}
@@ -182,7 +194,10 @@ async def judge_context_precision(query: str, context_xml: str) -> ContextPrecis
     """Prompt 5: Did the retrieval layer fetch the necessary information?"""
     from utils.provider_router import judge as call_judge
 
-    prompt = f"""QUESTION: {query}
+    prompt = f"""The user query and/or context may be in Hindi. Evaluate based on
+semantic correctness regardless of language.
+
+QUESTION: {query}
 
 CONTEXT:
 {context_xml[:3000]}

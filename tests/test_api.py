@@ -19,9 +19,11 @@ def app_client(tmp_path_factory):
     os.environ["DB_PATH"] = str(db)
     os.environ["ALLOWED_ORIGINS"] = "http://localhost:3000"
 
-    # Reload memory + main so the env override is picked up.
+    # Reload memory + eval_queries + main so the env override is picked up.
     import agent.memory as mem_mod
     importlib.reload(mem_mod)
+    import agent.eval_queries as eq_mod
+    importlib.reload(eq_mod)
     import main as main_mod
     importlib.reload(main_mod)
 

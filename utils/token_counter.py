@@ -1,6 +1,14 @@
 """
 tiktoken-based token counting. cl100k_base encoding everywhere.
 ContextBudget allocates the 16K token total across pipeline stages.
+
+V3.4 note (Hindi): Devanagari script inflates ``cl100k_base`` token counts
+roughly 2.5× relative to equivalent English text — each Devanagari character
+typically encodes as multiple BPE tokens. The budget below stays the same for
+Hindi turns, which means fewer Hindi chunks fit in the same ``web_context``
+slice. This is an acceptable graceful-degradation behaviour: the context engine
+will simply select fewer (but still ranked) Hindi snippets. A Hindi-specific
+budget multiplier is a future optimization, not required for V3.4.
 """
 from __future__ import annotations
 

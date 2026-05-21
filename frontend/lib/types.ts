@@ -148,6 +148,7 @@ export interface EvalQuestion {
   question_id: string;
   category: string;
   question: string;
+  language?: string;
   faithfulness?: number;
   answer_relevance?: number;
   context_precision?: number;

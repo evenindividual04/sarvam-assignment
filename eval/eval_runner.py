@@ -34,6 +34,45 @@ _RESULTS_DIR.mkdir(exist_ok=True)
 _PER_QUESTION_TIMEOUT_S = int(os.getenv("EVAL_PER_QUESTION_TIMEOUT_S", "240"))
 
 
+async def _persist_eval_run(result: dict) -> None:
+    """Mirror a JSONL row into the eval_runs SQLite table for dashboard queries."""
+    import aiosqlite
+
+    from agent.memory import DB_PATH
+
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute(
+                """INSERT OR REPLACE INTO eval_runs (
+                    run_id, run_at, question_id, question, category, agent_answer,
+                    faithfulness_score, answer_relevance_score, context_precision_score,
+                    citation_integrity_score, conflict_adherence_score,
+                    session_coherence_score, claim_precision_score, judge_reasoning,
+                    failure_class, latency_ms, turn_id, language
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    result["run_id"], result["run_at"], result["question_id"],
+                    result["question"], result["category"], result.get("agent_answer", ""),
+                    result.get("faithfulness_score"),
+                    result.get("answer_relevance_score"),
+                    result.get("context_precision_score"),
+                    result.get("citation_integrity_score"),
+                    result.get("conflict_adherence_score"),
+                    result.get("session_coherence_score"),
+                    result.get("claim_precision_score"),
+                    result.get("claim_precision_reasoning", ""),
+                    result.get("failure_class"),
+                    result.get("latency_ms", 0),
+                    result.get("turn_id") or None,
+                    result.get("language", "en"),
+                ),
+            )
+            await db.commit()
+    except Exception as exc:  # pragma: no cover — DB errors should never break the run
+        import logging
+        logging.getLogger(__name__).warning("eval_runs persist failed: %s", exc)
+
+
 async def run_eval() -> None:
     await init_db()
 
@@ -59,6 +98,7 @@ async def run_eval() -> None:
             qid = q["id"]
             category = q["category"]
             query = q["query"]
+            language = q.get("language", "en")
             is_multiturn = q.get("is_multiturn", False)
             scenario = q.get("scenario")
             turn = q.get("turn", 1)
@@ -182,6 +222,7 @@ async def run_eval() -> None:
                 "question_id": qid,
                 "question": query,
                 "category": category,
+                "language": language,
                 "agent_answer": answer[:1000],
                 "faithfulness_score": faithfulness_score,
                 "answer_relevance_score": relevance_score,
@@ -212,6 +253,7 @@ async def run_eval() -> None:
             outf.write(json.dumps(result) + "\n")
             outf.flush()
             results_summary.append(result)
+            await _persist_eval_run(result)
 
             print(
                 f"{qid:<10} {category:<20} "
@@ -244,6 +286,27 @@ async def run_eval() -> None:
     print("\nFailure taxonomy:")
     for k, v in taxonomy.most_common():
         print(f"  {k}: {v}")
+
+    # ── Per-language breakdown (V3.4) ──────────────────────────────────────
+    languages = sorted({r.get("language", "en") for r in results_summary})
+    if len(languages) > 1:
+        print("\nPer-language breakdown:")
+        print(
+            f"  {'lang':<6}{'n':>4}{'pass%':>8}{'faith':>8}{'rel':>8}{'ctxP':>8}{'citI':>8}"
+        )
+        for lang in languages:
+            rows = [r for r in results_summary if r.get("language", "en") == lang]
+            n = len(rows)
+            if n == 0:
+                continue
+            pass_pct = 100.0 * sum(1 for r in rows if r["failure_class"] == "PASS") / n
+            avg_f = sum(r["faithfulness_score"] for r in rows) / n
+            avg_r = sum(r["answer_relevance_score"] for r in rows) / n
+            avg_cp = sum(r["context_precision_score"] for r in rows) / n
+            avg_ci = sum(r["citation_integrity_score"] for r in rows) / n
+            print(
+                f"  {lang:<6}{n:>4}{pass_pct:>7.1f}%{avg_f:>8.2f}{avg_r:>8.2f}{avg_cp:>8.2f}{avg_ci:>8.2f}"
+            )
 
     print(f"\nResults written to: {out_path}")
 

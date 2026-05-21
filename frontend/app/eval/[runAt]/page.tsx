@@ -223,10 +223,11 @@ export default function RunSummaryPage({ params }: PageProps) {
               </span>
             </div>
             <div className="border-t border-border">
-              <div className="grid grid-cols-[60px_1fr_100px_60px_60px_60px_60px_120px_24px] gap-4 py-3 border-b border-border font-mono text-[10px] uppercase tracking-[0.14em] text-muted-foreground">
+              <div className="grid grid-cols-[60px_1fr_100px_36px_60px_60px_60px_60px_120px_24px] gap-4 py-3 border-b border-border font-mono text-[10px] uppercase tracking-[0.14em] text-muted-foreground">
                 <div>ID</div>
                 <div>Question</div>
                 <div>Category</div>
+                <div>Lang</div>
                 <div className="text-right">Faith</div>
                 <div className="text-right">Relv</div>
                 <div className="text-right">Cite</div>
@@ -238,7 +239,7 @@ export default function RunSummaryPage({ params }: PageProps) {
                 <Link
                   key={q.question_id}
                   href={`/eval/${encodeURIComponent(decodedRunAt)}/questions/${encodeURIComponent(q.question_id)}`}
-                  className="grid grid-cols-[60px_1fr_100px_60px_60px_60px_60px_120px_24px] gap-4 py-3 border-b border-border hover:bg-surface-hover/50 transition-colors items-center"
+                  className="grid grid-cols-[60px_1fr_100px_36px_60px_60px_60px_60px_120px_24px] gap-4 py-3 border-b border-border hover:bg-surface-hover/50 transition-colors items-center"
                 >
                   <div className="font-mono text-[11px] text-muted-foreground">
                     {q.question_id}
@@ -246,6 +247,11 @@ export default function RunSummaryPage({ params }: PageProps) {
                   <div className="text-[13px] truncate">{q.question}</div>
                   <div className="font-mono text-[10px] uppercase tracking-[0.10em] text-muted-foreground">
                     {q.category}
+                  </div>
+                  <div>
+                    <span className="inline-block font-mono text-[10px] uppercase tracking-[0.10em] px-1.5 py-0.5 rounded-[3px] border border-border text-muted-foreground">
+                      {(q.language ?? "en").toUpperCase()}
+                    </span>
                   </div>
                   <div className="text-right font-mono tabular-nums text-[12px] text-foreground">
                     {formatScore(q.faithfulness)}
