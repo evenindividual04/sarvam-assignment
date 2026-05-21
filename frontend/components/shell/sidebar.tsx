@@ -10,6 +10,7 @@ const NAV = [
   { href: "/", label: "Chat" },
   { href: "/sessions", label: "Sessions" },
   { href: "/eval", label: "Eval" },
+  { href: "/settings", label: "Settings" },
 ];
 
 function HealthDot() {
