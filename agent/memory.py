@@ -17,7 +17,13 @@ from agent.models import ConflictResult, ContextSnippet, Turn
 
 logger = logging.getLogger(__name__)
 
-DB_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "research.db")
+DB_PATH = os.environ.get(
+    "DB_PATH",
+    os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "research.db"),
+)
+_db_dir = os.path.dirname(DB_PATH)
+if _db_dir:
+    os.makedirs(_db_dir, exist_ok=True)
 
 
 CREATE_SESSIONS = """

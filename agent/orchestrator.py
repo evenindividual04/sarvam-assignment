@@ -34,6 +34,7 @@ from agent.memory import (
 )
 from agent.models import ConflictResult, ContextBundle, ExecutionEvent, Turn
 from agent.search import search
+from utils.cancellation import CancellationToken, OperationCancelledError
 from utils.failure_policy import POLICY
 from utils.prompt_registry import prompt_id
 from utils.token_counter import ContextBudget
@@ -105,15 +106,79 @@ class ResearchOrchestrator:
     async def aclose(self) -> None:
         pass
 
-    async def run(self, query: str, session_id: str) -> AsyncIterator[ExecutionEvent]:
+    async def run(
+        self,
+        query: str,
+        session_id: str,
+        cancel_token: CancellationToken | None = None,
+        turn_id: str | None = None,
+    ) -> AsyncIterator[ExecutionEvent]:
         """
-        Full research turn. Yields ExecutionEvents.
-        Saves turn to DB at the end.
+        Full research turn. Yields ExecutionEvents. Saves turn to DB at end.
+
+        On cancellation (cancel_token fires), persists a partial Turn marked
+        '[Cancelled by user]', appends 'CANCELLED' to state_trace, yields one
+        final 'error' event, and returns. Does not re-raise.
         """
+        if turn_id is None:
+            turn_id = str(uuid.uuid4())
+        state_holder: dict = {"state_trace": [], "now": datetime.now(timezone.utc).isoformat()}
+        try:
+            async for ev in self._run_body(query, session_id, cancel_token, turn_id, state_holder):
+                yield ev
+        except OperationCancelledError:
+            state_trace = state_holder.get("state_trace", [])
+            state_trace.append("CANCELLED")
+            try:
+                await self._persist_cancelled(turn_id, session_id, query, state_holder)
+            except Exception as e:
+                logger.warning("Persist cancelled turn failed: %s", e,
+                               extra={"component": "orchestrator", "turn_id": turn_id})
+            yield ExecutionEvent("error", "cancelled", data="Cancelled by user.")
+            return
+
+    async def _persist_cancelled(
+        self, turn_id: str, session_id: str, query: str, state: dict
+    ) -> None:
+        """Best-effort save of partial state when a turn is cancelled."""
+        bundle = state.get("final_context_bundle")
+        now = state.get("now") or datetime.now(timezone.utc).isoformat()
+        turn = Turn(
+            turn_id=turn_id,
+            session_id=session_id,
+            query=query,
+            created_at=now,
+            plan=str(state.get("queries") or []),
+            search_queries=state.get("queries") or [],
+            urls_opened=state.get("urls_opened") or [],
+            response="[Cancelled by user]",
+            context_xml_sent=bundle.xml if bundle else "",
+            doc_map=bundle.doc_map if bundle else {},
+            citation_integrity_score=0.0,
+            prompt_tokens=0,
+            completion_tokens=0,
+            latency_ms=state.get("latency_ms") or 0,
+            run_metadata_json={"cancelled": True},
+            state_trace=state.get("state_trace", []),
+        )
+        await save_turn(turn)
+
+    async def _run_body(
+        self,
+        query: str,
+        session_id: str,
+        cancel_token: CancellationToken | None,
+        turn_id: str,
+        state_holder: dict,
+    ) -> AsyncIterator[ExecutionEvent]:
         start_ms = time.time()
-        turn_id = str(uuid.uuid4())
-        now = datetime.now(timezone.utc).isoformat()
-        state_trace: list[str] = []
+
+        def _ck() -> None:
+            if cancel_token is not None:
+                cancel_token.check()
+
+        now = state_holder["now"]
+        state_trace: list[str] = state_holder["state_trace"]
         budget = ContextBudget()
         stage_ms = {"planning_ms": 0, "search_ms": 0, "fetch_ms": 0, "select_ms": 0, "probe_ms": 0, "synthesize_ms": 0}
         run_metadata = {
@@ -161,8 +226,9 @@ class ResearchOrchestrator:
             history_text = "\n\n".join(history_parts)
 
         # ── PLANNING ──────────────────────────────────────────────────────
+        _ck()
         state_trace.append("PLANNING")
-        yield ExecutionEvent("planning", STREAM_LABELS["planning"])
+        yield ExecutionEvent("planning", STREAM_LABELS["planning"], data={"turn_id": turn_id})
         t0 = time.time()
         try:
             from utils.provider_router import plan
@@ -227,11 +293,17 @@ class ResearchOrchestrator:
 
         for hop in range(_MAX_ITER):
             # ── SEARCHING ─────────────────────────────────────────────────────
+            _ck()
             state_trace.append("SEARCHING")
             yield ExecutionEvent("searching", STREAM_LABELS["searching"])
+            state_holder["queries"] = queries
+            state_holder["urls_opened"] = urls_opened
             t0 = time.time()
             try:
-                results = await asyncio.wait_for(search(typed_queries), timeout=POLICY.search_timeout_s)
+                results = await asyncio.wait_for(
+                    search(typed_queries, cancel_token=cancel_token),
+                    timeout=POLICY.search_timeout_s,
+                )
             except asyncio.TimeoutError:
                 logger.error("Search timed out", extra={"component": "orchestrator", "turn_id": turn_id})
                 run_metadata["timeout_hits"].append("search")
@@ -248,12 +320,16 @@ class ResearchOrchestrator:
             urls_opened.extend(new_urls)
 
             # ── FETCHING ──────────────────────────────────────────────────────
+            _ck()
             state_trace.append("FETCHING")
             yield ExecutionEvent("fetching", STREAM_LABELS["fetching"])
             extractor = Extractor()
             t0 = time.time()
             try:
-                extracted = await asyncio.wait_for(extractor.extract_all(results), timeout=POLICY.fetch_timeout_s)
+                extracted = await asyncio.wait_for(
+                    extractor.extract_all(results, cancel_token=cancel_token),
+                    timeout=POLICY.fetch_timeout_s,
+                )
             except asyncio.TimeoutError:
                 logger.error("Extraction timed out", extra={"component": "orchestrator", "turn_id": turn_id})
                 run_metadata["timeout_hits"].append("fetch")
@@ -275,6 +351,7 @@ class ResearchOrchestrator:
                     all_chunks.extend(chunk(r, text))
 
             # ── SELECTING ─────────────────────────────────────────────────────
+            _ck()
             state_trace.append("SELECTING")
             yield ExecutionEvent("selecting", STREAM_LABELS["selecting"])
             t0 = time.time()
@@ -312,6 +389,7 @@ class ResearchOrchestrator:
                 xml, doc_map = format_context_xml(selected)
 
                 # ── CONFLICT_CHECK (named pipeline stage) ─────────────────
+                _ck()
                 state_trace.append("CONFLICT_CHECK")
                 yield ExecutionEvent("probing", STREAM_LABELS["probing"])
                 t_probe = time.time()
@@ -353,8 +431,10 @@ class ResearchOrchestrator:
                 )
 
             final_context_bundle = context_bundle
+            state_holder["final_context_bundle"] = final_context_bundle
 
             # ── SYNTHESIZING ──────────────────────────────────────────────────
+            _ck()
             state_trace.append("SYNTHESIZING")
             yield ExecutionEvent("generating", STREAM_LABELS["generating"])
 
@@ -374,7 +454,10 @@ class ResearchOrchestrator:
                         history_text=history_text,
                         conflict_note=context_bundle.conflict_summary,
                         conflict_result=conflict_result,
+                        cancel_token=cancel_token,
                     ):
+                        if cancel_token is not None and cancel_token.is_set():
+                            break
                         full_answer += text_chunk
                         if pt:
                             hop_prompt_tokens = pt
@@ -388,6 +471,7 @@ class ResearchOrchestrator:
                     await _collect_stream()
                 await asyncio.wait_for(_runner(), timeout=POLICY.synth_timeout_s)
                 for chunk_text in yield_event:
+                    _ck()
                     yield ExecutionEvent("generating", STREAM_LABELS["generating"], data=chunk_text)
             except asyncio.TimeoutError:
                 logger.error("Synthesis timed out", extra={"component": "orchestrator", "turn_id": turn_id})
@@ -405,6 +489,7 @@ class ResearchOrchestrator:
             completion_tokens += hop_completion_tokens
 
             # ── VERIFYING CLAIMS (V2.4) ───────────────────────────────────────
+            _ck()
             snippet_lookup = {s.doc_id: s.text for s in (selected or [])}
             if snippet_lookup and context_bundle.doc_map:
                 state_trace.append("VERIFYING_CLAIMS")
