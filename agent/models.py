@@ -7,7 +7,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 from pydantic import BaseModel
 
@@ -135,6 +135,7 @@ class TypedQuery(BaseModel):
 class PlannerOutput(BaseModel):
     strategy: str
     queries: list[TypedQuery]
+    confidence: Literal["low", "medium", "high"] = "medium"  # V3.2 adaptive 2-hop gate
 
 
 class ClaimContradiction(BaseModel):

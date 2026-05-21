@@ -38,9 +38,11 @@ PLANNING_PROMPT_TEMPLATE = PROMPT_REGISTRY["planner"]["template"]
 
 
 def _fallback_planner(query: str) -> PlannerOutput:
+    # Fallback represents low signal from the planner: triggers V3.2 second-hop eligibility.
     return PlannerOutput(
         strategy="Direct retrieval fallback",
         queries=[TypedQuery(text=query, intent=QueryIntent.PRIMARY)],
+        confidence="low",
     )
 
 
@@ -77,7 +79,9 @@ def parse_planner_output(raw: str, query: str) -> PlannerOutput:
         return _fallback_planner(query)
 
     strategy = (data.get("strategy") or "").strip() or "Direct retrieval fallback"
-    return PlannerOutput(strategy=strategy, queries=typed[:4])
+    confidence_raw = (data.get("confidence") or "").strip().lower()
+    confidence = confidence_raw if confidence_raw in {"low", "medium", "high"} else "medium"
+    return PlannerOutput(strategy=strategy, queries=typed[:4], confidence=confidence)  # type: ignore[arg-type]
 
 
 @breaker("groq")
