@@ -6,7 +6,7 @@ colorTo: indigo
 sdk: docker
 app_port: 7860
 pinned: false
-short_description: Web-grounded research agent with conflict detection and citation audit
+short_description: Web-grounded research with citation audit and conflict probe
 ---
 
 # Deep Research Agent
