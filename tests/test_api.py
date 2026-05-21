@@ -27,7 +27,7 @@ def app_client(tmp_path_factory):
     import main as main_mod
     importlib.reload(main_mod)
 
-    asyncio.get_event_loop().run_until_complete(mem_mod.init_db())
+    asyncio.run(mem_mod.init_db())
 
     client = TestClient(main_mod.app)
     yield client, mem_mod, main_mod
@@ -191,8 +191,8 @@ async def _seed_eval(mem_mod, run_at: str, turn_id: str = None):
 
 def test_eval_runs_returns_aggregated_list(app_client):
     client, mem_mod, _ = app_client
-    asyncio.get_event_loop().run_until_complete(_seed_eval(mem_mod, "2025-05-21T10:00:00"))
-    asyncio.get_event_loop().run_until_complete(_seed_eval(mem_mod, "2025-05-21T11:00:00"))
+    asyncio.run(_seed_eval(mem_mod, "2025-05-21T10:00:00"))
+    asyncio.run(_seed_eval(mem_mod, "2025-05-21T11:00:00"))
     r = client.get("/eval/runs")
     assert r.status_code == 200
     data = r.json()
@@ -207,7 +207,7 @@ def test_eval_runs_returns_aggregated_list(app_client):
 def test_eval_run_summary_per_category_breakdown(app_client):
     client, mem_mod, _ = app_client
     run_at = "2025-05-21T12:00:00"
-    asyncio.get_event_loop().run_until_complete(_seed_eval(mem_mod, run_at))
+    asyncio.run(_seed_eval(mem_mod, run_at))
     r = client.get(f"/eval/runs/{run_at}/summary")
     assert r.status_code == 200
     data = r.json()
@@ -253,7 +253,7 @@ def test_eval_question_detail_joins_claim_audit_and_probes(app_client):
             )
             await db.commit()
 
-    asyncio.get_event_loop().run_until_complete(seed())
+    asyncio.run(seed())
     r = client.get(f"/eval/runs/{run_at}/questions/q1")
     assert r.status_code == 200
     data = r.json()
@@ -297,7 +297,7 @@ def test_sessions_turn_detail_joins_claim_audit_and_probes(app_client):
             )
             await db.commit()
 
-    asyncio.get_event_loop().run_until_complete(seed())
+    asyncio.run(seed())
     r = client.get(f"/sessions/sess-detail/turns/{turn_id}")
     assert r.status_code == 200
     data = r.json()
