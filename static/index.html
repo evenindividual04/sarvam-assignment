@@ -1,75 +1,93 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Deep Research Agent</title>
-    <!-- Marked.js for Markdown parsing -->
-    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
-    <link rel="stylesheet" href="style.css">
-    <!-- Google Fonts -->
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Deep Research Agent — API</title>
+  <link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=JetBrains+Mono:wght@400;500&family=Geist:wght@400;500&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg: #0a0a0c;
+      --surface: #111114;
+      --border: rgba(255, 255, 255, 0.06);
+      --border-strong: rgba(255, 255, 255, 0.12);
+      --fg: #e7e7ea;
+      --muted: #9b9ba3;
+      --subtle: #6b6b73;
+      --accent: #0d9488;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body { background: var(--bg); color: var(--fg); font-family: 'Geist', system-ui, sans-serif; min-height: 100vh; -webkit-font-smoothing: antialiased; }
+    body {
+      background-image: radial-gradient(ellipse at top, rgba(255,255,255,0.025), transparent 60%);
+      display: flex; align-items: center; justify-content: center; padding: 2rem;
+    }
+    .card {
+      max-width: 640px; width: 100%;
+      border: 1px solid var(--border);
+      border-radius: 8px; padding: 3rem 2.5rem;
+      background: var(--surface);
+    }
+    .label {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 11px; text-transform: uppercase; letter-spacing: 0.14em;
+      color: var(--muted); margin-bottom: 1.5rem;
+    }
+    h1 {
+      font-family: 'Instrument Serif', serif;
+      font-size: 3rem; font-style: italic; font-weight: 400;
+      line-height: 1.05; letter-spacing: -0.02em; margin-bottom: 1.25rem;
+    }
+    h1 .accent { color: var(--accent); }
+    p { color: var(--muted); font-size: 15px; line-height: 1.6; margin-bottom: 2rem; }
+    .divider { height: 1px; background: var(--border); margin: 2rem 0; }
+    .endpoints {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 13px; color: var(--muted);
+    }
+    .endpoints .row { padding: 0.5rem 0; border-bottom: 1px solid var(--border); display: flex; gap: 1rem; }
+    .endpoints .row:last-child { border-bottom: 0; }
+    .endpoints .method { color: var(--accent); width: 56px; flex-shrink: 0; }
+    .endpoints .path { color: var(--fg); }
+    .cta {
+      display: inline-flex; align-items: center; gap: 0.5rem;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 12px; text-transform: uppercase; letter-spacing: 0.14em;
+      color: var(--fg);
+      background: var(--accent); color: #042f2e;
+      padding: 0.75rem 1.25rem; border-radius: 6px;
+      text-decoration: none; font-weight: 500;
+      transition: opacity 150ms;
+    }
+    .cta:hover { opacity: 0.85; }
+    .footer {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 10px; text-transform: uppercase; letter-spacing: 0.18em;
+      color: var(--subtle); margin-top: 2.5rem; text-align: right;
+    }
+  </style>
 </head>
 <body>
-    <div class="app-container">
-        <!-- Sidebar -->
-        <aside class="sidebar">
-            <div class="sidebar-header">
-                <h2>Deep Research</h2>
-                <button id="new-chat-btn" class="primary-btn">+ New Chat</button>
-            </div>
-            <div class="history-list" id="history-list">
-                <!-- Session history items injected here -->
-            </div>
-        </aside>
-
-        <!-- Main Chat Area -->
-        <main class="chat-main">
-            <div class="chat-header">
-                <span id="current-session-id">Session: Auto</span>
-            </div>
-            
-            <div class="chat-messages" id="chat-messages">
-                <!-- Welcome Message -->
-                <div class="message assistant">
-                    <div class="message-content">
-                        Hi, I'm the Deep Research Agent. Ask me a complex question, and I will search the web, compare sources, and synthesize a cited answer for you.
-                    </div>
-                </div>
-            </div>
-
-            <div class="chat-input-container">
-                <form id="chat-form">
-                    <input type="text" id="query-input" placeholder="Ask anything... (e.g. Compare LPU and GPU architectures)" required autocomplete="off">
-                    <button type="submit" id="send-btn">
-                        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 2L11 13M22 2l-7 20-4-9-9-4 20-7z"/></svg>
-                    </button>
-                </form>
-            </div>
-        </main>
+  <div class="card">
+    <div class="label">Deep Research Agent — API</div>
+    <h1>This is the <span class="accent">backend</span>.</h1>
+    <p>You've reached the FastAPI service. The user interface lives elsewhere.</p>
+    <a class="cta" href="https://frontend-a519j5gkh-evenindividual04s-projects.vercel.app" target="_blank" rel="noopener">
+      Open the app →
+    </a>
+    <div class="divider"></div>
+    <div class="endpoints">
+      <div class="row"><span class="method">POST</span><span class="path">/research</span></div>
+      <div class="row"><span class="method">POST</span><span class="path">/research/cancel/{turn_id}</span></div>
+      <div class="row"><span class="method">GET</span><span class="path">/sessions</span></div>
+      <div class="row"><span class="method">GET</span><span class="path">/sessions/{id}/history</span></div>
+      <div class="row"><span class="method">GET</span><span class="path">/eval/runs</span></div>
+      <div class="row"><span class="method">GET</span><span class="path">/eval/runs/{run_at}/summary</span></div>
+      <div class="row"><span class="method">GET</span><span class="path">/health</span></div>
     </div>
-
-    <!-- Template for Trace Inspector -->
-    <template id="trace-inspector-template">
-        <div class="trace-inspector glass">
-            <details>
-                <summary>Research Progress</summary>
-                <div class="trace-content">
-                    <ul class="trace-timeline">
-                        <!-- Steps injected here -->
-                    </ul>
-                    <div class="trace-stats">
-                        <div class="stat"><span class="stat-label">Prompt Tokens</span> <span class="pt">0</span></div>
-                        <div class="stat"><span class="stat-label">Completion Tokens</span> <span class="ct">0</span></div>
-                    </div>
-                    <div class="sources-grid">
-                        <!-- Source cards injected here -->
-                    </div>
-                </div>
-            </details>
-        </div>
-    </template>
-
-    <script src="app.js"></script>
+    <div class="footer">Built for Sarvam — 2026</div>
+  </div>
 </body>
 </html>
+</content>
+</invoke>

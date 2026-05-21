@@ -14,6 +14,7 @@ from pydantic import BaseModel
 import aiosqlite
 
 from agent import eval_queries
+from agent import memory as _memory
 from agent.memory import init_db, DB_PATH
 from agent.orchestrator import ResearchOrchestrator
 from utils.cancellation import get_registry
@@ -31,6 +32,22 @@ except Exception as e:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await init_db()
+    # Surface the retrieval mode early so deployers don't silently end up in
+    # BM25-only mode after enabling HYBRID_RETRIEVAL=1.
+    hybrid_flag = os.getenv("HYBRID_RETRIEVAL", "0").strip() == "1"
+    if hybrid_flag and not _memory._VEC_AVAILABLE:
+        logger.warning(
+            "HYBRID_RETRIEVAL=1 was set but sqlite-vec failed to load on this "
+            "Python build — falling back to BM25-only. See the memory module "
+            "warning above for the root cause (typically a Python sqlite3 "
+            "compiled without --enable-loadable-sqlite-extensions; the "
+            "project's Linux Docker image avoids this)."
+        )
+    else:
+        logger.info(
+            "Retrieval mode: %s",
+            "HYBRID (BM25 + sqlite-vec RRF)" if (hybrid_flag and _memory._VEC_AVAILABLE) else "BM25-only",
+        )
     # Cancellation registry is a module-level singleton — nothing else to do.
     yield
 

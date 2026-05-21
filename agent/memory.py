@@ -222,19 +222,62 @@ CREATE TABLE IF NOT EXISTS eval_runs (
 
 
 async def _try_load_sqlite_vec(db: aiosqlite.Connection) -> bool:
-    """Best-effort load of the sqlite-vec extension. Returns True on success."""
+    """Best-effort load of the sqlite-vec extension. Returns True on success.
+
+    Two failure modes worth distinguishing:
+      (a) `sqlite_vec` Python package not installed → ImportError.
+      (b) Python's stdlib `sqlite3` was compiled without
+          `--enable-loadable-sqlite-extensions` → `enable_load_extension`
+          raises AttributeError. The package imports fine, but the load fails.
+
+    This is *not* OS-specific. Builds that work include conda-forge/miniforge,
+    modern Homebrew `python@3.x`, pyenv (when built with
+    `PYTHON_CONFIGURE_OPTS=--enable-loadable-sqlite-extensions`), recent
+    python.org installers, and the `python:3.12-slim` Docker image. The one
+    common build that fails is Apple's bundled `/usr/bin/python3` on macOS.
+    """
     try:
         import sqlite_vec  # lazy
+    except ImportError as exc:
+        logger.warning(
+            "sqlite-vec package not installed; hybrid retrieval disabled: %s",
+            exc, extra={"component": "memory"},
+        )
+        return False
+    try:
         await db.enable_load_extension(True)
         await db.load_extension(sqlite_vec.loadable_path())
         await db.enable_load_extension(False)
         return True
-    except Exception as exc:
+    except AttributeError as exc:
         logger.warning(
-            "sqlite-vec extension unavailable; hybrid retrieval disabled: %s",
+            "This Python's sqlite3 was compiled without "
+            "--enable-loadable-sqlite-extensions; hybrid retrieval disabled. "
+            "Switch to a Python build that has it (conda-forge/miniforge, "
+            "modern Homebrew python@3.x, pyenv with the right configure flag, "
+            "or the project's python:3.12-slim Docker image). Apple's "
+            "/usr/bin/python3 on macOS is the typical offender. (%s)",
             exc, extra={"component": "memory"},
         )
         return False
+    except Exception as exc:
+        logger.warning(
+            "sqlite-vec extension load failed; hybrid retrieval disabled: %s",
+            exc, extra={"component": "memory"},
+        )
+        return False
+
+
+async def sqlite_vec_capability() -> bool:
+    """Probe (without persisting) whether sqlite-vec can actually load on this
+    Python build. Returns True only if both the package is installed AND
+    `enable_load_extension` is available AND the extension loads cleanly.
+    """
+    db = await aiosqlite.connect(":memory:")
+    try:
+        return await _try_load_sqlite_vec(db)
+    finally:
+        await db.close()
 
 
 async def init_db() -> None:

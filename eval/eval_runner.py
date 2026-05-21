@@ -565,14 +565,20 @@ async def run_ablation() -> None:
     os.environ["HYBRID_RETRIEVAL"] = "0"
     await run_eval(ablation_id=ablation_id)
 
-    # Leg 2 — Hybrid.
-    try:
-        import sqlite_vec  # noqa: F401
-    except Exception:
+    # Leg 2 — Hybrid. Probe the *real* capability (not just package install):
+    # some Python builds (notably Apple's /usr/bin/python3) import
+    # `sqlite_vec` fine but lack `enable_load_extension`, so the extension
+    # never loads and the hybrid leg silently degrades to BM25.
+    from agent.memory import sqlite_vec_capability
+    if not await sqlite_vec_capability():
         print(
-            "\nWARNING: sqlite-vec extension not installed. Hybrid leg will "
-            "silently degrade to BM25 and the ablation delta will be ~0. "
-            "Run on Linux with sqlite-vec available to see real deltas.\n"
+            "\nWARNING: sqlite-vec cannot load on this Python build. The "
+            "hybrid leg will silently degrade to BM25 and the ablation delta "
+            "will be ~0. Use a Python compiled with "
+            "--enable-loadable-sqlite-extensions: conda-forge/miniforge, "
+            "modern Homebrew python@3.x, pyenv with that configure flag, or "
+            "the project's python:3.12-slim Docker image. macOS works fine "
+            "on those — only Apple's /usr/bin/python3 is the gotcha.\n"
         )
     os.environ["HYBRID_RETRIEVAL"] = "1"
     await run_eval(ablation_id=ablation_id)
