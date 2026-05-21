@@ -11,8 +11,9 @@ from typing import Optional
 
 import aiosqlite
 
-from agent.models import ContextSnippet
-from agent.models import Turn
+from datetime import datetime, timezone
+
+from agent.models import ConflictResult, ContextSnippet, Turn
 
 logger = logging.getLogger(__name__)
 
@@ -89,6 +90,24 @@ CREATE VIRTUAL TABLE IF NOT EXISTS fts_content USING fts5(
 );
 """
 
+CREATE_CONTRADICTION_PROBES = """
+CREATE TABLE IF NOT EXISTS contradiction_probes (
+    id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+    turn_id               TEXT NOT NULL REFERENCES turns(turn_id),
+    has_conflict          INTEGER NOT NULL,
+    conflict_summary      TEXT,
+    contradictions_json   TEXT,
+    probe_skipped_reason  TEXT,
+    probe_ms              INTEGER,
+    prompt_id             TEXT,
+    created_at            TEXT NOT NULL
+);
+"""
+
+CREATE_CONTRADICTION_PROBES_INDEX = """
+CREATE INDEX IF NOT EXISTS idx_probes_turn ON contradiction_probes(turn_id);
+"""
+
 CREATE_EVAL_RUNS = """
 CREATE TABLE IF NOT EXISTS eval_runs (
     run_id                   TEXT PRIMARY KEY,
@@ -119,6 +138,8 @@ async def init_db() -> None:
         await db.execute(CREATE_TURN_CONTEXT)
         await db.execute(CREATE_SESSION_SUMMARIES)
         await db.execute(CREATE_FTS)
+        await db.execute(CREATE_CONTRADICTION_PROBES)
+        await db.execute(CREATE_CONTRADICTION_PROBES_INDEX)
         await db.execute(CREATE_EVAL_RUNS)
         try:
             await db.execute("ALTER TABLE eval_runs ADD COLUMN context_precision_score REAL")
@@ -214,6 +235,37 @@ async def save_turn_context(turn_id: str, snippets: list[ContextSnippet]) -> Non
                 )
                 for s in snippets
             ],
+        )
+        await db.commit()
+
+
+async def save_contradiction_probe(
+    turn_id: str,
+    result: ConflictResult,
+    probe_ms: int,
+    prompt_id: str,
+) -> None:
+    """Persist one row per turn capturing the probe outcome (including skips)."""
+    contradictions_json = json.dumps([c.model_dump() for c in result.contradictions])
+    now = datetime.now(timezone.utc).isoformat()
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """
+            INSERT INTO contradiction_probes
+            (turn_id, has_conflict, conflict_summary, contradictions_json,
+             probe_skipped_reason, probe_ms, prompt_id, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                turn_id,
+                1 if result.has_conflict else 0,
+                result.conflict_summary,
+                contradictions_json,
+                result.probe_skipped_reason,
+                probe_ms,
+                prompt_id,
+                now,
+            ),
         )
         await db.commit()
 

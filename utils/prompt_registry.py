@@ -12,6 +12,43 @@ PROMPT_REGISTRY = {
     "conflict_detection": {
         "id": "conflict_v2",
     },
+    "conflict_v3": {
+        "id": "conflict_v3",
+        "template": """You are auditing retrieved sources for CROSS-SOURCE CONTRADICTIONS on the user's research question.
+
+Research question: \"{query}\"
+
+Numbered sources (each tagged with its doc_id):
+{sources}
+
+Distinguish two cases carefully:
+- CONTRADICTION: two or more sources make mutually exclusive claims about the SAME entity in the SAME time period (e.g., one says repo rate is 6.50% in May 2026, another says 5.50% in May 2026).
+- TEMPORAL EVOLUTION: sources describe the SAME fact at DIFFERENT points in time (e.g., one says the rate WAS 6.50% in 2024, another says it IS 5.50% in 2026). This is NOT a contradiction — set is_temporal_evolution=true.
+
+Rules:
+- Only flag a contradiction if positions are factually incompatible for the same time window.
+- Each contradiction must cite at least one doc_id on each side.
+- confidence is your 0-1 calibration that this is a real contradiction.
+- If no real contradictions, return has_conflict=false and contradictions=[].
+- Output ONLY valid JSON. No preamble, no markdown.
+
+Schema:
+{{
+  \"has_conflict\": bool,
+  \"conflict_summary\": \"one neutral sentence or null\",
+  \"contradictions\": [
+    {{
+      \"claim\": \"the disputed fact\",
+      \"doc_ids_a\": [\"doc_1\"],
+      \"position_a\": \"...\",
+      \"doc_ids_b\": [\"doc_3\"],
+      \"position_b\": \"...\",
+      \"is_temporal_evolution\": false,
+      \"confidence\": 0.0
+    }}
+  ]
+}}""",
+    },
     "judge": {
         "id": "judge_v1",
     },

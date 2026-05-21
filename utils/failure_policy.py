@@ -14,6 +14,7 @@ class FailurePolicy:
     synth_timeout_s: float = float(os.getenv("FAILURE_POLICY_SYNTH_TIMEOUT_S", "90"))
     max_total_turn_time_s: float = float(os.getenv("FAILURE_POLICY_MAX_TOTAL_TURN_TIME_S", "240"))
     max_retries_per_provider: int = int(os.getenv("FAILURE_POLICY_MAX_RETRIES_PER_PROVIDER", "3"))
+    probe_timeout_s: float = float(os.getenv("FAILURE_POLICY_PROBE_TIMEOUT_S", "6"))
 
 
 POLICY = FailurePolicy()

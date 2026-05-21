@@ -4,7 +4,7 @@ Context pipeline:
   FlashRank cross-encoder rerank → top 10
   3-factor scoring (0.6 relevance + 0.2 recency + 0.2 diversity) → final selection
   format_context_xml() → (xml_string, doc_map)
-  detect_conflicts() → ConflictResult via Groq
+  probe_contradictions() → typed ConflictResult via Groq
 """
 from __future__ import annotations
 
@@ -23,8 +23,13 @@ try:
 except ImportError:
     _FLASHRANK_AVAILABLE = False
 
-from agent.models import ContextSnippet, ConflictResult, SearchResult
+from agent.models import ClaimContradiction, ContextSnippet, ConflictResult, SearchResult
+from utils.failure_policy import POLICY
+from utils.prompt_registry import PROMPT_REGISTRY
 from utils.token_counter import count_tokens
+
+import asyncio
+import pydantic
 
 logger = logging.getLogger(__name__)
 
@@ -318,39 +323,53 @@ def format_context_xml(
     return "\n".join(parts), doc_map
 
 
-# ── Conflict detection ─────────────────────────────────────────────────────
+# ── Contradiction probe ────────────────────────────────────────────────────
 
-async def detect_conflicts(chunks: list[ContextSnippet], query: str) -> ConflictResult:
-    """Cheap Groq call (~150 tokens) to detect contradictory factual claims."""
+async def probe_contradictions(chunks: list[ContextSnippet], query: str) -> ConflictResult:
+    """
+    First-class pipeline stage: Groq call returning typed ClaimContradiction entries.
+    Distinguishes real contradictions from temporal evolution at the prompt level.
+    Never raises — every failure mode maps to a probe_skipped_reason.
+    """
     if len(chunks) < 2:
-        return ConflictResult(has_conflict=False)
+        return ConflictResult(has_conflict=False, probe_skipped_reason="lt_2_chunks")
 
-    preview = "\n\n".join([
-        f"[Source {i+1} from {c.domain}]: {c.text[:300]}"
-        for i, c in enumerate(chunks[:6])
-    ])
-    prompt = f"""Question: {query}
-Sources:
-{preview}
-
-Do any sources make CONTRADICTORY factual claims about the same entity?
-Look for: different numbers, dates, opposite conclusions.
-
-Respond ONLY in JSON: {{"has_conflict": bool, "conflict_summary": "one sentence or null"}}"""
+    sources = "\n\n".join(
+        f"[{c.doc_id or f'doc_{i+1}'} | {c.domain}]: {c.text[:500]}"
+        for i, c in enumerate(chunks[:8])
+    )
+    prompt = PROMPT_REGISTRY["conflict_v3"]["template"].format(query=query, sources=sources)
 
     try:
         from utils.provider_router import call_groq
-        raw = await call_groq(prompt, max_tokens=100)
-        # Parse JSON from response
-        start = raw.find("{")
-        end = raw.rfind("}") + 1
-        if start >= 0 and end > start:
-            data = json.loads(raw[start:end])
-            return ConflictResult(
-                has_conflict=bool(data.get("has_conflict", False)),
-                conflict_summary=data.get("conflict_summary"),
-            )
+        raw = await asyncio.wait_for(
+            call_groq(prompt, max_tokens=600),
+            timeout=POLICY.probe_timeout_s,
+        )
+    except asyncio.TimeoutError:
+        logger.warning("Probe timeout", extra={"component": "context_engine"})
+        return ConflictResult(has_conflict=False, probe_skipped_reason="timeout")
     except Exception as e:
-        logger.warning("Conflict detection failed: %s", e, extra={"component": "context_engine"})
+        logger.warning("Probe LLM call failed: %s", e, extra={"component": "context_engine"})
+        return ConflictResult(has_conflict=False, probe_skipped_reason="parse_fail")
 
-    return ConflictResult(has_conflict=False)
+    start = raw.find("{")
+    end = raw.rfind("}") + 1
+    if start < 0 or end <= start:
+        return ConflictResult(has_conflict=False, probe_skipped_reason="parse_fail")
+    try:
+        data = json.loads(raw[start:end])
+        result = ConflictResult(
+            has_conflict=bool(data.get("has_conflict", False)),
+            conflict_summary=data.get("conflict_summary"),
+            contradictions=[ClaimContradiction(**c) for c in (data.get("contradictions") or [])],
+        )
+        return result
+    except (json.JSONDecodeError, pydantic.ValidationError, TypeError, ValueError) as e:
+        logger.warning("Probe parse failed: %s", e, extra={"component": "context_engine"})
+        return ConflictResult(has_conflict=False, probe_skipped_reason="parse_fail")
+
+
+async def detect_conflicts(chunks: list[ContextSnippet], query: str) -> ConflictResult:
+    """Backward-compat shim. Prefer probe_contradictions for new code."""
+    return await probe_contradictions(chunks, query)

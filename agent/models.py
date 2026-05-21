@@ -131,9 +131,21 @@ class PlannerOutput(BaseModel):
     queries: list[TypedQuery]
 
 
+class ClaimContradiction(BaseModel):
+    claim: str
+    doc_ids_a: list[str]
+    position_a: str
+    doc_ids_b: list[str]
+    position_b: str
+    is_temporal_evolution: bool
+    confidence: float
+
+
 class ConflictResult(BaseModel):
     has_conflict: bool
     conflict_summary: Optional[str] = None
+    contradictions: list[ClaimContradiction] = []
+    probe_skipped_reason: Optional[str] = None
 
 
 class JudgeScore(BaseModel):
