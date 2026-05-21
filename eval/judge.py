@@ -265,23 +265,187 @@ async def judge_claim_precision(turn_id: str) -> ClaimPrecisionResult:
 
 
 def classify_failure(r: dict) -> str:
+    """Failure taxonomy. HALLUCINATION is split into two sub-buckets:
+    - HALLUCINATION_FACT: low faithfulness AND low claim precision — the
+      answer asserts facts not in any source.
+    - HALLUCINATION_ATTRIBUTION: low claim precision but high citation
+      integrity — citations resolve to fetched URLs, but the claim doesn't
+      actually appear in the cited doc.
+    """
+    faith = r.get("faithfulness_score", 1.0)
+    cite = r.get("citation_integrity_score", 1.0)
+    rel = r.get("answer_relevance_score", 1.0)
+    ctx = r.get("context_precision_score", 1.0)
     conflict_score = r.get("conflict_adherence_score")
     coherence_score = r.get("session_coherence_score")
     claim_precision = r.get("claim_precision_score")
-    if r.get("faithfulness_score", 1.0) < 0.7 and r.get("citation_integrity_score", 1.0) < 0.8:
-        return "HALLUCINATION"
-    elif (
-        claim_precision is not None
-        and claim_precision < 0.5
-        and r.get("faithfulness_score", 1.0) < 0.7
-    ):
-        return "HALLUCINATION"
-    elif r.get("faithfulness_score", 1.0) < 0.7:
+
+    if faith < 0.7 and claim_precision is not None and claim_precision < 0.5:
+        return "HALLUCINATION_FACT"
+    if claim_precision is not None and claim_precision < 0.5 and cite >= 0.8:
+        return "HALLUCINATION_ATTRIBUTION"
+    if faith < 0.7 and cite < 0.8:
+        # legacy combined bucket — kept for backward compatibility when we
+        # can't disambiguate (e.g. claim_precision unavailable).
+        return "HALLUCINATION_FACT"
+    if faith < 0.7:
         return "KNOWLEDGE_BLEED"
-    elif r.get("answer_relevance_score", 1.0) < 0.5 or r.get("context_precision_score", 1.0) < 0.5:
+    if rel < 0.5 or ctx < 0.5:
         return "RETRIEVAL_FAILURE"
-    elif conflict_score is not None and conflict_score < 0.5:
+    if conflict_score is not None and conflict_score < 0.5:
         return "CONFLICT_MISS"
-    elif coherence_score is not None and coherence_score < 0.5:
+    if coherence_score is not None and coherence_score < 0.5:
         return "COHERENCE_FAIL"
     return "PASS"
+
+
+# ── Factual accuracy (deterministic, gold-truth-based) ──────────────────────
+
+
+def judge_factual_accuracy(
+    answer: str,
+    gold_answer: Optional[str],
+    gold_aliases: Optional[list[str]] = None,
+    gold_entities: Optional[list[str]] = None,
+) -> tuple[Optional[float], str]:
+    """Deterministic factual-accuracy judge. Returns (score, reasoning).
+
+    Score is None when no gold answer is configured (skip).
+    Otherwise: max of
+      - substring match against gold_answer or any alias (1.0 / 0.0)
+      - entity intersection ratio over gold_entities
+    """
+    if gold_answer is None:
+        return (None, "skipped: no gold answer configured")
+
+    answer_lower = (answer or "").lower()
+    candidates: list[str] = [gold_answer]
+    if gold_aliases:
+        candidates.extend(gold_aliases)
+
+    matched = next(
+        (c for c in candidates if c and c.lower() in answer_lower),
+        None,
+    )
+    substring_score = 1.0 if matched else 0.0
+
+    entity_ratio = 0.0
+    entity_detail = ""
+    if gold_entities:
+        from agent.claim_verifier import ENTITY_RE
+
+        answer_entities = {e.strip() for e in ENTITY_RE.findall(answer or "") if e.strip()}
+        gold_set = {e.strip() for e in gold_entities if e.strip()}
+        if gold_set:
+            # Treat a gold entity as matched if any extracted entity contains
+            # (or equals) the gold token — e.g. gold="Modi" matches answer
+            # entity "PM Modi". This is intentionally loose; entities are an
+            # auxiliary signal that backstops the canonical substring check.
+            hits = {
+                g for g in gold_set
+                if any(g.lower() in ae.lower() for ae in answer_entities)
+            }
+            entity_ratio = len(hits) / len(gold_set)
+            entity_detail = (
+                f"; entities matched {len(hits)}/{len(gold_set)} ({sorted(hits)})"
+                if hits else
+                f"; no entity match (expected {sorted(gold_set)})"
+            )
+
+    final = max(substring_score, entity_ratio)
+    if matched:
+        reason = f"Substring match on '{matched}'{entity_detail}"
+    elif entity_ratio > 0:
+        reason = f"No substring match; entity ratio {entity_ratio:.2f}{entity_detail}"
+    else:
+        reason = f"No match for any of: {candidates}{entity_detail}"
+    return (final, reason)
+
+
+# ── Cross-language consistency (post-run aggregate) ─────────────────────────
+
+# Devanagari word tokenizer — pure regex, no external libs.
+_DEVANAGARI_RE = re.compile(r"[ऀ-ॿ]+")
+
+
+def _extract_entities_for_consistency(answer: str) -> set[str]:
+    """Language-aware entity extraction. Latin-script entities via ENTITY_RE
+    (proper nouns / numbers); Devanagari word tokens added when present.
+    Lowercased + stripped for set membership."""
+    from agent.claim_verifier import ENTITY_RE
+
+    out: set[str] = {e.strip().lower() for e in ENTITY_RE.findall(answer or "") if e.strip()}
+    for token in _DEVANAGARI_RE.findall(answer or ""):
+        token = token.strip()
+        if len(token) >= 2:
+            out.add(token.lower())
+    return out
+
+
+def jaccard(a: set[str], b: set[str]) -> float:
+    if not a and not b:
+        return 1.0
+    union = a | b
+    if not union:
+        return 1.0
+    return len(a & b) / len(union)
+
+
+async def judge_cross_language_consistency(run_at: str) -> list[dict]:
+    """For every concept_id with both en and hi answers in `run_at`,
+    compute Jaccard over their entity sets and flag pairs <0.6.
+    Returns one dict per concept_id."""
+    import json as _json
+    from pathlib import Path
+
+    import aiosqlite
+    from agent.memory import DB_PATH
+
+    # Load dataset to map question_id -> concept_id.
+    dataset_path = Path(__file__).parent / "dataset.json"
+    with open(dataset_path) as fh:
+        dataset = _json.load(fh)
+    by_qid = {q["id"]: q for q in dataset}
+    pairs: dict[str, dict[str, str]] = {}  # concept_id -> {"en": qid, "hi": qid}
+    for q in dataset:
+        cid = q.get("concept_id")
+        if not cid:
+            continue
+        pairs.setdefault(cid, {})[q.get("language", "en")] = q["id"]
+
+    paired_concepts = [
+        (cid, langs["en"], langs["hi"])
+        for cid, langs in pairs.items()
+        if "en" in langs and "hi" in langs
+    ]
+    if not paired_concepts:
+        return []
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        rows = await db.execute_fetchall(
+            "SELECT question_id, agent_answer FROM eval_runs WHERE run_at = ?",
+            (run_at,),
+        )
+    answers = {r["question_id"]: (r["agent_answer"] or "") for r in rows}
+
+    results: list[dict] = []
+    for cid, en_qid, hi_qid in paired_concepts:
+        if en_qid not in answers or hi_qid not in answers:
+            continue
+        en_ents = _extract_entities_for_consistency(answers[en_qid])
+        hi_ents = _extract_entities_for_consistency(answers[hi_qid])
+        score = jaccard(en_ents, hi_ents)
+        flagged = score < 0.6
+        reason = (
+            f"|en|={len(en_ents)} |hi|={len(hi_ents)} |∩|={len(en_ents & hi_ents)} |∪|={len(en_ents | hi_ents)}"
+        )
+        results.append({
+            "concept_id": cid,
+            "en_question_id": en_qid,
+            "hi_question_id": hi_qid,
+            "jaccard_score": score,
+            "flagged_inconsistent": flagged,
+            "reasoning": reason,
+        })
+    return results

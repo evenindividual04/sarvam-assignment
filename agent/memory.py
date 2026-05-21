@@ -164,6 +164,41 @@ CREATE VIRTUAL TABLE IF NOT EXISTS chunk_embeddings USING vec0(
 _VEC_AVAILABLE: bool = False
 
 
+CREATE_CROSS_LANGUAGE_CONSISTENCY = """
+CREATE TABLE IF NOT EXISTS cross_language_consistency (
+    run_at               TEXT NOT NULL,
+    concept_id           TEXT NOT NULL,
+    en_question_id       TEXT NOT NULL,
+    hi_question_id       TEXT NOT NULL,
+    jaccard_score        REAL NOT NULL,
+    flagged_inconsistent INTEGER NOT NULL,
+    reasoning            TEXT,
+    PRIMARY KEY (run_at, concept_id)
+);
+"""
+
+CREATE_EVAL_RUN_SUMMARY = """
+CREATE TABLE IF NOT EXISTS eval_run_summary (
+    run_at                       TEXT PRIMARY KEY,
+    ablation_id                  TEXT,
+    n_questions                  INTEGER NOT NULL,
+    pass_rate                    REAL NOT NULL,
+    mean_faithfulness            REAL,
+    mean_relevance               REAL,
+    mean_context_precision       REAL,
+    mean_citation_integrity      REAL,
+    mean_claim_precision         REAL,
+    mean_factual_accuracy        REAL,
+    p50_latency_ms               INTEGER,
+    p95_latency_ms               INTEGER,
+    total_cost_usd               REAL DEFAULT 0.0,
+    retrieval_mode               TEXT,
+    calibration_correlation      REAL,
+    created_at                   TEXT NOT NULL
+);
+"""
+
+
 CREATE_EVAL_RUNS = """
 CREATE TABLE IF NOT EXISTS eval_runs (
     run_id                   TEXT PRIMARY KEY,
@@ -245,11 +280,16 @@ async def init_db() -> None:
             ("eval_turn_id", "ALTER TABLE eval_runs ADD COLUMN turn_id TEXT"),
             ("eval_language", "ALTER TABLE eval_runs ADD COLUMN language TEXT DEFAULT 'en'"),
             ("eval_retrieval_mode", "ALTER TABLE eval_runs ADD COLUMN retrieval_mode TEXT DEFAULT 'bm25'"),
+            ("eval_factual_accuracy", "ALTER TABLE eval_runs ADD COLUMN factual_accuracy_score REAL"),
+            ("eval_ablation_id", "ALTER TABLE eval_runs ADD COLUMN ablation_id TEXT"),
+            ("eval_calibration_correlation", "ALTER TABLE eval_runs ADD COLUMN calibration_correlation REAL"),
         ]:
             try:
                 await db.execute(ddl)
             except aiosqlite.OperationalError:
                 pass
+        await db.execute(CREATE_CROSS_LANGUAGE_CONSISTENCY)
+        await db.execute(CREATE_EVAL_RUN_SUMMARY)
         await db.commit()
     logger.info("DB initialised", extra={"component": "memory"})
 
@@ -573,6 +613,69 @@ async def delete_chunk_embeddings(chunk_ids: list[str]) -> None:
                        extra={"component": "memory"})
     finally:
         await db.close()
+
+
+async def save_cross_language_consistency(run_at: str, rows: list[dict]) -> None:
+    """Persist per-concept cross-language consistency rows for a given run."""
+    if not rows:
+        return
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.executemany(
+            """
+            INSERT OR REPLACE INTO cross_language_consistency
+            (run_at, concept_id, en_question_id, hi_question_id,
+             jaccard_score, flagged_inconsistent, reasoning)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    run_at,
+                    r["concept_id"],
+                    r["en_question_id"],
+                    r["hi_question_id"],
+                    float(r["jaccard_score"]),
+                    1 if r["flagged_inconsistent"] else 0,
+                    r.get("reasoning", ""),
+                )
+                for r in rows
+            ],
+        )
+        await db.commit()
+
+
+async def save_eval_run_summary(summary: dict) -> None:
+    """Persist a single per-run aggregate row."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """
+            INSERT OR REPLACE INTO eval_run_summary
+            (run_at, ablation_id, n_questions, pass_rate,
+             mean_faithfulness, mean_relevance, mean_context_precision,
+             mean_citation_integrity, mean_claim_precision, mean_factual_accuracy,
+             p50_latency_ms, p95_latency_ms, total_cost_usd,
+             retrieval_mode, calibration_correlation, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                summary["run_at"],
+                summary.get("ablation_id"),
+                summary["n_questions"],
+                summary["pass_rate"],
+                summary.get("mean_faithfulness"),
+                summary.get("mean_relevance"),
+                summary.get("mean_context_precision"),
+                summary.get("mean_citation_integrity"),
+                summary.get("mean_claim_precision"),
+                summary.get("mean_factual_accuracy"),
+                summary.get("p50_latency_ms"),
+                summary.get("p95_latency_ms"),
+                summary.get("total_cost_usd", 0.0),
+                summary.get("retrieval_mode"),
+                summary.get("calibration_correlation"),
+                summary["created_at"],
+            ),
+        )
+        await db.commit()
 
 
 async def session_exists(session_id: str) -> bool:

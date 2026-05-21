@@ -12,6 +12,7 @@ import { CodeBlock } from "./code-block";
 import { LatencyBar } from "./latency-bar";
 import { MetricBar } from "@/components/chat/metric-bar";
 import { formatMs, formatScore } from "@/lib/format";
+import { costFor, formatCost } from "@/lib/cost";
 import type { DocMap } from "@/lib/types";
 
 export interface TraceInspectorData {
@@ -100,6 +101,11 @@ export function TraceInspector({
                       value={`${data.prompt_tokens ?? 0} / ${data.completion_tokens ?? 0}`}
                       mono
                       hint="prompt / completion"
+                    />
+                    <Field
+                      label="Cost"
+                      value={`${formatCost(costFor(undefined, data.prompt_tokens, data.completion_tokens))} · ${data.prompt_tokens ?? 0} in · ${data.completion_tokens ?? 0} out`}
+                      mono
                     />
                   </div>
                 </section>
