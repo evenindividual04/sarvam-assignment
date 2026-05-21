@@ -26,10 +26,11 @@ from agent.context_engine import (
     rank_and_select_mmr,
 )
 from agent.extractor import Extractor
+from agent.claim_verifier import verify_claims
 from agent.memory import (
     create_session, get_latest_summary, get_relevant_prior_turns,
-    get_session_turn_count, save_contradiction_probe, save_session_summary, save_turn,
-    save_turn_context, session_exists,
+    get_session_turn_count, save_claim_audit, save_contradiction_probe,
+    save_session_summary, save_turn, save_turn_context, session_exists,
 )
 from agent.models import ConflictResult, ContextBundle, ExecutionEvent, Turn
 from agent.search import search
@@ -49,6 +50,7 @@ STREAM_LABELS = {
     "selecting": "Selecting relevant context",
     "probing":   "Probing for cross-source contradictions",
     "generating": "Generating answer with citations",
+    "verifying": "Verifying claims against sources",
 }
 
 _UNCERTAINTY_MARKERS = [
@@ -219,6 +221,9 @@ class ResearchOrchestrator:
         citation_score = 1.0
         formatted_answer = ""
         final_context_bundle = None
+        claim_score = 1.0
+        claim_records: list = []
+        verification_ms_total = 0
 
         for hop in range(_MAX_ITER):
             # ── SEARCHING ─────────────────────────────────────────────────────
@@ -399,6 +404,23 @@ class ResearchOrchestrator:
             prompt_tokens += hop_prompt_tokens
             completion_tokens += hop_completion_tokens
 
+            # ── VERIFYING CLAIMS (V2.4) ───────────────────────────────────────
+            snippet_lookup = {s.doc_id: s.text for s in (selected or [])}
+            if snippet_lookup and context_bundle.doc_map:
+                state_trace.append("VERIFYING_CLAIMS")
+                yield ExecutionEvent("verifying", STREAM_LABELS["verifying"])
+                t_v = time.time()
+                claim_score, claim_records, full_answer = await verify_claims(
+                    full_answer, context_bundle.doc_map, snippet_lookup,
+                )
+                verification_ms_hop = int((time.time() - t_v) * 1000)
+                verification_ms_total += verification_ms_hop
+                state_trace.append(
+                    "VERIFICATION_DONE" if claim_records else "VERIFICATION_SKIPPED"
+                )
+            else:
+                state_trace.append("VERIFICATION_SKIPPED")
+
             # ── Post-processing: citation guard + format conversion ────────────
             citation_score = self._guard.verify(full_answer, context_bundle.doc_map, context_bundle.fetched_urls)
             formatted_answer = convert_citations(full_answer, context_bundle.doc_map)
@@ -453,6 +475,20 @@ class ResearchOrchestrator:
 
         # ── Persist turn ──────────────────────────────────────────────────
         run_metadata["probe_ms"] = stage_ms["probe_ms"]
+        run_metadata["verification_ms"] = verification_ms_total
+        import json as _json
+        claim_verification_json = _json.dumps([
+            {
+                "claim_text": r.claim_text,
+                "doc_ids": list(r.doc_ids),
+                "overlap": r.overlap,
+                "entity_match": r.entity_match,
+                "method": r.method,
+                "score": r.score,
+                "status": r.status,
+            }
+            for r in claim_records
+        ]) if claim_records else None
         latency_ms = int((time.time() - start_ms) * 1000)
         if latency_ms > int(POLICY.max_total_turn_time_s * 1000):
             run_metadata["budget_breach"].append("total_turn_time_exceeded")
@@ -478,16 +514,25 @@ class ResearchOrchestrator:
             synthesize_ms=stage_ms["synthesize_ms"],
             run_metadata_json=run_metadata,
             state_trace=state_trace,
+            claim_precision_score=claim_score,
+            claim_verification_json=claim_verification_json,
         )
         await save_turn(turn)
         # Note: in a multi-hop scenario we just save the final selection to DB
         await save_turn_context(turn_id, selected if 'selected' in locals() else [])
+        try:
+            await save_claim_audit(turn_id, claim_records)
+        except Exception as e:
+            logger.warning("Persist claim_audit failed: %s", e,
+                           extra={"component": "orchestrator", "turn_id": turn_id})
 
         yield ExecutionEvent("done", "done", data={
             "turn_id": turn_id,
             "answer": formatted_answer,
             "internal_answer": full_answer,
             "citation_integrity_score": citation_score,
+            "claim_precision_score": claim_score,
+            "turn_id_out": turn_id,
             "urls": urls_opened,
             "doc_map": final_context_bundle.doc_map if final_context_bundle else {},
             "prompt_tokens": prompt_tokens,
