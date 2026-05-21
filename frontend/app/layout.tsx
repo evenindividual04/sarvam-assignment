@@ -1,0 +1,58 @@
+import type { Metadata } from "next";
+import { Instrument_Serif, Geist, JetBrains_Mono } from "next/font/google";
+import "./globals.css";
+import { Toaster } from "@/components/ui/sonner";
+import { Sidebar } from "@/components/shell/sidebar";
+import { MobileNav } from "@/components/shell/mobile-nav";
+
+const display = Instrument_Serif({
+  subsets: ["latin"],
+  weight: ["400"],
+  style: ["normal", "italic"],
+  variable: "--font-display",
+  display: "swap",
+});
+
+const sans = Geist({
+  subsets: ["latin"],
+  variable: "--font-sans",
+  display: "swap",
+});
+
+const mono = JetBrains_Mono({
+  subsets: ["latin"],
+  variable: "--font-mono",
+  display: "swap",
+});
+
+export const metadata: Metadata = {
+  title: "Deep Research Agent",
+  description:
+    "Multi-source web research with conflict detection, claim verification, and LLM-as-judge evaluation.",
+};
+
+export default function RootLayout({
+  children,
+}: Readonly<{ children: React.ReactNode }>) {
+  return (
+    <html
+      lang="en"
+      className={`dark ${display.variable} ${sans.variable} ${mono.variable}`}
+    >
+      <body className="bg-background text-foreground min-h-screen antialiased">
+        <div
+          aria-hidden
+          className="pointer-events-none fixed inset-0 -z-10 bg-[radial-gradient(ellipse_at_top,rgba(255,255,255,0.025),transparent_60%)]"
+        />
+        <div className="flex min-h-screen">
+          <Sidebar />
+          <div className="flex-1 flex flex-col min-w-0">
+            <MobileNav />
+            <main className="flex-1 flex flex-col min-w-0">{children}</main>
+          </div>
+        </div>
+        <Toaster position="bottom-right" />
+      </body>
+    </html>
+  );
+}

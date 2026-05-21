@@ -30,3 +30,16 @@ sarvam-assignment.md
 Deep Research Agent Architecture Design.md
 AGENTS.md
 
+# Frontend
+frontend/node_modules/
+frontend/.next/
+frontend/.env.local
+frontend/out/
+frontend/build/
+frontend/.turbo/
+frontend/.vercel/
+frontend/next-env.d.ts
+
+# Claude harness internals (agent worktrees, plans, transcripts)
+.claude/
+

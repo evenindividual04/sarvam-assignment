@@ -1,0 +1,312 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+@import "shadcn/tailwind.css";
+
+@custom-variant dark (&:is(.dark *));
+
+/*
+ * Design system: "Research instrument with editorial discipline"
+ * — Utilitarian by default. Editorial serif appears in exactly two places.
+ * — Dark only. Slightly cool near-black, never pure black.
+ * — Hairline geometry. Monospace numerics. One teal accent.
+ */
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+
+  --font-sans: var(--font-sans);
+  --font-mono: var(--font-mono);
+  --font-display: var(--font-display);
+  --font-heading: var(--font-sans);
+
+  --color-surface: var(--surface);
+  --color-surface-hover: var(--surface-hover);
+  --color-surface-emphasis: var(--surface-emphasis);
+  --color-border-strong: var(--border-strong);
+  --color-border-accent: var(--border-accent);
+  --color-subtle-foreground: var(--subtle-foreground);
+  --color-accent-dim: var(--accent-dim);
+
+  --color-sidebar-ring: var(--sidebar-ring);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar: var(--sidebar);
+  --color-chart-5: var(--chart-5);
+  --color-chart-4: var(--chart-4);
+  --color-chart-3: var(--chart-3);
+  --color-chart-2: var(--chart-2);
+  --color-chart-1: var(--chart-1);
+  --color-ring: var(--ring);
+  --color-input: var(--input);
+  --color-border: var(--border);
+  --color-destructive: var(--destructive);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-accent: var(--accent);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-muted: var(--muted);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-secondary: var(--secondary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-primary: var(--primary);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-popover: var(--popover);
+  --color-card-foreground: var(--card-foreground);
+  --color-card: var(--card);
+
+  --radius-sm: 3px;
+  --radius-md: 6px;
+  --radius-lg: 8px;
+  --radius-xl: 8px;
+  --radius-2xl: 8px;
+  --radius-3xl: 8px;
+  --radius-4xl: 8px;
+}
+
+/* Light kept as no-op fallback; app forces .dark. */
+:root {
+  --background: #0a0a0c;
+  --foreground: #e7e7ea;
+  --surface: #111114;
+  --surface-hover: #16161a;
+  --surface-emphasis: #1c1c20;
+
+  --card: #111114;
+  --card-foreground: #e7e7ea;
+  --popover: #16161a;
+  --popover-foreground: #e7e7ea;
+
+  --primary: #0d9488;
+  --primary-foreground: #042f2e;
+  --secondary: #16161a;
+  --secondary-foreground: #e7e7ea;
+
+  --muted: #16161a;
+  --muted-foreground: #9b9ba3;
+  --subtle-foreground: #6b6b73;
+
+  --accent: #0d9488;
+  --accent-foreground: #042f2e;
+  --accent-dim: rgba(13, 148, 136, 0.14);
+
+  --destructive: #dc2626;
+
+  --border: rgba(255, 255, 255, 0.06);
+  --border-strong: rgba(255, 255, 255, 0.12);
+  --border-accent: rgba(13, 148, 136, 0.40);
+
+  --input: rgba(255, 255, 255, 0.08);
+  --ring: rgba(13, 148, 136, 0.50);
+
+  /* Recharts palette — teal as primary, hairline-quiet alternates */
+  --chart-1: #0d9488;
+  --chart-2: #10b981;
+  --chart-3: #2563eb;
+  --chart-4: #d97706;
+  --chart-5: #dc2626;
+
+  --radius: 0.5rem;
+
+  --sidebar: #0a0a0c;
+  --sidebar-foreground: #e7e7ea;
+  --sidebar-primary: #0d9488;
+  --sidebar-primary-foreground: #042f2e;
+  --sidebar-accent: #16161a;
+  --sidebar-accent-foreground: #e7e7ea;
+  --sidebar-border: rgba(255, 255, 255, 0.06);
+  --sidebar-ring: rgba(13, 148, 136, 0.50);
+}
+
+.dark {
+  --background: #0a0a0c;
+  --foreground: #e7e7ea;
+  --surface: #111114;
+  --surface-hover: #16161a;
+  --surface-emphasis: #1c1c20;
+
+  --card: #111114;
+  --card-foreground: #e7e7ea;
+  --popover: #16161a;
+  --popover-foreground: #e7e7ea;
+
+  --primary: #0d9488;
+  --primary-foreground: #042f2e;
+  --secondary: #16161a;
+  --secondary-foreground: #e7e7ea;
+
+  --muted: #16161a;
+  --muted-foreground: #9b9ba3;
+  --subtle-foreground: #6b6b73;
+
+  --accent: #0d9488;
+  --accent-foreground: #042f2e;
+  --accent-dim: rgba(13, 148, 136, 0.14);
+
+  --destructive: #dc2626;
+
+  --border: rgba(255, 255, 255, 0.06);
+  --border-strong: rgba(255, 255, 255, 0.12);
+  --border-accent: rgba(13, 148, 136, 0.40);
+
+  --input: rgba(255, 255, 255, 0.08);
+  --ring: rgba(13, 148, 136, 0.50);
+
+  --chart-1: #0d9488;
+  --chart-2: #10b981;
+  --chart-3: #2563eb;
+  --chart-4: #d97706;
+  --chart-5: #dc2626;
+
+  --sidebar: #0a0a0c;
+  --sidebar-foreground: #e7e7ea;
+  --sidebar-primary: #0d9488;
+  --sidebar-primary-foreground: #042f2e;
+  --sidebar-accent: #16161a;
+  --sidebar-accent-foreground: #e7e7ea;
+  --sidebar-border: rgba(255, 255, 255, 0.06);
+  --sidebar-ring: rgba(13, 148, 136, 0.50);
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  body {
+    @apply bg-background text-foreground;
+    font-feature-settings: "ss01", "cv11";
+  }
+  html {
+    @apply font-sans;
+  }
+  ::selection {
+    background: rgba(13, 148, 136, 0.30);
+    color: var(--foreground);
+  }
+}
+
+@layer base {
+  .dark ::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+  .dark ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  .dark ::-webkit-scrollbar-thumb {
+    background: rgba(255, 255, 255, 0.06);
+    border-radius: 4px;
+  }
+  .dark ::-webkit-scrollbar-thumb:hover {
+    background: rgba(255, 255, 255, 0.12);
+  }
+}
+
+/* Caps-tracked utility label — used everywhere we want the mono-label look. */
+.label-caps {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--muted-foreground);
+}
+
+/* Markdown prose: utilitarian, readable, sans body. */
+.rich-md {
+  font-family: var(--font-sans);
+  font-size: 15px;
+  line-height: 1.7;
+  color: var(--foreground);
+}
+.rich-md p { margin: 0.6rem 0; }
+.rich-md h1, .rich-md h2, .rich-md h3 {
+  font-weight: 500;
+  margin: 1.1rem 0 0.5rem;
+  letter-spacing: -0.01em;
+}
+.rich-md h1 { font-size: 1.1rem; }
+.rich-md h2 { font-size: 1.02rem; }
+.rich-md h3 { font-size: 0.95rem; }
+.rich-md a {
+  color: var(--accent);
+  text-decoration: underline;
+  text-decoration-color: rgba(13, 148, 136, 0.35);
+  text-underline-offset: 3px;
+  transition: color 0.15s, text-decoration-color 0.15s;
+}
+.rich-md a:hover {
+  color: #2dd4bf;
+  text-decoration-color: #2dd4bf;
+}
+.rich-md ul { list-style: disc; padding-left: 1.25rem; margin: 0.5rem 0; }
+.rich-md ol { list-style: decimal; padding-left: 1.25rem; margin: 0.5rem 0; }
+.rich-md code {
+  background: rgba(0, 0, 0, 0.4);
+  border: 1px solid var(--border);
+  padding: 0.05rem 0.35rem;
+  border-radius: 3px;
+  font-size: 0.85em;
+  font-family: var(--font-mono);
+}
+.rich-md pre {
+  background: rgba(0, 0, 0, 0.4);
+  border: 1px solid var(--border);
+  padding: 0.8rem 1rem;
+  border-radius: 6px;
+  overflow-x: auto;
+  font-size: 0.85em;
+}
+.rich-md pre code {
+  background: transparent;
+  border: 0;
+  padding: 0;
+}
+.rich-md blockquote {
+  border-left: 2px solid var(--border-strong);
+  padding-left: 0.9rem;
+  color: var(--muted-foreground);
+  margin: 0.7rem 0;
+  font-style: italic;
+}
+.rich-md table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 0.6rem 0;
+  font-size: 0.9em;
+}
+.rich-md th, .rich-md td {
+  border-bottom: 1px solid var(--border);
+  padding: 0.4rem 0.7rem;
+  text-align: left;
+}
+.rich-md th {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--muted-foreground);
+  font-weight: 500;
+}
+
+/* Inline citation pills rendered by markdown.tsx — tighten to the system. */
+.rich-md a.citation-pill {
+  display: inline-flex;
+  align-items: center;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  padding: 0 4px;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.02);
+  text-decoration: none;
+  color: var(--muted-foreground);
+  letter-spacing: 0;
+  margin: 0 1px;
+}
+.rich-md a.citation-pill:hover {
+  color: var(--accent);
+  border-color: var(--border-accent);
+  background: var(--accent-dim);
+}
