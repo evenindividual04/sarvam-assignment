@@ -20,17 +20,18 @@ import httpx
 from agent.citation_guard import CitationGuard, convert_citations
 from agent.context_engine import (
     chunk,
-    detect_conflicts,
     format_context_xml,
+    probe_contradictions,
     rank_and_select,
     rank_and_select_mmr,
 )
 from agent.extractor import Extractor
 from agent.memory import (
     create_session, get_latest_summary, get_relevant_prior_turns,
-    get_session_turn_count, save_session_summary, save_turn, save_turn_context, session_exists,
+    get_session_turn_count, save_contradiction_probe, save_session_summary, save_turn,
+    save_turn_context, session_exists,
 )
-from agent.models import ContextBundle, ExecutionEvent, Turn
+from agent.models import ConflictResult, ContextBundle, ExecutionEvent, Turn
 from agent.search import search
 from utils.failure_policy import POLICY
 from utils.prompt_registry import prompt_id
@@ -46,6 +47,7 @@ STREAM_LABELS = {
     "searching": "Searching the web",
     "fetching":  "Fetching sources",
     "selecting": "Selecting relevant context",
+    "probing":   "Probing for cross-source contradictions",
     "generating": "Generating answer with citations",
 }
 
@@ -111,12 +113,12 @@ class ResearchOrchestrator:
         now = datetime.now(timezone.utc).isoformat()
         state_trace: list[str] = []
         budget = ContextBudget()
-        stage_ms = {"planning_ms": 0, "search_ms": 0, "fetch_ms": 0, "select_ms": 0, "synthesize_ms": 0}
+        stage_ms = {"planning_ms": 0, "search_ms": 0, "fetch_ms": 0, "select_ms": 0, "probe_ms": 0, "synthesize_ms": 0}
         run_metadata = {
             "selection_strategy": _SELECTION_STRATEGY,
             "planner_prompt_id": prompt_id("planner"),
             "synth_prompt_id": prompt_id("synthesizer"),
-            "conflict_prompt_id": prompt_id("conflict_detection"),
+            "conflict_prompt_id": prompt_id("conflict_v3"),
             "judge_prompt_id": prompt_id("judge"),
             "configured_models": {
                 "gemini_model": os.getenv("GEMINI_MODEL", "gemini-2.5-flash"),
@@ -289,6 +291,8 @@ class ResearchOrchestrator:
                 selected = rank_and_select(query, all_chunks, max_tokens=budget.web_context_budget)
             stage_ms["select_ms"] += int((time.time() - t0) * 1000)
 
+            conflict_result: ConflictResult = ConflictResult(has_conflict=False)
+
             if not selected:
                 # Empty context guard: inform model explicitly
                 logger.warning("No context selected", extra={"component": "orchestrator", "turn_id": turn_id})
@@ -299,19 +303,48 @@ class ResearchOrchestrator:
                     fetched_urls=set(),
                 )
             else:
-                conflict = await detect_conflicts(selected, query)
+                # Pre-assign doc_ids so the probe can reference them
                 xml, doc_map = format_context_xml(selected)
-                if conflict.has_conflict and conflict.conflict_summary:
+
+                # ── CONFLICT_CHECK (named pipeline stage) ─────────────────
+                state_trace.append("CONFLICT_CHECK")
+                yield ExecutionEvent("probing", STREAM_LABELS["probing"])
+                t_probe = time.time()
+                try:
+                    conflict_result = await probe_contradictions(selected, query)
+                except Exception as e:
+                    logger.warning("Probe unexpectedly raised: %s", e,
+                                   extra={"component": "orchestrator", "turn_id": turn_id})
+                    conflict_result = ConflictResult(has_conflict=False, probe_skipped_reason="parse_fail")
+                probe_ms_hop = int((time.time() - t_probe) * 1000)
+                stage_ms["probe_ms"] += probe_ms_hop
+                if conflict_result.probe_skipped_reason:
+                    state_trace.append("CONFLICT_CHECK_SKIPPED")
+                    run_metadata["fallback_path_taken"].append(f"probe_{conflict_result.probe_skipped_reason}")
+
+                # Persist probe outcome (always, even on skip)
+                try:
+                    await save_contradiction_probe(
+                        turn_id=turn_id,
+                        result=conflict_result,
+                        probe_ms=probe_ms_hop,
+                        prompt_id=prompt_id("conflict_v3"),
+                    )
+                except Exception as e:
+                    logger.warning("Persist probe row failed: %s", e,
+                                   extra={"component": "orchestrator", "turn_id": turn_id})
+
+                if conflict_result.has_conflict and conflict_result.conflict_summary:
                     xml = xml.replace(
                         "<context>",
-                        f"<context>\n  <conflict_warning>{conflict.conflict_summary}</conflict_warning>",
+                        f"<context>\n  <conflict_warning>{conflict_result.conflict_summary}</conflict_warning>",
                         1,
                     )
                 context_bundle = ContextBundle(
                     xml=xml,
                     doc_map=doc_map,
                     fetched_urls=set(urls_opened),
-                    conflict_summary=conflict.conflict_summary if conflict.has_conflict else None,
+                    conflict_summary=conflict_result.conflict_summary if conflict_result.has_conflict else None,
                 )
 
             final_context_bundle = context_bundle
@@ -335,6 +368,7 @@ class ResearchOrchestrator:
                         doc_map=context_bundle.doc_map,
                         history_text=history_text,
                         conflict_note=context_bundle.conflict_summary,
+                        conflict_result=conflict_result,
                     ):
                         full_answer += text_chunk
                         if pt:
@@ -418,6 +452,7 @@ class ResearchOrchestrator:
                 logger.warning("Rolling summary failed: %s", e)
 
         # ── Persist turn ──────────────────────────────────────────────────
+        run_metadata["probe_ms"] = stage_ms["probe_ms"]
         latency_ms = int((time.time() - start_ms) * 1000)
         if latency_ms > int(POLICY.max_total_turn_time_s * 1000):
             run_metadata["budget_breach"].append("total_turn_time_exceeded")
@@ -462,6 +497,7 @@ class ResearchOrchestrator:
             "search_ms": stage_ms["search_ms"],
             "fetch_ms": stage_ms["fetch_ms"],
             "select_ms": stage_ms["select_ms"],
+            "probe_ms": stage_ms["probe_ms"],
             "synthesize_ms": stage_ms["synthesize_ms"],
             "run_metadata": run_metadata,
             "context_xml": final_context_bundle.xml if final_context_bundle else "",

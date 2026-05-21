@@ -17,8 +17,11 @@ async def stream_synthesis(
     doc_map: dict,
     history_text: str = "",
     conflict_note: Optional[str] = None,
+    conflict_result=None,
 ) -> AsyncIterator[tuple[str, int, int]]:
     """Proxy to provider_router.synthesize(). Yields (text, prompt_tok, completion_tok)."""
     from utils.provider_router import synthesize
-    async for chunk in synthesize(query, context_xml, doc_map, history_text, conflict_note):
+    async for chunk in synthesize(
+        query, context_xml, doc_map, history_text, conflict_note, conflict_result
+    ):
         yield chunk

@@ -110,12 +110,36 @@ async def call_groq(prompt: str, max_tokens: int = 200) -> str:
     return resp.choices[0].message.content.strip()
 
 
+def _build_disagreement_block(conflict_result) -> str:
+    """V2.2: enumerate non-temporal contradictions for the synthesizer."""
+    if conflict_result is None or not conflict_result.has_conflict:
+        return ""
+    real = [c for c in conflict_result.contradictions if not c.is_temporal_evolution]
+    if not real:
+        return ""
+    lines = [
+        "<cross_source_disagreement>",
+        "The retrieval found conflicting claims you MUST present neutrally:",
+    ]
+    for c in real:
+        ids_a = ", ".join(c.doc_ids_a)
+        ids_b = ", ".join(c.doc_ids_b)
+        lines.append(
+            f'- On "{c.claim}": [{ids_a}] state "{c.position_a}", '
+            f'while [{ids_b}] states "{c.position_b}".'
+        )
+    lines.append('  Do NOT pick a winner. Use the phrasing "Sources disagree."')
+    lines.append("</cross_source_disagreement>")
+    return "\n".join(lines)
+
+
 async def synthesize(
     query: str,
     context_xml: str,
     doc_map: dict[str, tuple[str, str, str]],
     history_text: str = "",
     conflict_note: Optional[str] = None,
+    conflict_result=None,
 ) -> AsyncIterator[tuple[str, int, int]]:
     """
     Streams synthesis from Gemini 2.5 Flash.
@@ -131,11 +155,15 @@ async def synthesize(
     if conflict_note:
         conflict_instruction = f"\n\nCONFLICT DETECTED: {conflict_note}\nYou MUST present both sides explicitly."
 
+    disagreement_block = _build_disagreement_block(conflict_result)
+    if disagreement_block:
+        disagreement_block = "\n\n" + disagreement_block
+
     user_prompt = f"""Available documents:
 {doc_listing}
 
 {context_xml}
-{conflict_instruction}
+{conflict_instruction}{disagreement_block}
 
 Research question: {query}
 
