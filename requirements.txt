@@ -7,7 +7,7 @@ rank_bm25>=0.2.2
 tenacity>=8.3.0
 tiktoken>=0.7.0
 pydantic>=2.7.0
-flashrank>=2.0.0
+flashrank>=0.2.10  # latest stable on PyPI; the >=2.0 pin in CLAUDE.md was aspirational
 python-dotenv>=1.0.2
 fastapi>=0.115.0  # Starlette 1.x compat — older versions break on Router(on_startup=)
 uvicorn>=0.30.0
