@@ -152,6 +152,7 @@ async def init_db() -> None:
             ("select_ms", "ALTER TABLE turns ADD COLUMN select_ms INTEGER DEFAULT 0"),
             ("synthesize_ms", "ALTER TABLE turns ADD COLUMN synthesize_ms INTEGER DEFAULT 0"),
             ("run_metadata_json", "ALTER TABLE turns ADD COLUMN run_metadata_json TEXT"),
+            ("trust_score", "ALTER TABLE turn_context ADD COLUMN trust_score REAL DEFAULT 0.7"),
         ]:
             try:
                 await db.execute(ddl)
@@ -217,8 +218,8 @@ async def save_turn_context(turn_id: str, snippets: list[ContextSnippet]) -> Non
         await db.executemany(
             """
             INSERT INTO turn_context
-            (turn_id, doc_id, url, title, domain, snippet, bm25_score, recency_score, final_score, retrieved_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            (turn_id, doc_id, url, title, domain, snippet, bm25_score, recency_score, final_score, retrieved_at, trust_score)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             [
                 (
@@ -232,6 +233,7 @@ async def save_turn_context(turn_id: str, snippets: list[ContextSnippet]) -> Non
                     s.recency_score,
                     s.final_score,
                     s.retrieved_at,
+                    s.trust_score,
                 )
                 for s in snippets
             ],
