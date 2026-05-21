@@ -254,15 +254,21 @@ def _dedup_preserve_origin(results: list[SearchResult]) -> list[SearchResult]:
     return out
 
 
-async def search(queries: list[TypedQuery]) -> list[SearchResult]:
+async def search(queries: list[TypedQuery], cancel_token=None) -> list[SearchResult]:
     """
     Run typed queries against the intent-routed provider chain. Returns deduplicated
     list; first intent_origin seen per URL is preserved.
     """
     import asyncio
+    if cancel_token is not None and cancel_token.is_set():
+        return []
     all_results: list[SearchResult] = []
     async with httpx.AsyncClient() as client:
-        tasks = [_search_single_query(tq.text, client, tq.intent) for tq in queries]
+        tasks = []
+        for tq in queries:
+            if cancel_token is not None and cancel_token.is_set():
+                break
+            tasks.append(_search_single_query(tq.text, client, tq.intent))
         results_list = await asyncio.gather(*tasks)
         for results in results_list:
             all_results.extend(results)

@@ -77,12 +77,20 @@ class Extractor:
         )
         return text or None
 
-    async def extract_all(self, results: list[SearchResult]) -> dict[str, Optional[str]]:
+    async def extract_all(self, results: list[SearchResult], cancel_token=None) -> dict[str, Optional[str]]:
         """Extract all URLs concurrently (semaphore limits to 3 parallel)."""
-        tasks = [self.extract(r) for r in results]
+        if cancel_token is not None and cancel_token.is_set():
+            return {}
+        tasks = []
+        scheduled: list[SearchResult] = []
+        for r in results:
+            if cancel_token is not None and cancel_token.is_set():
+                break
+            tasks.append(self.extract(r))
+            scheduled.append(r)
         texts = await asyncio.gather(*tasks, return_exceptions=True)
         out: dict[str, Optional[str]] = {}
-        for r, t in zip(results, texts):
+        for r, t in zip(scheduled, texts):
             if isinstance(t, Exception):
                 logger.warning("Extract error for %s: %s", r.url, t, extra={"component": "extractor"})
                 out[r.url] = None
