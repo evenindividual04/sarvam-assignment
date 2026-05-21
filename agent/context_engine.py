@@ -59,6 +59,7 @@ def chunk(result: SearchResult, text: str) -> list[ContextSnippet]:
             snippet=segment[:200],
             token_count=tok_count,
             retrieved_at=result.retrieved_at,
+            intent_origin=result.intent_origin,
         ))
         start = end - _CHUNK_OVERLAP
         doc_idx += 1
@@ -73,10 +74,13 @@ def score_chunk(
     bm25_score: float,
     all_bm25_scores: list[float],
     url_domain_count: dict[str, int],
+    intent_origin: str | None = None,
 ) -> float:
     """
     Three-factor score: 0.6 * relevance + 0.2 * recency + 0.2 * diversity.
     Weights sum to 1.0. No division by zero anywhere.
+    When intent_origin == "contradiction_probe", diversity is multiplied by 1.25
+    (capped at 1.0) BEFORE additive scoring to help adversarial chunks survive.
     """
     # 1. Relevance: normalize BM25 score to [0, 1]
     max_score = max(all_bm25_scores) if all_bm25_scores else 1.0
@@ -95,9 +99,12 @@ def score_chunk(
     # 3. Diversity: penalise domains already heavily represented
     domain_count = url_domain_count.get(chunk.domain, 0)
     diversity = 1.0 / (1.0 + domain_count)
-    
+
+    # V2.1: bounded diversity boost for contradiction_probe chunks
+    if intent_origin == "contradiction_probe":
+        diversity = min(1.0, diversity * 1.25)
+
     # 4. Credibility (Domain reputation)
-    # Boost reputable domains (academic, govt, authoritative)
     reputable_suffixes = ('.edu', '.gov', 'wikipedia.org', 'nature.com', 'ncbi.nlm.nih.gov', 'arxiv.org', '.ac.uk')
     credibility = 1.2 if chunk.domain and any(chunk.domain.endswith(s) for s in reputable_suffixes) else 1.0
 
@@ -124,7 +131,9 @@ def select_with_diversity(
     token_count = 0
 
     for c in sorted(chunks, key=lambda x: x.final_score, reverse=True):
-        if domain_counts[c.domain] >= max_per_domain:
+        # V2.1: contradiction_probe chunks may exceed default cap (3 per domain).
+        cap = 3 if c.intent_origin == "contradiction_probe" else max_per_domain
+        if domain_counts[c.domain] >= cap:
             continue
         if token_count + c.token_count > max_tokens:
             continue
@@ -181,7 +190,7 @@ def rank_and_select(
 
     for c, s in zip(top_chunks, top_scores):
         c.bm25_score = s
-        c.final_score = score_chunk(c, s, top_scores, domain_counts)
+        c.final_score = score_chunk(c, s, top_scores, domain_counts, intent_origin=c.intent_origin)
 
     # Step 4: diversity-aware final selection
     return select_with_diversity(top_chunks, max_tokens=max_tokens)

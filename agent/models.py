@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import Any, Optional
 
 from pydantic import BaseModel
@@ -21,6 +22,7 @@ class SearchResult:
     domain: str
     retrieved_at: str
     raw_content: Optional[str] = None    # populated by Parallel/Tavily; skips Trafilatura
+    intent_origin: Optional[str] = None  # V2.1: intent of the query that produced this result
 
 
 @dataclass
@@ -37,6 +39,7 @@ class ContextSnippet:
     recency_score: float = 0.0
     diversity_score: float = 0.0
     final_score: float = 0.0
+    intent_origin: Optional[str] = None  # V2.1: provenance from the originating typed query
 
 
 @dataclass
@@ -109,9 +112,23 @@ class ContextBundle:
 
 # ── Pydantic models (LLM JSON output) ─────────────────────────────────────
 
+class QueryIntent(str, Enum):
+    PRIMARY = "primary"
+    COMPARISON = "comparison"
+    RECENCY_CHECK = "recency_check"
+    CONTRADICTION_PROBE = "contradiction_probe"
+    DEFINITION = "definition"
+
+
+class TypedQuery(BaseModel):
+    text: str
+    intent: QueryIntent
+    rationale: Optional[str] = None
+
+
 class PlannerOutput(BaseModel):
     strategy: str
-    queries: list[str]
+    queries: list[TypedQuery]
 
 
 class ConflictResult(BaseModel):

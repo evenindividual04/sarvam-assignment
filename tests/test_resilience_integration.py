@@ -7,13 +7,13 @@ from pathlib import Path
 
 import httpx
 
-from agent.models import SearchResult
+from agent.models import QueryIntent, SearchResult, TypedQuery
 from agent import search as search_mod
 from utils import provider_router
 
 
 def test_search_falls_back_when_parallel_fails(monkeypatch):
-    async def fake_parallel(query, client):
+    async def fake_parallel(query, client, num_results=None):
         request = httpx.Request("POST", "https://api.parallel.ai/v1/search")
         response = httpx.Response(422, request=request)
         raise httpx.HTTPStatusError("parallel fail", request=request, response=response)
@@ -37,7 +37,7 @@ def test_search_falls_back_when_parallel_fails(monkeypatch):
     monkeypatch.setattr(search_mod, "_search_tavily", fake_tavily)
     monkeypatch.setattr(search_mod, "_search_serper", fake_serper)
 
-    out = asyncio.run(search_mod.search(["x"]))
+    out = asyncio.run(search_mod.search([TypedQuery(text="x", intent=QueryIntent.PRIMARY)]))
     assert len(out) == 1
     assert out[0].url == "https://example.com/a"
 
@@ -93,16 +93,24 @@ def test_synthesize_raises_without_openrouter_key(monkeypatch):
 
 
 def test_parse_planner_output_valid_json():
-    raw = '{"strategy":"Find official source then compare","queries":["q1","q2","q3"]}'
+    raw = (
+        '{"strategy":"Find official source then compare",'
+        '"queries":[{"text":"q1","intent":"primary"},'
+        '{"text":"q2","intent":"comparison"},'
+        '{"text":"q3 2026","intent":"recency_check"}]}'
+    )
     out = provider_router.parse_planner_output(raw, "fallback")
     assert out.strategy == "Find official source then compare"
-    assert out.queries == ["q1", "q2", "q3"]
+    assert [q.text for q in out.queries] == ["q1", "q2", "q3 2026"]
+    assert out.queries[0].intent == QueryIntent.PRIMARY
 
 
 def test_parse_planner_output_fallback_on_invalid():
     out = provider_router.parse_planner_output("not json", "fallback query")
     assert out.strategy == "Direct retrieval fallback"
-    assert out.queries == ["fallback query"]
+    assert len(out.queries) == 1
+    assert out.queries[0].text == "fallback query"
+    assert out.queries[0].intent == QueryIntent.PRIMARY
 
 
 def test_eval_runner_timeout_is_recorded(monkeypatch, tmp_path):

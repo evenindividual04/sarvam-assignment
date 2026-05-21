@@ -170,19 +170,36 @@ class ResearchOrchestrator:
             run_metadata["timeout_hits"].append("planning")
             run_metadata["fallback_path_taken"].append("planning_timeout_fallback")
             run_metadata["budget_breach"].append("planning_timeout")
-            from agent.models import PlannerOutput
-            planner = PlannerOutput(strategy="Direct retrieval fallback", queries=[query])
+            from agent.models import PlannerOutput, QueryIntent, TypedQuery
+            planner = PlannerOutput(
+                strategy="Direct retrieval fallback",
+                queries=[TypedQuery(text=query, intent=QueryIntent.PRIMARY)],
+            )
         except (asyncio.TimeoutError, httpx.TimeoutException, httpx.ConnectError, Exception) as e:
             logger.error("Planning failed: %s", e, extra={"component": "orchestrator", "turn_id": turn_id})
             run_metadata["fallback_path_taken"].append("planning_error_fallback")
-            from agent.models import PlannerOutput
-            planner = PlannerOutput(strategy="Direct retrieval fallback", queries=[query])
+            from agent.models import PlannerOutput, QueryIntent, TypedQuery
+            planner = PlannerOutput(
+                strategy="Direct retrieval fallback",
+                queries=[TypedQuery(text=query, intent=QueryIntent.PRIMARY)],
+            )
         stage_ms["planning_ms"] += int((time.time() - t0) * 1000)
-        queries = [q for q in planner.queries if isinstance(q, str) and q.strip()]
-        if not queries:
-            queries = [query]
-        queries = queries[:4]
-        
+        from agent.models import QueryIntent, TypedQuery
+        typed_queries: list[TypedQuery] = [tq for tq in planner.queries if tq.text.strip()]
+        if not typed_queries:
+            typed_queries = [TypedQuery(text=query, intent=QueryIntent.PRIMARY)]
+        typed_queries = typed_queries[:4]
+        queries = [tq.text for tq in typed_queries]
+
+        # Persist typed planner output for traceability
+        run_metadata["planner_output"] = {
+            "strategy": planner.strategy,
+            "queries": [
+                {"text": tq.text, "intent": tq.intent.value, "rationale": tq.rationale}
+                for tq in typed_queries
+            ],
+        }
+
         # Adapt budget based on planning complexity
         budget.adapt_to_complexity(len(queries))
 
@@ -207,7 +224,7 @@ class ResearchOrchestrator:
             yield ExecutionEvent("searching", STREAM_LABELS["searching"])
             t0 = time.time()
             try:
-                results = await asyncio.wait_for(search(queries), timeout=POLICY.search_timeout_s)
+                results = await asyncio.wait_for(search(typed_queries), timeout=POLICY.search_timeout_s)
             except asyncio.TimeoutError:
                 logger.error("Search timed out", extra={"component": "orchestrator", "turn_id": turn_id})
                 run_metadata["timeout_hits"].append("search")
@@ -360,6 +377,7 @@ class ResearchOrchestrator:
                 new_queries = _extract_followup_queries(full_answer)
                 if new_queries:
                     queries = new_queries
+                    typed_queries = [TypedQuery(text=q, intent=QueryIntent.PRIMARY) for q in new_queries]
                     state_trace.append(f"RE-SEARCH (hop {hop+1})")
                     yield ExecutionEvent(
                         "planning",

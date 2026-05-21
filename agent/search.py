@@ -12,7 +12,7 @@ from urllib.parse import urlparse
 import httpx
 from tenacity import retry, stop_after_attempt, wait_exponential
 
-from agent.models import SearchResult
+from agent.models import QueryIntent, SearchResult, TypedQuery
 from utils.provider_adapters import normalize_search_items
 
 logger = logging.getLogger(__name__)
@@ -44,7 +44,7 @@ def _dedup(results: list[SearchResult]) -> list[SearchResult]:
 
 
 @retry(wait=wait_exponential(multiplier=1, min=2, max=10), stop=stop_after_attempt(3), reraise=True)
-async def _search_parallel(query: str, client: httpx.AsyncClient) -> list[SearchResult]:
+async def _search_parallel(query: str, client: httpx.AsyncClient, num_results: int = _MAX_RESULTS) -> list[SearchResult]:
     """Parallel AI — returns AI-native structured excerpts; no separate fetch needed."""
     key = os.getenv("PARALLEL_API_KEY", "")
     if not key:
@@ -52,7 +52,7 @@ async def _search_parallel(query: str, client: httpx.AsyncClient) -> list[Search
     resp = await client.post(
         f"{_PARALLEL_BASE}/search",
         headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
-        json={"query": query, "num_results": _MAX_RESULTS},
+        json={"query": query, "num_results": num_results},
         timeout=20.0,
     )
     if resp.status_code == 422:
@@ -60,7 +60,7 @@ async def _search_parallel(query: str, client: httpx.AsyncClient) -> list[Search
         resp = await client.post(
             f"{_PARALLEL_BASE}/search",
             headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
-            json={"q": query, "max_results": _MAX_RESULTS},
+            json={"q": query, "max_results": num_results},
             timeout=20.0,
         )
     if resp.status_code == 422:
@@ -153,41 +153,110 @@ async def _search_serper(query: str, client: httpx.AsyncClient) -> list[SearchRe
     return results
 
 
-async def _search_single_query(q: str, client: httpx.AsyncClient) -> list[SearchResult]:
+@retry(wait=wait_exponential(multiplier=1, min=2, max=10), stop=stop_after_attempt(3), reraise=True)
+async def _search_tavily_news(query: str, client: httpx.AsyncClient, days: int = 30) -> list[SearchResult]:
+    """Tavily in news mode for RECENCY_CHECK intent."""
+    key = os.getenv("TAVILY_API_KEY", "")
+    if not key:
+        return []
     try:
-        results = await _search_parallel(q, client)
+        from tavily import AsyncTavilyClient
+        tavily = AsyncTavilyClient(api_key=key)
+        data = await tavily.search(
+            query=query,
+            topic="news",
+            days=days,
+            search_depth="advanced",
+            include_raw_content=True,
+            max_results=_MAX_RESULTS,
+        )
+    except Exception:
+        resp = await client.post(
+            "https://api.tavily.com/search",
+            json={
+                "api_key": key,
+                "query": query,
+                "topic": "news",
+                "days": days,
+                "search_depth": "advanced",
+                "include_raw_content": True,
+                "max_results": _MAX_RESULTS,
+            },
+            timeout=20.0,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+    adapted = normalize_search_items("tavily", data, _now(), _domain)
+    return adapted.results
+
+
+async def _try(coro_factory, label: str, q: str) -> list[SearchResult]:
+    try:
+        return await coro_factory()
     except (httpx.HTTPStatusError, httpx.TimeoutException, httpx.ConnectError, Exception) as e:
-        logger.warning("Parallel failed for query '%s': %s", q, e, extra={"component": "search"})
-        results = []
-    if not results:
-        logger.info("Parallel empty, trying Tavily for: %s", q, extra={"component": "search"})
-        try:
-            results = await _search_tavily(q, client)
-        except (httpx.HTTPStatusError, httpx.TimeoutException, httpx.ConnectError, Exception) as e:
-            logger.warning("Tavily failed for query '%s': %s", q, e, extra={"component": "search"})
-            results = []
-    if not results:
-        logger.info("Tavily empty, trying Serper for: %s", q, extra={"component": "search"})
-        try:
-            results = await _search_serper(q, client)
-        except (httpx.HTTPStatusError, httpx.TimeoutException, httpx.ConnectError, Exception) as e:
-            logger.warning("Serper failed for query '%s': %s", q, e, extra={"component": "search"})
-            results = []
+        logger.warning("%s failed for query '%s': %s", label, q, e, extra={"component": "search"})
+        return []
+
+
+async def _search_single_query(
+    q: str,
+    client: httpx.AsyncClient,
+    intent: QueryIntent = QueryIntent.PRIMARY,
+) -> list[SearchResult]:
+    """Route a query to providers based on intent. Returns results tagged with intent_origin."""
+    results: list[SearchResult] = []
+
+    if intent == QueryIntent.RECENCY_CHECK and os.getenv("TAVILY_API_KEY"):
+        results = await _try(lambda: _search_tavily_news(q, client, days=30), "Tavily(news)", q)
+        if not results:
+            results = await _try(lambda: _search_parallel(q, client), "Parallel", q)
+        if not results:
+            results = await _try(lambda: _search_serper(q, client), "Serper", q)
+    elif intent == QueryIntent.COMPARISON:
+        results = await _try(lambda: _search_parallel(q, client, num_results=_MAX_RESULTS + 2), "Parallel", q)
+        if not results:
+            results = await _try(lambda: _search_tavily(q, client), "Tavily", q)
+        if not results:
+            results = await _try(lambda: _search_serper(q, client), "Serper", q)
+    else:
+        # PRIMARY, DEFINITION, CONTRADICTION_PROBE → existing chain
+        results = await _try(lambda: _search_parallel(q, client), "Parallel", q)
+        if not results:
+            results = await _try(lambda: _search_tavily(q, client), "Tavily", q)
+        if not results:
+            results = await _try(lambda: _search_serper(q, client), "Serper", q)
+
+    tag = "contradiction_probe" if intent == QueryIntent.CONTRADICTION_PROBE else intent.value
+    for r in results:
+        if r.intent_origin is None:
+            r.intent_origin = tag
     return results
 
-async def search(queries: list[str]) -> list[SearchResult]:
+
+def _dedup_preserve_origin(results: list[SearchResult]) -> list[SearchResult]:
+    seen: set[str] = set()
+    out: list[SearchResult] = []
+    for r in results:
+        if r.url in seen:
+            continue
+        seen.add(r.url)
+        out.append(r)
+    return out
+
+
+async def search(queries: list[TypedQuery]) -> list[SearchResult]:
     """
-    Run all queries against Parallel → Tavily → Serper with URL deduplication.
-    Returns deduplicated list across all queries and all providers.
+    Run typed queries against the intent-routed provider chain. Returns deduplicated
+    list; first intent_origin seen per URL is preserved.
     """
+    import asyncio
     all_results: list[SearchResult] = []
     async with httpx.AsyncClient() as client:
-        tasks = [_search_single_query(q, client) for q in queries]
-        import asyncio
+        tasks = [_search_single_query(tq.text, client, tq.intent) for tq in queries]
         results_list = await asyncio.gather(*tasks)
         for results in results_list:
             all_results.extend(results)
 
-    deduped = _dedup(all_results)
+    deduped = _dedup_preserve_origin(all_results)
     logger.info("Total unique results: %d", len(deduped), extra={"component": "search"})
     return deduped

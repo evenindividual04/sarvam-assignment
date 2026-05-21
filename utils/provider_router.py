@@ -15,7 +15,9 @@ from typing import AsyncIterator, Optional
 
 from tenacity import retry, stop_after_attempt, wait_exponential
 
-from agent.models import PlannerOutput
+import json as _json
+
+from agent.models import PlannerOutput, QueryIntent, TypedQuery
 from utils.prompt_registry import PROMPT_REGISTRY
 
 logger = logging.getLogger(__name__)
@@ -32,24 +34,47 @@ SYNTHESIS_SYSTEM_PROMPT = PROMPT_REGISTRY["synthesizer"]["system"]
 PLANNING_PROMPT_TEMPLATE = PROMPT_REGISTRY["planner"]["template"]
 
 
+def _fallback_planner(query: str) -> PlannerOutput:
+    return PlannerOutput(
+        strategy="Direct retrieval fallback",
+        queries=[TypedQuery(text=query, intent=QueryIntent.PRIMARY)],
+    )
+
+
 def parse_planner_output(raw: str, query: str) -> PlannerOutput:
-    """Parse planner output with deterministic fallback."""
-    fallback = PlannerOutput(strategy="Direct retrieval fallback", queries=[query])
+    """Parse typed planner output with deterministic fallback."""
     start = raw.find("{")
     end = raw.rfind("}") + 1
     if start < 0 or end <= start:
-        return fallback
+        return _fallback_planner(query)
     try:
-        parsed = PlannerOutput.model_validate_json(raw[start:end])
+        data = _json.loads(raw[start:end])
     except Exception:
-        return fallback
-    queries = [q.strip() for q in parsed.queries if isinstance(q, str) and q.strip()]
-    if not queries:
-        queries = [query]
-    strategy = (parsed.strategy or fallback.strategy).strip()
-    if not strategy:
-        strategy = fallback.strategy
-    return PlannerOutput(strategy=strategy, queries=queries[:4])
+        return _fallback_planner(query)
+
+    raw_queries = data.get("queries") or []
+    typed: list[TypedQuery] = []
+    for item in raw_queries:
+        if not isinstance(item, dict):
+            continue
+        text = (item.get("text") or "").strip()
+        intent_str = (item.get("intent") or "").strip().lower()
+        if not text or not intent_str:
+            continue
+        try:
+            intent = QueryIntent(intent_str)
+        except ValueError:
+            return _fallback_planner(query)
+        rationale = item.get("rationale")
+        if rationale is not None and not isinstance(rationale, str):
+            rationale = None
+        typed.append(TypedQuery(text=text, intent=intent, rationale=rationale))
+
+    if not typed:
+        return _fallback_planner(query)
+
+    strategy = (data.get("strategy") or "").strip() or "Direct retrieval fallback"
+    return PlannerOutput(strategy=strategy, queries=typed[:4])
 
 
 @retry(wait=wait_exponential(multiplier=1, min=2, max=10), stop=stop_after_attempt(3), reraise=True)
