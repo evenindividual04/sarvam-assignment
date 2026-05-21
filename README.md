@@ -1,3 +1,14 @@
+---
+title: Deep Research Agent
+emoji: 🔎
+colorFrom: blue
+colorTo: indigo
+sdk: docker
+app_port: 7860
+pinned: false
+short_description: Web-grounded research agent with conflict detection and citation audit
+---
+
 # Deep Research Agent
 
 A multi-source web research agent built with plain Python asyncio, featuring conflict detection, session persistence, and LLM-as-judge evaluation.

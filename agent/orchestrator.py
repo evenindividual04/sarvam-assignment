@@ -80,9 +80,24 @@ def _ensure_uncertainty_block(answer: str, fallback_queries: list[str]) -> str:
 class ResearchOrchestrator:
     def __init__(self) -> None:
         self._guard = CitationGuard()
+        # Extractor (httpx.AsyncClient) is instantiated lazily on first use and
+        # reused across hops within the same run, then closed via `aclose()`.
+        # CLAUDE.md mandates a single client per Extractor; recreating per hop
+        # would defeat connection pooling and leak sockets on cancellation.
+        self._extractor: Extractor | None = None
+
+    def _get_extractor(self) -> Extractor:
+        if self._extractor is None:
+            self._extractor = Extractor()
+        return self._extractor
 
     async def aclose(self) -> None:
-        pass
+        if self._extractor is not None:
+            try:
+                await self._extractor.aclose()
+            except Exception:
+                pass
+            self._extractor = None
 
     async def run(
         self,
@@ -140,6 +155,18 @@ class ResearchOrchestrator:
             state_trace=state.get("state_trace", []),
         )
         await save_turn(turn)
+        # Best-effort: persist whatever context snippets we had selected so
+        # the cancelled turn isn't a black hole in the trace.
+        selected = state.get("selected_snippets") or []
+        if selected:
+            try:
+                await save_turn_context(turn_id, selected)
+            except Exception as e:
+                logger.warning(
+                    "Persist cancelled turn_context failed: %s",
+                    e,
+                    extra={"component": "orchestrator", "turn_id": turn_id},
+                )
 
     async def _run_body(
         self,
@@ -192,14 +219,17 @@ class ResearchOrchestrator:
         for t in prior_turns[-3:]:
             history_parts.append(f"Q: {t.query}\nA: {t.response or ''}")
         history_text = "\n\n".join(history_parts)
-        from utils.token_counter import count_tokens
+        from utils.token_counter import count_tokens, truncate_to_tokens
         while history_parts and count_tokens(history_text) > budget.history_budget:
             if len(history_parts) > 1 and not history_parts[0].startswith("[Summary"):
                 history_parts.pop(0)
             elif len(history_parts) > 1:
                 history_parts.pop(1)
             else:
-                history_text = history_parts[0][: budget.history_budget * 3]
+                # Last element still over budget — token-truncate precisely so
+                # Devanagari (~2.5 tokens/char) doesn't blow the budget the way
+                # a char-based slice would.
+                history_text = truncate_to_tokens(history_parts[0], budget.history_budget)
                 break
             history_text = "\n\n".join(history_parts)
 
@@ -317,7 +347,7 @@ class ResearchOrchestrator:
             _ck()
             state_trace.append("FETCHING")
             yield ExecutionEvent("fetching", STREAM_LABELS["fetching"])
-            extractor = Extractor()
+            extractor = self._get_extractor()
             t0 = time.time()
             try:
                 extracted = await asyncio.wait_for(
@@ -336,8 +366,6 @@ class ResearchOrchestrator:
                 logger.error("Extraction failed: %s", e, extra={"component": "orchestrator", "turn_id": turn_id})
                 run_metadata["fallback_path_taken"].append("fetch_error_rawcontent")
                 extracted = {r.url: r.raw_content for r in results}
-            finally:
-                await extractor.aclose()
             stage_ms["fetch_ms"] += int((time.time() - t0) * 1000)
 
             # Build chunks from extracted text
@@ -487,6 +515,9 @@ class ResearchOrchestrator:
 
         final_context_bundle = context_bundle
         state_holder["final_context_bundle"] = final_context_bundle
+        # Surface selected snippets so cancellation-time persistence can
+        # write a turn_context audit row even if synthesis never finishes.
+        state_holder["selected_snippets"] = selected
 
         # ── SYNTHESIZING (once, after retrieval loop) ───────────────────
         _ck()

@@ -331,15 +331,26 @@ async def save_turn(turn: Turn) -> None:
                 turn.created_at,
             ),
         )
-        # FTS5 index — concatenate query + response for keyword retrieval
+        # FTS5 index — concatenate query + response for keyword retrieval.
+        # FTS5 has no unique constraint, so on replay (cancel-then-rerun under the
+        # same turn_id) we must delete the prior FTS row before inserting.
+        await db.execute("DELETE FROM fts_content WHERE turn_id = ?", (turn.turn_id,))
         fts_text = f"{turn.query} {turn.response or ''}".strip()
         await db.execute(
             "INSERT INTO fts_content (turn_id, content) VALUES (?, ?)",
             (turn.turn_id, fts_text),
         )
+        # Derive turn_count from the source of truth (turns table) rather than
+        # incrementing — that's both idempotent on `INSERT OR REPLACE` retries
+        # and race-safe under concurrent /research calls on the same session.
         await db.execute(
-            "UPDATE sessions SET updated_at = ?, turn_count = turn_count + 1 WHERE session_id = ?",
-            (turn.created_at, turn.session_id),
+            """
+            UPDATE sessions
+               SET updated_at = ?,
+                   turn_count = (SELECT COUNT(*) FROM turns WHERE session_id = ?)
+             WHERE session_id = ?
+            """,
+            (turn.created_at, turn.session_id, turn.session_id),
         )
         await db.commit()
     logger.info("Turn saved", extra={"component": "memory", "turn_id": turn.turn_id})

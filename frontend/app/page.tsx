@@ -427,7 +427,9 @@ function ChatTurn({
               <div className="flex items-center justify-between pt-1">
                 <span className="font-mono text-[11px] tabular-nums text-muted-foreground">
                   {(row.historyTurn.urls_opened?.length ?? 0)} sources ·{" "}
-                  {formatMs(row.historyTurn.latency_ms)}
+                  {(row.historyTurn.prompt_tokens ?? 0) +
+                    (row.historyTurn.completion_tokens ?? 0)}{" "}
+                  tokens · {formatMs(row.historyTurn.latency_ms)}
                 </span>
                 <div className="flex items-center gap-1">
                   <Button

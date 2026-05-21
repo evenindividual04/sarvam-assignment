@@ -104,6 +104,8 @@ async def get_run_summary(run_at: str) -> dict:
             )
         ]
 
+        # SQLite forbids referencing SELECT aliases in WHERE on some builds —
+        # inline the json_extract expression in both clauses to stay portable.
         conf_sql = """
         SELECT
           json_extract(t.run_metadata_json, '$.planner_output.confidence') AS confidence,
@@ -111,8 +113,9 @@ async def get_run_summary(run_at: str) -> dict:
           AVG(e.claim_precision_score) AS mean_claim_precision,
           COUNT(*) AS n
         FROM eval_runs e LEFT JOIN turns t ON t.turn_id = e.turn_id
-        WHERE e.run_at = ? AND confidence IS NOT NULL
-        GROUP BY confidence
+        WHERE e.run_at = ?
+          AND json_extract(t.run_metadata_json, '$.planner_output.confidence') IS NOT NULL
+        GROUP BY json_extract(t.run_metadata_json, '$.planner_output.confidence')
         """
         try:
             calib_buckets = [dict(r) for r in await db.execute_fetchall(conf_sql, (run_at,))]

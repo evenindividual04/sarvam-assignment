@@ -23,6 +23,19 @@ def count_tokens(text: str) -> int:
     return len(_enc.encode(text))
 
 
+def truncate_to_tokens(text: str, max_tokens: int) -> str:
+    """Truncate `text` so it encodes to at most `max_tokens` cl100k_base tokens.
+    Returns `text` unchanged when already within budget. Useful as a precise
+    last-resort fallback when char-based slicing would overshoot the budget
+    (e.g. Devanagari, where 1 char ≈ 2.5 tokens)."""
+    if max_tokens <= 0:
+        return ""
+    tokens = _enc.encode(text)
+    if len(tokens) <= max_tokens:
+        return text
+    return _enc.decode(tokens[:max_tokens])
+
+
 @dataclass
 class ContextBudget:
     total_tokens: int = 16000

@@ -42,6 +42,20 @@ export function SessionsRail({
     };
   }, [refreshKey]);
 
+  // Refresh the list when the chat tab regains focus — covers the case where
+  // the user submitted a turn elsewhere or refreshed the backend.
+  useEffect(() => {
+    const onFocus = () => {
+      listSessions()
+        .then(setSessions)
+        .catch(() => {
+          /* keep previous list */
+        });
+    };
+    window.addEventListener("focus", onFocus);
+    return () => window.removeEventListener("focus", onFocus);
+  }, []);
+
   return (
     <div className="w-[260px] shrink-0 border-r border-border bg-background flex flex-col h-full">
       <div className="px-5 h-14 border-b border-border flex items-center justify-between">

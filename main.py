@@ -56,21 +56,39 @@ def _format_event(payload: dict) -> str:
     return f"data: {json.dumps(payload)}\n\n"
 
 
+async def _disconnect_watcher(
+    request: Request, token, turn_id: str, interval_s: float = 1.0
+) -> None:
+    """Background task: polls `request.is_disconnected()` independently of the
+    SSE generator so cancellation fires *during* long stalls (e.g. multi-second
+    synth chunks) instead of only at the next event boundary."""
+    try:
+        while True:
+            await asyncio.sleep(interval_s)
+            if await request.is_disconnected():
+                logger.info(
+                    "Client disconnected; cancelling stream",
+                    extra={"component": "sse", "turn_id": turn_id},
+                )
+                token.cancel()
+                return
+    except asyncio.CancelledError:
+        return
+
+
 async def _research_stream(req: ChatRequest, request: Request):
-    """SSE generator: registers a cancellation token, polls disconnect,
-    streams ExecutionEvents from the orchestrator."""
+    """SSE generator: registers a cancellation token, spawns a parallel
+    disconnect watcher, streams ExecutionEvents from the orchestrator."""
     turn_id = str(uuid.uuid4())
     registry = get_registry()
     token = await registry.register(turn_id)
     orchestrator = ResearchOrchestrator()
     first_event = True
+    watcher = asyncio.create_task(_disconnect_watcher(request, token, turn_id))
     try:
         async for event in orchestrator.run(
             req.query, req.session_id, cancel_token=token, turn_id=turn_id
         ):
-            # Disconnect poll between events
-            if await request.is_disconnected():
-                token.cancel()
             data = event.data
             if first_event and event.step == "planning":
                 # Inject turn_id so the client can issue cancel calls before /done.
@@ -85,6 +103,11 @@ async def _research_stream(req: ChatRequest, request: Request):
         logger.error("Orchestrator error: %s", e, extra={"turn_id": turn_id})
         yield _format_event({"step": "error", "label": "error", "data": str(e)})
     finally:
+        watcher.cancel()
+        try:
+            await watcher
+        except (asyncio.CancelledError, Exception):
+            pass
         await orchestrator.aclose()
         await registry.release(turn_id)
 
@@ -133,13 +156,16 @@ async def get_session_history(session_id: str):
         db.row_factory = aiosqlite.Row
         rows = await db.execute_fetchall(
             """
-            SELECT turn_id, session_id, query, response, created_at,
-                   state_trace, doc_map, search_queries, urls_opened,
-                   context_xml_sent, citation_integrity_score, claim_precision_score,
-                   prompt_tokens, completion_tokens, latency_ms,
-                   planning_ms, search_ms, fetch_ms, select_ms, synthesize_ms,
-                   run_metadata_json
-            FROM turns WHERE session_id = ? ORDER BY created_at ASC
+            SELECT t.turn_id, t.session_id, t.query, t.response, t.created_at,
+                   t.state_trace, t.doc_map, t.search_queries, t.urls_opened,
+                   t.context_xml_sent, t.citation_integrity_score, t.claim_precision_score,
+                   t.prompt_tokens, t.completion_tokens, t.latency_ms,
+                   t.planning_ms, t.search_ms, t.fetch_ms, t.select_ms, t.synthesize_ms,
+                   t.run_metadata_json,
+                   p.probe_ms AS probe_ms
+              FROM turns t
+              LEFT JOIN contradiction_probes p ON p.turn_id = t.turn_id
+             WHERE t.session_id = ? ORDER BY t.created_at ASC
             """,
             (session_id,),
         )
@@ -281,12 +307,13 @@ def _adapt_eval_question(row: dict) -> dict:
 
 def _rename_category_metric_keys(d: dict) -> dict:
     """For per-category rows: backend uses `avg_X_score`, frontend
-    `EvalSummaryCategoryRow` uses bare `X` (no avg_ prefix)."""
+    `EvalSummaryCategoryRow` uses the un-suffixed metric name from
+    `_EVAL_METRIC_RENAME` (e.g. `faithfulness`, `answer_relevance`)."""
     out = dict(d)
-    for old, new in _EVAL_AVG_RENAME.items():
-        bare = new.removeprefix("avg_")  # avg_faithfulness → faithfulness
-        if old in out and bare not in out:
-            out[bare] = out.pop(old)
+    for score_col, bare in _EVAL_METRIC_RENAME.items():
+        avg_col = f"avg_{score_col}"
+        if avg_col in out and bare not in out:
+            out[bare] = out.pop(avg_col)
     return out
 
 

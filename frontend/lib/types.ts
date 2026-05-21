@@ -77,6 +77,7 @@ export interface Turn {
 
 export interface TurnDetail extends Turn {
   claim_verification_json?: unknown;
+  run_metadata_json?: Record<string, unknown>;
   claim_audit?: ClaimAuditRow[];
   contradiction_probes?: ContradictionProbeRow | null;
 }
