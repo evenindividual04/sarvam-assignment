@@ -202,6 +202,7 @@ async def init_db() -> None:
             ("claim_verification_json", "ALTER TABLE turns ADD COLUMN claim_verification_json TEXT"),
             ("claim_precision_score_eval", "ALTER TABLE eval_runs ADD COLUMN claim_precision_score REAL"),
             ("eval_turn_id", "ALTER TABLE eval_runs ADD COLUMN turn_id TEXT"),
+            ("eval_language", "ALTER TABLE eval_runs ADD COLUMN language TEXT DEFAULT 'en'"),
         ]:
             try:
                 await db.execute(ddl)

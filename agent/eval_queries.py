@@ -25,7 +25,8 @@ _METRIC_COLS = [
 
 
 async def list_eval_runs() -> list[dict]:
-    """Aggregate per run_at timestamp."""
+    """Aggregate per run_at timestamp. Includes a per-language breakdown
+    (V3.4) when any non-default language is present in the run."""
     sql = f"""
     SELECT
         run_at,
@@ -36,10 +37,33 @@ async def list_eval_runs() -> list[dict]:
     GROUP BY run_at
     ORDER BY run_at DESC
     """
+    lang_sql = f"""
+    SELECT
+        run_at,
+        COALESCE(language, 'en') AS language,
+        COUNT(*) AS n_questions,
+        SUM(CASE WHEN failure_class = 'PASS' OR failure_class IS NULL THEN 1 ELSE 0 END) * 1.0 / COUNT(*) AS pass_rate,
+        {", ".join(f"AVG({c}) AS avg_{c}" for c in _METRIC_COLS)}
+    FROM eval_runs
+    GROUP BY run_at, COALESCE(language, 'en')
+    """
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
-        rows = await db.execute_fetchall(sql)
-        return [dict(r) for r in rows]
+        rows = [dict(r) for r in await db.execute_fetchall(sql)]
+        lang_rows = [dict(r) for r in await db.execute_fetchall(lang_sql)]
+
+    by_run: dict[str, dict[str, dict]] = {}
+    for lr in lang_rows:
+        ra = lr.pop("run_at")
+        lang = lr.pop("language")
+        by_run.setdefault(ra, {})[lang] = lr
+
+    for row in rows:
+        breakdown = by_run.get(row["run_at"], {})
+        # Only include the breakdown when at least one non-default language is present.
+        if any(k != "en" for k in breakdown):
+            row["by_language"] = breakdown
+    return rows
 
 
 async def get_run_summary(run_at: str) -> dict:

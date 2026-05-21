@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from datetime import datetime, timezone
 from urllib.parse import urlparse
 
@@ -23,6 +24,19 @@ logger = logging.getLogger(__name__)
 _PARALLEL_BASE = "https://api.parallel.ai/v1"
 _SERPER_BASE = "https://google.serper.dev/search"
 _MAX_RESULTS = int(os.getenv("AGENT_MAX_SOURCES", "8"))
+
+# Devanagari Unicode block: U+0900–U+097F. Used for Hindi (and other Indic) detection.
+_DEVANAGARI_RE = re.compile(r"[ऀ-ॿ]")
+
+
+def _detect_language(text: str) -> str:
+    """Detect query language. Currently 'hi' for any Devanagari content, else 'en'.
+
+    V3.4 scope: Hindi-only Indic detection. Other Indic scripts can be added later
+    without changing the routing contract (callers only care about 'hi' vs not)."""
+    if not text:
+        return "en"
+    return "hi" if _DEVANAGARI_RE.search(text) else "en"
 
 
 def _domain(url: str) -> str:
@@ -212,9 +226,34 @@ async def _search_single_query(
     q: str,
     client: httpx.AsyncClient,
     intent: QueryIntent = QueryIntent.PRIMARY,
+    language: str | None = None,
 ) -> list[SearchResult]:
-    """Route a query to providers based on intent. Returns results tagged with intent_origin."""
+    """Route a query to providers based on intent. Returns results tagged with intent_origin.
+
+    V3.4: when ``language == "hi"`` (Devanagari detected), prefer Parallel only —
+    Tavily and Serper return English-heavy results for Hindi queries. If Parallel
+    fails (or breaker open), fall through to the standard chain so the turn still
+    completes in a degraded mode."""
     results: list[SearchResult] = []
+
+    if language is None:
+        language = _detect_language(q)
+
+    if language == "hi":
+        results = await _try(lambda: _search_parallel(q, client), "Parallel(hi)", q)
+        if not results:
+            logger.info(
+                "Hindi query Parallel returned empty/breaker-open; falling through to Tavily/Serper",
+                extra={"component": "search"},
+            )
+            results = await _try(lambda: _search_tavily(q, client), "Tavily(hi-fallback)", q)
+            if not results:
+                results = await _try(lambda: _search_serper(q, client), "Serper(hi-fallback)", q)
+        tag = "contradiction_probe" if intent == QueryIntent.CONTRADICTION_PROBE else intent.value
+        for r in results:
+            if r.intent_origin is None:
+                r.intent_origin = tag
+        return results
 
     if intent == QueryIntent.RECENCY_CHECK and os.getenv("TAVILY_API_KEY"):
         results = await _try(lambda: _search_tavily_news(q, client, days=30), "Tavily(news)", q)
@@ -268,7 +307,11 @@ async def search(queries: list[TypedQuery], cancel_token=None) -> list[SearchRes
         for tq in queries:
             if cancel_token is not None and cancel_token.is_set():
                 break
-            tasks.append(_search_single_query(tq.text, client, tq.intent))
+            tasks.append(
+                _search_single_query(
+                    tq.text, client, tq.intent, language=_detect_language(tq.text)
+                )
+            )
         results_list = await asyncio.gather(*tasks)
         for results in results_list:
             all_results.extend(results)
