@@ -16,7 +16,7 @@ import aiosqlite
 from agent import eval_queries
 from agent import memory as _memory
 from agent.memory import init_db, DB_PATH
-from agent.orchestrator import ResearchOrchestrator
+from agent.orchestrator import ResearchOrchestrator, RuntimeConfig
 from utils.cancellation import get_registry
 from utils.env_check import validate
 
@@ -67,6 +67,13 @@ app.add_middleware(
 class ChatRequest(BaseModel):
     query: str
     session_id: str
+    # Stateless runtime overrides (Option D). Keys are env-var-style names
+    # (e.g. "HYBRID_RETRIEVAL", "FAILURE_POLICY_MAX_HOPS", "CONTEXT_SELECTION_STRATEGY").
+    # Values may be strings, ints, or booleans — the orchestrator coerces.
+    # Frontend stores these in localStorage and includes them with each turn,
+    # so eval_runner.py (which doesn't send overrides) stays reproducible
+    # from env vars alone.
+    overrides: dict | None = None
 
 
 def _format_event(payload: dict) -> str:
@@ -102,9 +109,11 @@ async def _research_stream(req: ChatRequest, request: Request):
     orchestrator = ResearchOrchestrator()
     first_event = True
     watcher = asyncio.create_task(_disconnect_watcher(request, token, turn_id))
+    config = RuntimeConfig.from_overrides(req.overrides)
     try:
         async for event in orchestrator.run(
-            req.query, req.session_id, cancel_token=token, turn_id=turn_id
+            req.query, req.session_id, cancel_token=token, turn_id=turn_id,
+            config=config,
         ):
             data = event.data
             if first_event and event.step == "planning":
@@ -155,6 +164,42 @@ async def cancel_research(turn_id: str):
 @app.get("/health")
 async def health():
     return {"status": "ok", "version": "v2"}
+
+
+@app.get("/settings/defaults")
+async def settings_defaults():
+    """Effective config when no per-request override is sent.
+    The settings page reads this as 'baseline' so the user can see what would
+    happen without overrides — and which knobs are currently runtime-toggleable.
+    """
+    cfg = RuntimeConfig.from_overrides(None)
+    return {
+        "effective": cfg.as_dict(),
+        "knobs": [
+            {
+                "key": "HYBRID_RETRIEVAL",
+                "label": "Hybrid retrieval (BM25 + sqlite-vec RRF)",
+                "type": "boolean",
+                "available": _memory._VEC_AVAILABLE,
+                "note": (
+                    None if _memory._VEC_AVAILABLE
+                    else "sqlite-vec extension failed to load on this Python build; toggle is inert."
+                ),
+            },
+            {
+                "key": "FAILURE_POLICY_MAX_HOPS",
+                "label": "Max retrieval hops",
+                "type": "integer",
+                "min": 1, "max": 3,
+            },
+            {
+                "key": "CONTEXT_SELECTION_STRATEGY",
+                "label": "Selection strategy",
+                "type": "enum",
+                "choices": ["heuristic", "mmr"],
+            },
+        ],
+    }
 
 
 @app.get("/sessions")

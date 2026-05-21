@@ -7,6 +7,7 @@ import type {
   Turn,
   TurnDetail,
 } from "./types";
+import type { DefaultsResponse } from "./settings";
 
 export const BACKEND =
   process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:7860";
@@ -33,6 +34,10 @@ async function getJson<T>(path: string, init?: RequestInit): Promise<T> {
 
 export async function getHealth(): Promise<{ status: string; version?: string }> {
   return getJson("/health");
+}
+
+export async function getSettingsDefaults(): Promise<DefaultsResponse> {
+  return getJson("/settings/defaults");
 }
 
 export async function listSessions(): Promise<SessionListItem[]> {

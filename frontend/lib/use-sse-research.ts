@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { BACKEND, cancelResearch } from "./api";
+import { loadOverrides } from "./settings";
 import type { DoneEventData, ExecutionEvent } from "./types";
 
 export type SseStatus = "idle" | "streaming" | "done" | "cancelled" | "error";
@@ -61,10 +62,18 @@ export function useSseResearch(): UseSseResearchReturn {
     abortRef.current = ac;
 
     try {
+      // Snapshot overrides at request time so a settings flip mid-stream
+      // doesn't retroactively change what this turn ran under.
+      const overrides = loadOverrides();
+      const hasOverrides = Object.keys(overrides).length > 0;
       const res = await fetch(`${BACKEND}/research`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ query, session_id: sessionId }),
+        body: JSON.stringify({
+          query,
+          session_id: sessionId,
+          ...(hasOverrides ? { overrides } : {}),
+        }),
         signal: ac.signal,
       });
       if (!res.ok || !res.body) {

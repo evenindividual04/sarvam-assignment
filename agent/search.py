@@ -25,18 +25,30 @@ _PARALLEL_BASE = "https://api.parallel.ai/v1"
 _SERPER_BASE = "https://google.serper.dev/search"
 _MAX_RESULTS = int(os.getenv("AGENT_MAX_SOURCES", "8"))
 
-# Devanagari Unicode block: U+0900–U+097F. Used for Hindi (and other Indic) detection.
-_DEVANAGARI_RE = re.compile(r"[ऀ-ॿ]")
+# Indic script Unicode blocks. Distinguish at the SCRIPT level only —
+# Hindi and Marathi share Devanagari and can't be told apart from script alone;
+# the eval dataset's explicit `language` field disambiguates them downstream.
+_DEVANAGARI_RE = re.compile(r"[ऀ-ॿ]")   # Devanagari: Hindi, Marathi, Sanskrit
+_TAMIL_RE = re.compile(r"[஀-௿]")         # Tamil
+_BENGALI_RE = re.compile(r"[ঀ-৿]")       # Bengali, Assamese
 
 
 def _detect_language(text: str) -> str:
-    """Detect query language. Currently 'hi' for any Devanagari content, else 'en'.
+    """Detect query script. Returns one of: ``hi`` | ``ta`` | ``bn`` | ``en``.
 
-    V3.4 scope: Hindi-only Indic detection. Other Indic scripts can be added later
-    without changing the routing contract (callers only care about 'hi' vs not)."""
+    Devanagari (Hindi, Marathi, Sanskrit) all bucket into ``hi`` because they
+    share a script — the dataset's explicit ``language`` field can still tag
+    Marathi as ``mr``. For routing decisions (Indic vs non-Indic), the script
+    is what matters."""
     if not text:
         return "en"
-    return "hi" if _DEVANAGARI_RE.search(text) else "en"
+    if _DEVANAGARI_RE.search(text):
+        return "hi"
+    if _TAMIL_RE.search(text):
+        return "ta"
+    if _BENGALI_RE.search(text):
+        return "bn"
+    return "en"
 
 
 def _domain(url: str) -> str:
@@ -230,25 +242,27 @@ async def _search_single_query(
 ) -> list[SearchResult]:
     """Route a query to providers based on intent. Returns results tagged with intent_origin.
 
-    V3.4: when ``language == "hi"`` (Devanagari detected), prefer Parallel only —
-    Tavily and Serper return English-heavy results for Hindi queries. If Parallel
-    fails (or breaker open), fall through to the standard chain so the turn still
-    completes in a degraded mode."""
+    V3.4 / FDSE add-on: when ``language`` is any Indic script (``hi``/``ta``/``bn``),
+    prefer Parallel only — Tavily and Serper return English-heavy results for
+    Indic queries. If Parallel fails (or its breaker is open), fall through to
+    the standard chain so the turn still completes in a degraded mode."""
     results: list[SearchResult] = []
 
     if language is None:
         language = _detect_language(q)
 
-    if language == "hi":
-        results = await _try(lambda: _search_parallel(q, client), "Parallel(hi)", q)
+    if language in {"hi", "ta", "bn"}:
+        label = f"Parallel({language})"
+        results = await _try(lambda: _search_parallel(q, client), label, q)
         if not results:
             logger.info(
-                "Hindi query Parallel returned empty/breaker-open; falling through to Tavily/Serper",
+                "Indic query (%s) Parallel returned empty/breaker-open; falling through to Tavily/Serper",
+                language,
                 extra={"component": "search"},
             )
-            results = await _try(lambda: _search_tavily(q, client), "Tavily(hi-fallback)", q)
+            results = await _try(lambda: _search_tavily(q, client), f"Tavily({language}-fallback)", q)
             if not results:
-                results = await _try(lambda: _search_serper(q, client), "Serper(hi-fallback)", q)
+                results = await _try(lambda: _search_serper(q, client), f"Serper({language}-fallback)", q)
         tag = "contradiction_probe" if intent == QueryIntent.CONTRADICTION_PROBE else intent.value
         for r in results:
             if r.intent_origin is None:

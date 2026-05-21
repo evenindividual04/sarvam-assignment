@@ -8,6 +8,11 @@ COST_PER_1K_TOKENS: dict[str, dict[str, float]] = {
     "groq-llama-3.3-70b": {"prompt": 0.0, "completion": 0.0},
     "gpt-4o-mini-github": {"prompt": 0.0, "completion": 0.0},
     "openrouter-deepseek-r1": {"prompt": 0.0, "completion": 0.0},
+    # Sarvam Model API — Apache-2.0 base models; API-tier pricing not yet
+    # published. Verify against https://docs.sarvam.ai/ before billing.
+    "sarvam-m": {"prompt": 0.0, "completion": 0.0},
+    "sarvam-30b": {"prompt": 0.0, "completion": 0.0},
+    "sarvam-105b": {"prompt": 0.0, "completion": 0.0},
 }
 
 DEFAULT_MODEL = "gemini-2.5-flash"

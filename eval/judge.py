@@ -364,18 +364,20 @@ def judge_factual_accuracy(
 
 # ── Cross-language consistency (post-run aggregate) ─────────────────────────
 
-# Devanagari word tokenizer — pure regex, no external libs.
+# Multi-Indic word tokenizer — pure regex, no external libs.
+# Covers Devanagari (Hindi/Marathi/Sanskrit), Tamil, and Bengali/Assamese.
 _DEVANAGARI_RE = re.compile(r"[ऀ-ॿ]+")
+_INDIC_WORD_RE = re.compile(r"[ऀ-ॿ஀-௿ঀ-৿]+")
 
 
 def _extract_entities_for_consistency(answer: str) -> set[str]:
     """Language-aware entity extraction. Latin-script entities via ENTITY_RE
-    (proper nouns / numbers); Devanagari word tokens added when present.
-    Lowercased + stripped for set membership."""
+    (proper nouns / numbers); Indic word tokens (Devanagari, Tamil, Bengali)
+    added when present. Lowercased + stripped for set membership."""
     from agent.claim_verifier import ENTITY_RE
 
     out: set[str] = {e.strip().lower() for e in ENTITY_RE.findall(answer or "") if e.strip()}
-    for token in _DEVANAGARI_RE.findall(answer or ""):
+    for token in _INDIC_WORD_RE.findall(answer or ""):
         token = token.strip()
         if len(token) >= 2:
             out.add(token.lower())
@@ -392,33 +394,41 @@ def jaccard(a: set[str], b: set[str]) -> float:
 
 
 async def judge_cross_language_consistency(run_at: str) -> list[dict]:
-    """For every concept_id with both en and hi answers in `run_at`,
-    compute Jaccard over their entity sets and flag pairs <0.6.
-    Returns one dict per concept_id."""
+    """For every concept_id with an English answer plus at least one Indic
+    answer (hi / ta / bn / mr) in ``run_at``, compute Jaccard over the entity
+    sets and flag pairs <0.6. Returns one dict per (concept_id, indic_language).
+
+    English is anchored as the reference language. Multi-Indic pairing (e.g.
+    ta↔bn) is intentionally not emitted — comparing two Indic scripts to each
+    other has near-zero token overlap by construction.
+    """
     import json as _json
     from pathlib import Path
 
     import aiosqlite
     from agent.memory import DB_PATH
 
+    INDIC_LANGS = ("hi", "ta", "bn", "mr")
+
     # Load dataset to map question_id -> concept_id.
     dataset_path = Path(__file__).parent / "dataset.json"
     with open(dataset_path) as fh:
         dataset = _json.load(fh)
-    by_qid = {q["id"]: q for q in dataset}
-    pairs: dict[str, dict[str, str]] = {}  # concept_id -> {"en": qid, "hi": qid}
+    pairs: dict[str, dict[str, str]] = {}  # concept_id -> {lang: qid}
     for q in dataset:
         cid = q.get("concept_id")
         if not cid:
             continue
         pairs.setdefault(cid, {})[q.get("language", "en")] = q["id"]
 
-    paired_concepts = [
-        (cid, langs["en"], langs["hi"])
-        for cid, langs in pairs.items()
-        if "en" in langs and "hi" in langs
-    ]
-    if not paired_concepts:
+    paired: list[tuple[str, str, str, str]] = []  # (cid, en_qid, indic_lang, indic_qid)
+    for cid, langs in pairs.items():
+        if "en" not in langs:
+            continue
+        for lang in INDIC_LANGS:
+            if lang in langs:
+                paired.append((cid, langs["en"], lang, langs[lang]))
+    if not paired:
         return []
 
     async with aiosqlite.connect(DB_PATH) as db:
@@ -430,20 +440,26 @@ async def judge_cross_language_consistency(run_at: str) -> list[dict]:
     answers = {r["question_id"]: (r["agent_answer"] or "") for r in rows}
 
     results: list[dict] = []
-    for cid, en_qid, hi_qid in paired_concepts:
-        if en_qid not in answers or hi_qid not in answers:
+    for cid, en_qid, indic_lang, indic_qid in paired:
+        if en_qid not in answers or indic_qid not in answers:
             continue
         en_ents = _extract_entities_for_consistency(answers[en_qid])
-        hi_ents = _extract_entities_for_consistency(answers[hi_qid])
-        score = jaccard(en_ents, hi_ents)
+        indic_ents = _extract_entities_for_consistency(answers[indic_qid])
+        score = jaccard(en_ents, indic_ents)
         flagged = score < 0.6
         reason = (
-            f"|en|={len(en_ents)} |hi|={len(hi_ents)} |∩|={len(en_ents & hi_ents)} |∪|={len(en_ents | hi_ents)}"
+            f"|en|={len(en_ents)} |{indic_lang}|={len(indic_ents)} "
+            f"|∩|={len(en_ents & indic_ents)} |∪|={len(en_ents | indic_ents)}"
         )
         results.append({
             "concept_id": cid,
             "en_question_id": en_qid,
-            "hi_question_id": hi_qid,
+            "indic_language": indic_lang,
+            # The DB column is named hi_question_id for legacy reasons; we keep
+            # populating it with the Indic partner qid regardless of script so
+            # the existing schema/saver continues to work.
+            "hi_question_id": indic_qid,
+            "indic_question_id": indic_qid,
             "jaccard_score": score,
             "flagged_inconsistent": flagged,
             "reasoning": reason,
