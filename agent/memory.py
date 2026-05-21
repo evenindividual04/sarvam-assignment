@@ -108,6 +108,26 @@ CREATE_CONTRADICTION_PROBES_INDEX = """
 CREATE INDEX IF NOT EXISTS idx_probes_turn ON contradiction_probes(turn_id);
 """
 
+CREATE_CLAIM_AUDIT = """
+CREATE TABLE IF NOT EXISTS claim_audit (
+    audit_id        TEXT PRIMARY KEY,
+    turn_id         TEXT NOT NULL REFERENCES turns(turn_id),
+    claim_idx       INTEGER NOT NULL,
+    claim_text      TEXT NOT NULL,
+    cited_doc_ids   TEXT NOT NULL,
+    method          TEXT NOT NULL,
+    overlap         REAL,
+    entity_match    REAL,
+    score           REAL NOT NULL,
+    status          TEXT NOT NULL,
+    created_at      TEXT NOT NULL
+);
+"""
+
+CREATE_CLAIM_AUDIT_INDEX = """
+CREATE INDEX IF NOT EXISTS idx_claim_audit_turn ON claim_audit(turn_id);
+"""
+
 CREATE_EVAL_RUNS = """
 CREATE TABLE IF NOT EXISTS eval_runs (
     run_id                   TEXT PRIMARY KEY,
@@ -141,6 +161,8 @@ async def init_db() -> None:
         await db.execute(CREATE_CONTRADICTION_PROBES)
         await db.execute(CREATE_CONTRADICTION_PROBES_INDEX)
         await db.execute(CREATE_EVAL_RUNS)
+        await db.execute(CREATE_CLAIM_AUDIT)
+        await db.execute(CREATE_CLAIM_AUDIT_INDEX)
         try:
             await db.execute("ALTER TABLE eval_runs ADD COLUMN context_precision_score REAL")
         except aiosqlite.OperationalError:
@@ -153,6 +175,10 @@ async def init_db() -> None:
             ("synthesize_ms", "ALTER TABLE turns ADD COLUMN synthesize_ms INTEGER DEFAULT 0"),
             ("run_metadata_json", "ALTER TABLE turns ADD COLUMN run_metadata_json TEXT"),
             ("trust_score", "ALTER TABLE turn_context ADD COLUMN trust_score REAL DEFAULT 0.7"),
+            ("claim_precision_score_turns", "ALTER TABLE turns ADD COLUMN claim_precision_score REAL DEFAULT 1.0"),
+            ("claim_verification_json", "ALTER TABLE turns ADD COLUMN claim_verification_json TEXT"),
+            ("claim_precision_score_eval", "ALTER TABLE eval_runs ADD COLUMN claim_precision_score REAL"),
+            ("eval_turn_id", "ALTER TABLE eval_runs ADD COLUMN turn_id TEXT"),
         ]:
             try:
                 await db.execute(ddl)
@@ -179,8 +205,9 @@ async def save_turn(turn: Turn) -> None:
             (turn_id, session_id, query, plan, search_queries, urls_opened, response,
              context_xml_sent, doc_map, citation_integrity_score, hallucination_count,
              prompt_tokens, completion_tokens, latency_ms, planning_ms, search_ms,
-             fetch_ms, select_ms, synthesize_ms, run_metadata_json, state_trace, created_at)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+             fetch_ms, select_ms, synthesize_ms, run_metadata_json, state_trace,
+             claim_precision_score, claim_verification_json, created_at)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """,
             (
                 turn.turn_id, turn.session_id, turn.query, turn.plan,
@@ -193,6 +220,8 @@ async def save_turn(turn: Turn) -> None:
                 turn.select_ms, turn.synthesize_ms,
                 json.dumps(turn.run_metadata_json) if turn.run_metadata_json else None,
                 json.dumps(turn.state_trace),
+                turn.claim_precision_score,
+                turn.claim_verification_json,
                 turn.created_at,
             ),
         )
@@ -342,6 +371,40 @@ async def get_latest_summary(session_id: str) -> Optional[str]:
             (session_id,),
         )
     return rows[0]["summary"] if rows else None
+
+
+async def save_claim_audit(turn_id: str, records: list) -> None:
+    """Persist one row per ClaimRecord. Caller passes list[ClaimRecord]."""
+    if not records:
+        return
+    now = datetime.now(timezone.utc).isoformat()
+    import uuid as _uuid
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.executemany(
+            """
+            INSERT INTO claim_audit
+            (audit_id, turn_id, claim_idx, claim_text, cited_doc_ids,
+             method, overlap, entity_match, score, status, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    str(_uuid.uuid4()),
+                    turn_id,
+                    idx,
+                    r.claim_text,
+                    json.dumps(list(r.doc_ids)),
+                    r.method,
+                    r.overlap,
+                    r.entity_match,
+                    r.score,
+                    r.status,
+                    now,
+                )
+                for idx, r in enumerate(records)
+            ],
+        )
+        await db.commit()
 
 
 async def session_exists(session_id: str) -> bool:

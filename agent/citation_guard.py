@@ -14,6 +14,38 @@ _DOC_ID_PATTERN = re.compile(r'doc_\d+')
 _GROUPED_DOC_PATTERN = re.compile(r'\[(doc_\d+(?:\s*,\s*doc_\d+)*)\]')
 
 
+_CLAIM_RE = re.compile(
+    r'([^.!?\n]*?[.!?])\s*((?:\[doc_\d+\]\s*)+)',
+    re.MULTILINE,
+)
+_DOC_ID_INNER_RE = re.compile(r'\[(doc_\d+)\]')
+
+
+def parse_claims_with_citations(
+    answer: str,
+) -> list[tuple[str, tuple[str, ...], tuple[int, int]]]:
+    """
+    Extract (claim_text, doc_ids, (start, end_of_citation_block)) tuples.
+
+    The citation block end is the offset after the final `]` of the trailing
+    citation group, so callers can splice in markers without disturbing it.
+    """
+    out: list[tuple[str, tuple[str, ...], tuple[int, int]]] = []
+    for m in _CLAIM_RE.finditer(answer):
+        claim_text = m.group(1)
+        citation_block = m.group(2)
+        doc_ids = tuple(_DOC_ID_INNER_RE.findall(citation_block))
+        if not doc_ids:
+            continue
+        # End of citation block — strip trailing whitespace included by `\s*`.
+        end = m.end(2)
+        # Walk back past any trailing whitespace included in group 2.
+        while end > m.start(2) and answer[end - 1].isspace():
+            end -= 1
+        out.append((claim_text, doc_ids, (m.start(1), end)))
+    return out
+
+
 def _extract_doc_ids(text: str) -> list[str]:
     """Extract doc ids even from grouped refs such as [doc_1, doc_2]."""
     ids = []

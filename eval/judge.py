@@ -60,6 +60,12 @@ class ContextPrecisionResult:
     reasoning: str
 
 
+@dataclass
+class ClaimPrecisionResult:
+    claim_precision_score: float
+    reasoning: str
+
+
 def _parse_json(raw: str) -> dict:
     """Extract first JSON object from LLM response."""
     start = raw.find("{")
@@ -214,10 +220,46 @@ def judge_citation_integrity(answer: str, doc_map: dict, fetched_urls: set) -> C
     )
 
 
+async def judge_claim_precision(turn_id: str) -> ClaimPrecisionResult:
+    """Deterministic. Aggregates from `claim_audit` populated at synthesis time."""
+    import aiosqlite
+    from agent.memory import DB_PATH
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        rows = await db.execute_fetchall(
+            "SELECT method, status FROM claim_audit WHERE turn_id = ?",
+            (turn_id,),
+        )
+    rows = [dict(r) for r in rows]
+    if not rows:
+        return ClaimPrecisionResult(
+            claim_precision_score=1.0,
+            reasoning="No claims to verify.",
+        )
+    total = len(rows)
+    supported = sum(1 for r in rows if r["status"] in ("supported", "ambiguous_resolved"))
+    det = sum(1 for r in rows if r["method"] == "deterministic")
+    llm = sum(1 for r in rows if r["method"] == "llm")
+    skip = sum(1 for r in rows if r["method"] == "skip")
+    score = supported / total
+    return ClaimPrecisionResult(
+        claim_precision_score=score,
+        reasoning=f"Verified {supported}/{total} claims ({det} deterministic, {llm} LLM-resolved, {skip} skipped).",
+    )
+
+
 def classify_failure(r: dict) -> str:
     conflict_score = r.get("conflict_adherence_score")
     coherence_score = r.get("session_coherence_score")
+    claim_precision = r.get("claim_precision_score")
     if r.get("faithfulness_score", 1.0) < 0.7 and r.get("citation_integrity_score", 1.0) < 0.8:
+        return "HALLUCINATION"
+    elif (
+        claim_precision is not None
+        and claim_precision < 0.5
+        and r.get("faithfulness_score", 1.0) < 0.7
+    ):
         return "HALLUCINATION"
     elif r.get("faithfulness_score", 1.0) < 0.7:
         return "KNOWLEDGE_BLEED"

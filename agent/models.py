@@ -68,6 +68,8 @@ class Turn:
     synthesize_ms: int = 0
     run_metadata_json: Optional[dict[str, Any]] = None
     state_trace: list[str] = field(default_factory=list)
+    claim_precision_score: float = 1.0
+    claim_verification_json: Optional[str] = None
 
     @classmethod
     def from_row(cls, row: dict[str, Any]) -> "Turn":
@@ -94,6 +96,8 @@ class Turn:
             synthesize_ms=row.get("synthesize_ms") or 0,
             run_metadata_json=json.loads(row.get("run_metadata_json") or "{}") or None,
             state_trace=json.loads(row.get("state_trace") or "[]"),
+            claim_precision_score=row.get("claim_precision_score") if row.get("claim_precision_score") is not None else 1.0,
+            claim_verification_json=row.get("claim_verification_json"),
         )
 
 
@@ -148,6 +152,11 @@ class ConflictResult(BaseModel):
     conflict_summary: Optional[str] = None
     contradictions: list[ClaimContradiction] = []
     probe_skipped_reason: Optional[str] = None
+
+
+class ClaimVerification(BaseModel):
+    supported: bool
+    reasoning: str = ""
 
 
 class JudgeScore(BaseModel):

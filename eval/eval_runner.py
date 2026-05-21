@@ -23,8 +23,9 @@ setup_logging()
 from agent.memory import init_db
 from agent.orchestrator import ResearchOrchestrator
 from eval.judge import (
-    classify_failure, judge_citation_integrity, judge_conflict_adherence,
-    judge_coherence, judge_faithfulness, judge_relevance, judge_context_precision,
+    classify_failure, judge_citation_integrity, judge_claim_precision,
+    judge_conflict_adherence, judge_coherence, judge_faithfulness,
+    judge_relevance, judge_context_precision,
 )
 
 _DATASET = Path(__file__).parent / "dataset.json"
@@ -79,6 +80,7 @@ async def run_eval() -> None:
             context_xml = ""
             doc_map = {}
             fetched_urls: set = set()
+            turn_id_out: str = ""
             latency_ms = 0
             planning_ms = 0
             search_ms = 0
@@ -106,6 +108,7 @@ async def run_eval() -> None:
                             synthesize_ms = d.get("synthesize_ms", 0) or 0
                             run_metadata = d.get("run_metadata", {}) or {}
                             fetched_urls = set(d.get("urls", []))
+                            turn_id_out = d.get("turn_id_out", "") or ""
             except TimeoutError:
                 print(f"  TIMEOUT running agent after {_PER_QUESTION_TIMEOUT_S}s")
                 answer = f"[Agent timeout after {_PER_QUESTION_TIMEOUT_S}s]"
@@ -142,6 +145,16 @@ async def run_eval() -> None:
 
             ci_res = judge_citation_integrity(internal_answer, doc_map, fetched_urls)
 
+            claim_precision_score = 1.0
+            claim_precision_reasoning = ""
+            if turn_id_out:
+                try:
+                    cp = await judge_claim_precision(turn_id_out)
+                    claim_precision_score = cp.claim_precision_score
+                    claim_precision_reasoning = cp.reasoning
+                except Exception as e:
+                    print(f"  Claim Precision judge error: {e}")
+
             if category == "conflicting":
                 try:
                     cres = await judge_conflict_adherence(query, context_xml or "", answer)
@@ -174,6 +187,9 @@ async def run_eval() -> None:
                 "answer_relevance_score": relevance_score,
                 "context_precision_score": context_precision_score,
                 "citation_integrity_score": ci_res.citation_integrity_score,
+                "claim_precision_score": claim_precision_score,
+                "claim_precision_reasoning": claim_precision_reasoning,
+                "turn_id": turn_id_out,
                 "conflict_adherence_score": conflict_adherence_score,
                 "session_coherence_score": coherence_score,
                 "latency_ms": latency_ms,
@@ -188,6 +204,7 @@ async def run_eval() -> None:
                     "answer_relevance_score": relevance_score,
                     "context_precision_score": context_precision_score,
                     "citation_integrity_score": ci_res.citation_integrity_score,
+                    "claim_precision_score": claim_precision_score,
                     "conflict_adherence_score": conflict_adherence_score,
                     "session_coherence_score": coherence_score,
                 }),
