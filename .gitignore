@@ -1,0 +1,32 @@
+data/*.db
+data/*.db-journal
+data/*.db-wal
+data/*.db-shm
+.env
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+eval/results/*
+!eval/results/.gitkeep
+.streamlit/secrets.toml
+.DS_Store
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.vscode/
+.idea/
+
+# Assignment artifacts and research docs — excluded per project plan
+*.pdf
+CLAUDE.md
+SPEC_FINAL.md
+sarvam-assignment.md
+Deep Research Agent Architecture Design.md
+AGENTS.md
+

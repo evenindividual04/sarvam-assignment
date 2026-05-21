@@ -1,0 +1,25 @@
+# Core
+streamlit>=1.35.0
+httpx>=0.27.0
+aiosqlite>=0.20.0
+trafilatura>=1.12.0
+rank_bm25>=0.2.2
+tenacity>=8.3.0
+tiktoken>=0.7.0
+pydantic>=2.7.0
+flashrank>=2.0.0
+python-dotenv>=1.0.2
+fastapi>=0.111.0
+uvicorn>=0.30.0
+
+# Search
+tavily-python>=0.5.0
+
+# LLM — google-genai NOT google-generativeai (deprecated)
+google-genai>=1.0.0
+groq>=0.9.0
+openai>=1.35.0
+
+# Optional Phase 5
+# sentence-transformers>=3.0.0
+# sqlite-vec>=0.1.3

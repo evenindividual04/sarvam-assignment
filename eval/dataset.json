@@ -1,0 +1,158 @@
+[
+  {
+    "id": "F-1",
+    "query": "What is the current repo rate set by the RBI?",
+    "category": "factual",
+    "is_multiturn": false,
+    "notes": "RBI monetary policy — expect specific percentage figure with citation"
+  },
+  {
+    "id": "F-2",
+    "query": "When was GPT-4 released by OpenAI?",
+    "category": "factual",
+    "is_multiturn": false,
+    "notes": "March 14, 2023 — straightforward factual retrieval"
+  },
+  {
+    "id": "F-3",
+    "query": "What is Sarvam AI's flagship language model?",
+    "category": "factual",
+    "is_multiturn": false,
+    "notes": "Sarvam-2B / Sarvam-1 — verify against current website"
+  },
+  {
+    "id": "MH-1",
+    "query": "What is the capital of the state where BITS Pilani Goa campus is located?",
+    "category": "multi_hop",
+    "is_multiturn": false,
+    "notes": "Hop 1: BITS Goa is in Goa. Hop 2: Capital of Goa is Panaji."
+  },
+  {
+    "id": "MH-2",
+    "query": "Who is the current CEO of the company that makes the most popular agentic search API?",
+    "category": "multi_hop",
+    "is_multiturn": false,
+    "notes": "Hop 1: Tavily is widely cited as most popular agentic search API. Hop 2: CEO of Tavily."
+  },
+  {
+    "id": "MH-3",
+    "query": "What programming language is Pydantic written in, and which major AI framework depends on it?",
+    "category": "multi_hop",
+    "is_multiturn": false,
+    "notes": "Python. LangChain and many others depend on it."
+  },
+  {
+    "id": "C-1",
+    "query": "Compare BM25 and dense vector search for RAG retrieval",
+    "category": "comparison",
+    "is_multiturn": false,
+    "notes": "Should cover keyword vs semantic, hybrid approaches"
+  },
+  {
+    "id": "C-2",
+    "query": "What are the key differences between Tavily and Serper as search APIs for AI agents?",
+    "category": "comparison",
+    "is_multiturn": false,
+    "notes": "Structured results vs raw snippets, pricing, agentic features"
+  },
+  {
+    "id": "C-3",
+    "query": "How does Groq's LPU hardware differ from standard GPU inference?",
+    "category": "comparison",
+    "is_multiturn": false,
+    "notes": "LPU = Language Processing Unit, low-latency sequential token generation"
+  },
+  {
+    "id": "IE-1",
+    "query": "What will the RBI repo rate be in December 2027?",
+    "category": "insufficient_evidence",
+    "is_multiturn": false,
+    "notes": "Future prediction — agent should express uncertainty and suggest next steps"
+  },
+  {
+    "id": "IE-2",
+    "query": "What is Sarvam AI's annual revenue?",
+    "category": "insufficient_evidence",
+    "is_multiturn": false,
+    "notes": "Private company — no public revenue figures"
+  },
+  {
+    "id": "IE-3",
+    "query": "What is the exact BITS PS-II stipend at Sarvam AI?",
+    "category": "insufficient_evidence",
+    "is_multiturn": false,
+    "notes": "Very specific internal data — unlikely to be publicly indexed"
+  },
+  {
+    "id": "CF-1",
+    "query": "How many parameters does GPT-4 have?",
+    "category": "conflicting",
+    "is_multiturn": false,
+    "notes": "OpenAI never confirmed. Credible sources claim 170B to 1.76T. Agent must surface conflict."
+  },
+  {
+    "id": "CF-2",
+    "query": "What is the literacy rate of India?",
+    "category": "conflicting",
+    "is_multiturn": false,
+    "notes": "Census 2011 (74%), NSO 2024 (~77%), UNESCO differ due to methodology. Agent must present all."
+  },
+  {
+    "id": "CF-3",
+    "query": "Did India's GDP growth rate exceed China's in 2024?",
+    "category": "conflicting",
+    "is_multiturn": false,
+    "notes": "IMF vs World Bank vs Indian govt figures conflict. Agent must surface disagreement."
+  },
+  {
+    "id": "MT-1-T1",
+    "query": "What is LangGraph and what is it used for?",
+    "category": "multi_turn",
+    "is_multiturn": true,
+    "turn": 1,
+    "scenario": "MT-1",
+    "notes": "Turn 1 of 2 — establishes LangGraph context"
+  },
+  {
+    "id": "MT-1-T2",
+    "query": "How does that compare to building a custom state machine in pure Python?",
+    "category": "multi_turn",
+    "is_multiturn": true,
+    "turn": 2,
+    "scenario": "MT-1",
+    "prior_query": "What is LangGraph and what is it used for?",
+    "notes": "Turn 2 must reference LangGraph from Turn 1 without re-explaining it"
+  },
+  {
+    "id": "MT-2-T1",
+    "query": "What is the current Tavily API pricing?",
+    "category": "multi_turn",
+    "is_multiturn": true,
+    "turn": 1,
+    "scenario": "MT-2",
+    "notes": "Turn 1 of 2 — establishes Tavily pricing context"
+  },
+  {
+    "id": "MT-2-T2",
+    "query": "Is there a free tier and what are its limits?",
+    "category": "multi_turn",
+    "is_multiturn": true,
+    "turn": 2,
+    "scenario": "MT-2",
+    "prior_query": "What is the current Tavily API pricing?",
+  },
+  {
+    "id": "HI-1",
+    "query": "भारतीय रिज़र्व बैंक (RBI) की वर्तमान रेपो दर क्या है?",
+    "category": "factual",
+    "is_multiturn": false,
+    "notes": "Hindi query: What is the current repo rate of RBI?"
+  },
+  {
+    "id": "HI-2",
+    "query": "ओपनएआई (OpenAI) ने GPT-4 कब जारी किया था?",
+    "category": "factual",
+    "is_multiturn": false,
+    "notes": "Hindi query: When did OpenAI release GPT-4?"
+  }
+]
