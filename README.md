@@ -13,6 +13,8 @@ short_description: Web-grounded research with citation audit and conflict probe
 
 A multi-source web research agent built with plain Python asyncio, featuring conflict detection, session persistence, and LLM-as-judge evaluation.
 
+> **Deploying in your own org?** See [docs/DEPLOY.md](docs/DEPLOY.md) for a 30-minute VPC deployment guide covering data residency, provider swapping (including Sarvam Model API), observability, and scaling notes.
+
 ## Target Users and Problem
 
 Enterprise researchers, journalists, analysts, and knowledge workers who need answers that go beyond a single search result. The core problem: standard LLMs answer from training data that is stale, unverifiable, and cannot cite sources. Standard search engines return links but don't synthesize. This agent sits in between — it conducts live web research, selects the most credible evidence, and generates grounded answers where every factual claim is traced back to a real URL retrieved in that session.
@@ -55,6 +57,19 @@ User Query
     v
 [PERSISTENCE] -> aiosqlite: session, turns, context, summaries, FTS5 index
 ```
+
+## Providers
+
+The agent is multi-provider per stage. Synthesis in particular is swappable via the `SYNTH_PROVIDER` env var:
+
+| Stage | Default | Options |
+|-------|---------|---------|
+| Planning + conflict detection | Groq Llama 3.3 70B | (Groq) |
+| Search | Parallel AI | Tavily, Serper (fallback chain) |
+| **Synthesis** | **Gemini 2.5 Flash** | `SYNTH_PROVIDER=sarvam` → Sarvam-M / Sarvam-30B (OpenAI-compatible Indic-first models), `SYNTH_PROVIDER=openrouter` → DeepSeek R1 |
+| Eval judge | GitHub Models GPT-4o-mini | (any OpenAI-compatible) |
+
+Sarvam Model API (Sarvam-M default, Sarvam-30B / 105B available, 64K-128K context, Apache-2.0 base models) is the recommended synthesizer for Indic-heavy workloads and data-residency-sensitive deployments. See [docs/DEPLOY.md](docs/DEPLOY.md) for the full deployment matrix.
 
 ## WHY THESE 5 METRICS:
 

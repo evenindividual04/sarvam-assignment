@@ -405,5 +405,99 @@
     "gold_aliases": ["नरेंद्र मोदी", "मोदी", "Modi"],
     "gold_entities": ["Narendra Modi", "Modi"],
     "notes": "Hindi factual paired with F-5."
+  },
+  {
+    "id": "TA-1",
+    "query": "இந்தியாவின் தலைநகர் எது?",
+    "category": "factual",
+    "language": "ta",
+    "is_multiturn": false,
+    "concept_id": "capital-of-india",
+    "gold_answer": "New Delhi",
+    "gold_aliases": ["புது தில்லி", "தில்லி", "Delhi"],
+    "gold_entities": ["New Delhi"],
+    "notes": "Tamil factual paired with F-4/HI-7 — capital of India. Three-way cross-language consistency anchor."
+  },
+  {
+    "id": "TA-2",
+    "query": "இந்தியாவின் தற்போதைய பிரதமர் யார்?",
+    "category": "factual",
+    "language": "ta",
+    "is_multiturn": false,
+    "concept_id": "current-pm-of-india",
+    "gold_answer": "Narendra Modi",
+    "gold_aliases": ["நரேந்திர மோடி", "மோடி", "Modi"],
+    "gold_entities": ["Narendra Modi", "Modi"],
+    "notes": "Tamil factual paired with F-5/HI-8 — current PM of India."
+  },
+  {
+    "id": "TA-3",
+    "query": "தமிழ்நாட்டின் தற்போதைய முதலமைச்சர் யார்?",
+    "category": "factual",
+    "language": "ta",
+    "is_multiturn": false,
+    "notes": "Tamil current-state factual: Who is the current CM of Tamil Nadu? M. K. Stalin as of 2026. Well-indexed by Parallel."
+  },
+  {
+    "id": "BN-1",
+    "query": "ভারতের রাজধানী কী?",
+    "category": "factual",
+    "language": "bn",
+    "is_multiturn": false,
+    "concept_id": "capital-of-india",
+    "gold_answer": "New Delhi",
+    "gold_aliases": ["নয়াদিল্লি", "দিল্লি", "Delhi"],
+    "gold_entities": ["New Delhi"],
+    "notes": "Bengali factual paired with F-4/HI-7/TA-1 — capital of India. Four-language cross-consistency anchor."
+  },
+  {
+    "id": "BN-2",
+    "query": "পশ্চিমবঙ্গের রাজধানী কী?",
+    "category": "factual",
+    "language": "bn",
+    "is_multiturn": false,
+    "gold_answer": "Kolkata",
+    "gold_aliases": ["কলকাতা", "Calcutta"],
+    "gold_entities": ["Kolkata"],
+    "notes": "Bengali factual: capital of West Bengal. Stable canonical fact."
+  },
+  {
+    "id": "BN-3",
+    "query": "বাংলাদেশের বর্তমান প্রধানমন্ত্রী কে?",
+    "category": "conflicting",
+    "language": "bn",
+    "is_multiturn": false,
+    "notes": "Bengali current-state factual with potential temporal conflict (Bangladesh PM situation has been in flux since Aug 2024). Tests retrieval + conflict handling."
+  },
+  {
+    "id": "MR-1",
+    "query": "महाराष्ट्राची राजधानी कोणती आहे?",
+    "category": "factual",
+    "language": "mr",
+    "is_multiturn": false,
+    "gold_answer": "Mumbai",
+    "gold_aliases": ["मुंबई", "Bombay"],
+    "gold_entities": ["Mumbai"],
+    "notes": "Marathi factual: capital of Maharashtra. Devanagari script but tagged 'mr' to distinguish from Hindi at the dataset level."
+  },
+  {
+    "id": "MR-2",
+    "query": "भारताचे सध्याचे पंतप्रधान कोण आहेत?",
+    "category": "factual",
+    "language": "mr",
+    "is_multiturn": false,
+    "concept_id": "current-pm-of-india",
+    "gold_answer": "Narendra Modi",
+    "gold_aliases": ["नरेंद्र मोदी", "मोदी", "Modi"],
+    "gold_entities": ["Narendra Modi", "Modi"],
+    "notes": "Marathi factual paired with F-5/HI-8/TA-2 — current PM. Note: shares Devanagari with Hindi (script-level detection returns 'hi'); dataset-level language tag is 'mr'."
+  },
+  {
+    "id": "MR-3",
+    "query": "महाराष्ट्रातील साक्षरतेचा सध्याचा दर किती आहे?",
+    "category": "conflicting",
+    "language": "mr",
+    "is_multiturn": false,
+    "notes": "Marathi conflicting: current literacy rate of Maharashtra. Census 2011 vs newer estimates produce different figures."
   }
 ]

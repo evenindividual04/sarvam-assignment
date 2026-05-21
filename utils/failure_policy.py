@@ -32,6 +32,7 @@ CIRCUIT_THRESHOLDS: dict[str, BreakerConfig] = {
     "parallel":      BreakerConfig(threshold=4, window_s=60.0, open_duration_s=30.0),
     "tavily":        BreakerConfig(threshold=4, window_s=60.0, open_duration_s=30.0),
     "serper":        BreakerConfig(threshold=4, window_s=60.0, open_duration_s=30.0),
+    "sarvam":        BreakerConfig(threshold=4, window_s=60.0, open_duration_s=30.0),
 }
 
 

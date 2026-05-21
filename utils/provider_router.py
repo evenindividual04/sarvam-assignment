@@ -29,6 +29,7 @@ _GROQ_MODEL = "llama-3.3-70b-versatile"
 _GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 _GITHUB_MODEL = "gpt-4o-mini"
 _OPENROUTER_MODEL = "deepseek/deepseek-r1"
+_SARVAM_BASE_URL = "https://api.sarvam.ai/v1"
 
 # ── Synthesis system prompt (verbatim from spec Section 2.9) ──────────────
 SYNTHESIS_SYSTEM_PROMPT = PROMPT_REGISTRY["synthesizer"]["system"]
@@ -180,24 +181,43 @@ Research question: {query}
 
 Answer the research question using only the documents above. Cite every factual claim with [doc_N]."""
 
-    try:
-        async for chunk in _synthesize_gemini(user_prompt):
+    provider = os.environ.get("SYNTH_PROVIDER", "gemini").lower()
+
+    if provider == "sarvam":
+        try:
+            async for chunk in _synthesize_sarvam(user_prompt):
+                yield chunk
+            return
+        except CircuitOpenError as e:
+            logger.warning("Sarvam breaker open, falling back to OpenRouter: %s", e)
+        except Exception as e:
+            openrouter_key = os.environ.get("OPENROUTER_API_KEY", "")
+            if not openrouter_key:
+                raise
+            logger.warning("Sarvam failed, falling back to OpenRouter: %s", e)
+    elif provider == "openrouter":
+        async for chunk in _synthesize_openrouter(user_prompt):
             yield chunk
         return
-    except CircuitOpenError as e:
-        logger.warning("Gemini breaker open, falling back to OpenRouter: %s", e)
-    except Exception as e:
-        openrouter_key = os.environ.get("OPENROUTER_API_KEY", "")
-        if not openrouter_key:
-            raise
-        logger.warning("Gemini failed, falling back to OpenRouter: %s", e)
+    else:
+        try:
+            async for chunk in _synthesize_gemini(user_prompt):
+                yield chunk
+            return
+        except CircuitOpenError as e:
+            logger.warning("Gemini breaker open, falling back to OpenRouter: %s", e)
+        except Exception as e:
+            openrouter_key = os.environ.get("OPENROUTER_API_KEY", "")
+            if not openrouter_key:
+                raise
+            logger.warning("Gemini failed, falling back to OpenRouter: %s", e)
 
     # Fallback path: OpenRouter
     try:
         async for chunk in _synthesize_openrouter(user_prompt):
             yield chunk
     except CircuitOpenError:
-        logger.error("Both Gemini and OpenRouter breakers open; returning error string")
+        logger.error("All synthesis providers' breakers are open; returning error string")
         yield (
             "[Synthesis temporarily unavailable: all synthesis providers are "
             "currently rate-limited. Please retry in a few seconds.]",
@@ -282,6 +302,71 @@ async def _synthesize_openrouter(user_prompt: str) -> AsyncIterator[tuple[str, i
         if text:
             yield (text, 0, 0)
     yield ("", 0, 0)
+
+
+async def _stream_sarvam_model(
+    user_prompt: str,
+    model: str,
+) -> AsyncIterator[tuple[str, int, int]]:
+    """Open a single Sarvam streaming completion against the given model."""
+    from openai import AsyncOpenAI
+
+    client = AsyncOpenAI(
+        api_key=os.environ["SARVAM_API_KEY"],
+        base_url=_SARVAM_BASE_URL,
+        timeout=90.0,
+    )
+    messages = [
+        {"role": "system", "content": SYNTHESIS_SYSTEM_PROMPT},
+        {"role": "user", "content": user_prompt},
+    ]
+    resp = await client.chat.completions.create(
+        model=model,
+        messages=messages,
+        max_tokens=1500,
+        temperature=0.2,
+        stream=True,
+    )
+    async for chunk in resp:
+        # Sarvam follows OpenAI's chunk schema; .delta.content is None on the
+        # final chunk where finish_reason lands.
+        delta = ""
+        try:
+            delta = chunk.choices[0].delta.content or ""
+        except (AttributeError, IndexError):
+            delta = ""
+        if delta:
+            yield (delta, 0, 0)
+    # Sarvam does not currently emit per-stream token counts; orchestrator
+    # tolerates 0 prompt/completion totals.
+    yield ("", 0, 0)
+
+
+@breaker("sarvam")
+async def _synthesize_sarvam(user_prompt: str) -> AsyncIterator[tuple[str, int, int]]:
+    """Sarvam Model API synthesizer (OpenAI-compatible).
+
+    Tries SARVAM_MODEL (default 'sarvam-m'); on any exception retries once with
+    'sarvam-30b' before raising. One Tenacity-exhausted call still counts as a
+    single breaker failure via the outer @breaker decoration.
+    """
+    primary = os.environ.get("SARVAM_MODEL", "sarvam-m")
+    yielded_any = False
+    try:
+        async for chunk in _stream_sarvam_model(user_prompt, primary):
+            yielded_any = True
+            yield chunk
+        return
+    except Exception as exc:
+        # Only fall back if we never produced output — otherwise the consumer
+        # has a partial answer and a second stream would duplicate content.
+        if primary == "sarvam-30b" or yielded_any:
+            raise
+        logger.warning(
+            "Sarvam model %s failed (%s); retrying once with sarvam-30b", primary, exc
+        )
+    async for chunk in _stream_sarvam_model(user_prompt, "sarvam-30b"):
+        yield chunk
 
 
 @breaker("github_models")
