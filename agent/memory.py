@@ -128,6 +128,21 @@ CREATE_CLAIM_AUDIT_INDEX = """
 CREATE INDEX IF NOT EXISTS idx_claim_audit_turn ON claim_audit(turn_id);
 """
 
+CREATE_CIRCUIT_EVENTS = """
+CREATE TABLE IF NOT EXISTS circuit_events (
+    event_id     TEXT PRIMARY KEY,
+    provider     TEXT NOT NULL,
+    from_state   TEXT NOT NULL,
+    to_state     TEXT NOT NULL,
+    reason       TEXT,
+    at           TEXT NOT NULL
+);
+"""
+
+CREATE_CIRCUIT_EVENTS_INDEX = """
+CREATE INDEX IF NOT EXISTS idx_circuit_events_provider ON circuit_events(provider);
+"""
+
 CREATE_EVAL_RUNS = """
 CREATE TABLE IF NOT EXISTS eval_runs (
     run_id                   TEXT PRIMARY KEY,
@@ -163,6 +178,8 @@ async def init_db() -> None:
         await db.execute(CREATE_EVAL_RUNS)
         await db.execute(CREATE_CLAIM_AUDIT)
         await db.execute(CREATE_CLAIM_AUDIT_INDEX)
+        await db.execute(CREATE_CIRCUIT_EVENTS)
+        await db.execute(CREATE_CIRCUIT_EVENTS_INDEX)
         try:
             await db.execute("ALTER TABLE eval_runs ADD COLUMN context_precision_score REAL")
         except aiosqlite.OperationalError:
@@ -403,6 +420,28 @@ async def save_claim_audit(turn_id: str, records: list) -> None:
                 )
                 for idx, r in enumerate(records)
             ],
+        )
+        await db.commit()
+
+
+async def save_circuit_event(event: dict) -> None:
+    """Persist a circuit-breaker state transition. Non-fatal on failure."""
+    now = datetime.now(timezone.utc).isoformat()
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """
+            INSERT OR REPLACE INTO circuit_events
+            (event_id, provider, from_state, to_state, reason, at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                event["event_id"],
+                event["provider"],
+                event["from_state"],
+                event["to_state"],
+                event.get("reason"),
+                event.get("at", now),
+            ),
         )
         await db.commit()
 

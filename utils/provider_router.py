@@ -18,7 +18,10 @@ from tenacity import retry, stop_after_attempt, wait_exponential
 import json as _json
 
 from agent.models import PlannerOutput, QueryIntent, TypedQuery
+from utils.circuit_breaker import CircuitOpenError, breaker
 from utils.prompt_registry import PROMPT_REGISTRY
+# Importing failure_policy registers all breakers at module import time.
+from utils import failure_policy as _failure_policy  # noqa: F401
 
 logger = logging.getLogger(__name__)
 
@@ -77,6 +80,7 @@ def parse_planner_output(raw: str, query: str) -> PlannerOutput:
     return PlannerOutput(strategy=strategy, queries=typed[:4])
 
 
+@breaker("groq")
 @retry(wait=wait_exponential(multiplier=1, min=2, max=10), stop=stop_after_attempt(3), reraise=True)
 async def plan(query: str, prior_summary: str = "No prior context.") -> PlannerOutput:
     """Generate strategy + search queries via Groq."""
@@ -96,6 +100,7 @@ async def plan(query: str, prior_summary: str = "No prior context.") -> PlannerO
     return parsed
 
 
+@breaker("groq")
 @retry(wait=wait_exponential(multiplier=1, min=2, max=10), stop=stop_after_attempt(3), reraise=True)
 async def call_groq(prompt: str, max_tokens: int = 200) -> str:
     """Generic Groq call for conflict detection, rolling summary, etc."""
@@ -174,20 +179,30 @@ Answer the research question using only the documents above. Cite every factual 
     try:
         async for chunk in _synthesize_gemini(user_prompt):
             yield chunk
+        return
+    except CircuitOpenError as e:
+        logger.warning("Gemini breaker open, falling back to OpenRouter: %s", e)
     except Exception as e:
         openrouter_key = os.environ.get("OPENROUTER_API_KEY", "")
         if not openrouter_key:
             raise
-        if "ResourceExhausted" in str(e) or "429" in str(e) or "404" in str(e) or "not found" in str(e).lower():
-            logger.warning("Gemini unavailable, falling back to OpenRouter: %s", e)
-            async for chunk in _synthesize_openrouter(user_prompt):
-                yield chunk
-        else:
-            logger.warning("Gemini failed, falling back to OpenRouter: %s", e)
-            async for chunk in _synthesize_openrouter(user_prompt):
-                yield chunk
+        logger.warning("Gemini failed, falling back to OpenRouter: %s", e)
+
+    # Fallback path: OpenRouter
+    try:
+        async for chunk in _synthesize_openrouter(user_prompt):
+            yield chunk
+    except CircuitOpenError:
+        logger.error("Both Gemini and OpenRouter breakers open; returning error string")
+        yield (
+            "[Synthesis temporarily unavailable: all synthesis providers are "
+            "currently rate-limited. Please retry in a few seconds.]",
+            0,
+            0,
+        )
 
 
+@breaker("gemini")
 async def _synthesize_gemini(user_prompt: str) -> AsyncIterator[tuple[str, int, int]]:
     from google import genai
     from google.genai import types
@@ -239,6 +254,7 @@ async def _synthesize_gemini(user_prompt: str) -> AsyncIterator[tuple[str, int, 
     raise RuntimeError("No Gemini model candidates available")
 
 
+@breaker("openrouter")
 async def _synthesize_openrouter(user_prompt: str) -> AsyncIterator[tuple[str, int, int]]:
     from openai import AsyncOpenAI
 
@@ -264,6 +280,7 @@ async def _synthesize_openrouter(user_prompt: str) -> AsyncIterator[tuple[str, i
     yield ("", 0, 0)
 
 
+@breaker("github_models")
 @retry(wait=wait_exponential(multiplier=1, min=2, max=10), stop=stop_after_attempt(3), reraise=True)
 async def judge(prompt: str) -> str:
     """GitHub Models GPT-4o-mini for eval judging. Different family from generator."""
