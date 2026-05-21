@@ -1,0 +1,5 @@
+# Legacy dependencies for the deprecated Streamlit UI under legacy/.
+# The production FastAPI + React stack does not require these.
+# Install only if you want to run legacy/streamlit_app.py for demo recording:
+#     pip install -r legacy/requirements-legacy.txt
+streamlit>=1.35.0
