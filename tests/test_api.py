@@ -44,7 +44,7 @@ def test_research_emits_sse_events(app_client, monkeypatch):
     client, _, main_mod = app_client
     from agent.models import ExecutionEvent
 
-    async def fake_run(self, query, session_id, cancel_token=None, turn_id=None):
+    async def fake_run(self, query, session_id, cancel_token=None, turn_id=None, config=None):
         yield ExecutionEvent("planning", "Planning", data={"strategy": "x"})
         yield ExecutionEvent("searching", "Searching the web")
         yield ExecutionEvent("done", "done", data={"turn_id": turn_id})
@@ -65,7 +65,7 @@ def test_research_includes_turn_id_in_first_event(app_client, monkeypatch):
     client, _, main_mod = app_client
     from agent.models import ExecutionEvent
 
-    async def fake_run(self, query, session_id, cancel_token=None, turn_id=None):
+    async def fake_run(self, query, session_id, cancel_token=None, turn_id=None, config=None):
         yield ExecutionEvent("planning", "Planning", data={"strategy": "x"})
 
     monkeypatch.setattr(main_mod.ResearchOrchestrator, "run", fake_run)
@@ -89,7 +89,7 @@ def test_research_cancel_active_turn_returns_200(app_client, monkeypatch):
 
     saw_cancel = {"flag": False}
 
-    async def fake_run(self, query, session_id, cancel_token=None, turn_id=None):
+    async def fake_run(self, query, session_id, cancel_token=None, turn_id=None, config=None):
         yield ExecutionEvent("planning", "Planning", data={"turn_id": turn_id})
         # Spin until cancel_token fires (with a timeout safety net)
         for _ in range(50):
@@ -132,7 +132,7 @@ def test_chat_stream_alias_still_works(app_client, monkeypatch):
     client, _, main_mod = app_client
     from agent.models import ExecutionEvent
 
-    async def fake_run(self, query, session_id, cancel_token=None, turn_id=None):
+    async def fake_run(self, query, session_id, cancel_token=None, turn_id=None, config=None):
         yield ExecutionEvent("done", "done", data={"turn_id": turn_id})
 
     monkeypatch.setattr(main_mod.ResearchOrchestrator, "run", fake_run)

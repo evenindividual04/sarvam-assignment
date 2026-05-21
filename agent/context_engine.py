@@ -164,8 +164,30 @@ def select_with_diversity(
 
 # ── V3.1: Hybrid RRF (BM25 + dense) ────────────────────────────────────────
 
+import contextvars
+
+# Per-request override for HYBRID_RETRIEVAL. The orchestrator sets this from
+# the resolved `RuntimeConfig` at the start of each turn (Option D); it
+# cleanly resets at task scope so concurrent /research calls don't bleed.
+_hybrid_override: contextvars.ContextVar[bool | None] = contextvars.ContextVar(
+    "hybrid_override", default=None,
+)
+
+
+def set_hybrid_override(value: bool | None) -> contextvars.Token:
+    """Bind a per-request hybrid-retrieval flag. Returns a Token to reset with."""
+    return _hybrid_override.set(value)
+
+
+def reset_hybrid_override(token: contextvars.Token) -> None:
+    _hybrid_override.reset(token)
+
+
 def hybrid_retrieval_enabled() -> bool:
-    """Opt-in via HYBRID_RETRIEVAL=1. Default behavior unchanged."""
+    """Per-request override (Option D) > env var HYBRID_RETRIEVAL > off."""
+    ov = _hybrid_override.get()
+    if ov is not None:
+        return ov
     return os.getenv("HYBRID_RETRIEVAL", "0").strip() == "1"
 
 

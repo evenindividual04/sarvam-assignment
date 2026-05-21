@@ -9,6 +9,7 @@ Saves complete turn to DB including context_xml_sent, doc_map, token counts.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import logging
 import os
 import time
@@ -19,6 +20,8 @@ import httpx
 
 from agent.citation_guard import CitationGuard, convert_citations
 from agent.context_engine import (
+    set_hybrid_override,
+    reset_hybrid_override,
     chunk,
     format_context_xml,
     probe_contradictions,
@@ -45,6 +48,42 @@ _MAX_ITER = int(os.getenv("AGENT_MAX_ITER", "5"))
 _SELECTION_STRATEGY = os.getenv("CONTEXT_SELECTION_STRATEGY", "heuristic").strip().lower()
 # V3.2: intents allowed in second hop (PRIMARY already covered by hop 1).
 _HOP2_ALLOWED_INTENTS = {"recency_check", "contradiction_probe"}
+
+
+@dataclasses.dataclass(frozen=True)
+class RuntimeConfig:
+    """Per-request resolved configuration. Built from request overrides layered
+    on top of environment variables. Stamped into `run_metadata_json` so every
+    saved turn carries a faithful record of what knobs it actually ran under —
+    even if the user flips toggles five minutes later.
+    """
+    hybrid_retrieval: bool
+    max_hops: int
+    selection_strategy: str  # "heuristic" | "mmr"
+
+    @classmethod
+    def from_overrides(cls, overrides: dict | None) -> "RuntimeConfig":
+        ov = overrides or {}
+
+        def _get(key: str, default: str) -> str:
+            # Overrides may carry mixed types from JSON; coerce to str for parity
+            # with os.getenv's contract before we parse.
+            val = ov.get(key)
+            if val is None:
+                return os.getenv(key, default)
+            return str(val)
+
+        sel = _get("CONTEXT_SELECTION_STRATEGY", "heuristic").strip().lower()
+        if sel not in ("heuristic", "mmr"):
+            sel = "heuristic"
+        return cls(
+            hybrid_retrieval=_get("HYBRID_RETRIEVAL", "0").strip() == "1",
+            max_hops=max(1, min(int(_get("FAILURE_POLICY_MAX_HOPS", "2")), 3)),
+            selection_strategy=sel,
+        )
+
+    def as_dict(self) -> dict:
+        return dataclasses.asdict(self)
 
 STREAM_LABELS = {
     "planning":  "Planning",
@@ -105,6 +144,7 @@ class ResearchOrchestrator:
         session_id: str,
         cancel_token: CancellationToken | None = None,
         turn_id: str | None = None,
+        config: RuntimeConfig | None = None,
     ) -> AsyncIterator[ExecutionEvent]:
         """
         Full research turn. Yields ExecutionEvents. Saves turn to DB at end.
@@ -112,10 +152,25 @@ class ResearchOrchestrator:
         On cancellation (cancel_token fires), persists a partial Turn marked
         '[Cancelled by user]', appends 'CANCELLED' to state_trace, yields one
         final 'error' event, and returns. Does not re-raise.
+
+        `config` carries per-request runtime overrides (Option D in design).
+        When None, falls back to env-only resolution — keeps `eval_runner.py`
+        reproducible from CLI without sending an overrides block.
         """
         if turn_id is None:
             turn_id = str(uuid.uuid4())
-        state_holder: dict = {"state_trace": [], "now": datetime.now(timezone.utc).isoformat()}
+        if config is None:
+            config = RuntimeConfig.from_overrides(None)
+        state_holder: dict = {
+            "state_trace": [],
+            "now": datetime.now(timezone.utc).isoformat(),
+            "config": config,
+        }
+        # Bind hybrid retrieval flag for the duration of this turn so the
+        # selector picks up the per-request override (context_engine reads it
+        # from a ContextVar inside the worker thread; ContextVars propagate
+        # through asyncio.to_thread on Python ≥3.9).
+        hybrid_token = set_hybrid_override(config.hybrid_retrieval)
         try:
             async for ev in self._run_body(query, session_id, cancel_token, turn_id, state_holder):
                 yield ev
@@ -129,6 +184,8 @@ class ResearchOrchestrator:
                                extra={"component": "orchestrator", "turn_id": turn_id})
             yield ExecutionEvent("error", "cancelled", data="Cancelled by user.")
             return
+        finally:
+            reset_hybrid_override(hybrid_token)
 
     async def _persist_cancelled(
         self, turn_id: str, session_id: str, query: str, state: dict
@@ -184,10 +241,12 @@ class ResearchOrchestrator:
 
         now = state_holder["now"]
         state_trace: list[str] = state_holder["state_trace"]
+        config: RuntimeConfig = state_holder["config"]
         budget = ContextBudget()
         stage_ms = {"planning_ms": 0, "search_ms": 0, "fetch_ms": 0, "select_ms": 0, "probe_ms": 0, "synthesize_ms": 0}
         run_metadata = {
-            "selection_strategy": _SELECTION_STRATEGY,
+            "selection_strategy": config.selection_strategy,
+            "effective_config": config.as_dict(),
             "planner_prompt_id": prompt_id("planner"),
             "synth_prompt_id": prompt_id("synthesizer"),
             "conflict_prompt_id": prompt_id("conflict_v3"),
@@ -303,7 +362,9 @@ class ResearchOrchestrator:
         selected: list = []
         conflict_result: ConflictResult = ConflictResult(has_conflict=False)
         hop_count = 0
-        max_hops = max(1, min(POLICY.max_hops, _MAX_ITER))
+        # Request-level `config.max_hops` (Option D override) > FAILURE_POLICY
+        # env-derived default > module-level _MAX_ITER ceiling.
+        max_hops = max(1, min(config.max_hops, POLICY.max_hops, _MAX_ITER))
 
         # ── ADAPTIVE RETRIEVAL LOOP (V3.2) ────────────────────────────────
         # Hop 1: planner output as-is. After SELECTING, decide if hop 2 fires
@@ -380,7 +441,7 @@ class ResearchOrchestrator:
             yield ExecutionEvent("selecting", STREAM_LABELS["selecting"])
             t0 = time.time()
             try:
-                if _SELECTION_STRATEGY == "mmr":
+                if config.selection_strategy == "mmr":
                     selected = await asyncio.wait_for(
                         asyncio.to_thread(rank_and_select_mmr, query, all_chunks, budget.web_context_budget),
                         timeout=POLICY.select_timeout_s,
@@ -715,6 +776,6 @@ class ResearchOrchestrator:
             "synthesize_ms": stage_ms["synthesize_ms"],
             "run_metadata": run_metadata,
             "context_xml": final_context_bundle.xml if final_context_bundle else "",
-            "selection_strategy": _SELECTION_STRATEGY,
+            "selection_strategy": config.selection_strategy,
             "planning_strategy": planner.strategy,
         })
