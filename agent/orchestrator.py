@@ -43,6 +43,8 @@ logger = logging.getLogger(__name__)
 
 _MAX_ITER = int(os.getenv("AGENT_MAX_ITER", "5"))
 _SELECTION_STRATEGY = os.getenv("CONTEXT_SELECTION_STRATEGY", "heuristic").strip().lower()
+# V3.2: intents allowed in second hop (PRIMARY already covered by hop 1).
+_HOP2_ALLOWED_INTENTS = {"recency_check", "contradiction_probe"}
 
 STREAM_LABELS = {
     "planning":  "Planning",
@@ -58,30 +60,6 @@ _UNCERTAINTY_MARKERS = [
     "insufficient", "unclear", "unable to find", "could not find",
     "no information", "suggested follow-up", "not enough",
 ]
-
-
-def _extract_followup_queries(text: str) -> list[str]:
-    """Parse deterministic follow-up query block from model output."""
-    lines = text.splitlines()
-    queries: list[str] = []
-    capture = False
-    for line in lines:
-        lower = line.lower().strip()
-        if "suggested follow-up searches" in lower:
-            capture = True
-            continue
-        if not capture:
-            continue
-        stripped = line.strip()
-        if stripped.startswith("-") or stripped.startswith("*"):
-            q = stripped[1:].strip().strip('"').strip("'")
-            if q:
-                queries.append(q)
-        elif stripped == "":
-            continue
-        elif queries:
-            break
-    return queries[:3]
 
 
 def _ensure_uncertainty_block(answer: str, fallback_queries: list[str]) -> str:
@@ -290,8 +268,20 @@ class ResearchOrchestrator:
         claim_score = 1.0
         claim_records: list = []
         verification_ms_total = 0
+        selected: list = []
+        conflict_result: ConflictResult = ConflictResult(has_conflict=False)
+        hop_count = 0
+        max_hops = max(1, min(POLICY.max_hops, _MAX_ITER))
 
-        for hop in range(_MAX_ITER):
+        # ── ADAPTIVE RETRIEVAL LOOP (V3.2) ────────────────────────────────
+        # Hop 1: planner output as-is. After SELECTING, decide if hop 2 fires
+        # based on planner.confidence == "low" AND context tokens used < 0.5
+        # * web_context_budget. Hop 2 queries are restricted to RECENCY_CHECK
+        # / CONTRADICTION_PROBE intents only.
+        for hop in range(max_hops):
+            hop_count = hop + 1
+            if hop == 1:
+                state_trace.append("HOP_2")
             # ── SEARCHING ─────────────────────────────────────────────────────
             _ck()
             state_trace.append("SEARCHING")
@@ -373,164 +363,201 @@ class ResearchOrchestrator:
                 selected = rank_and_select(query, all_chunks, max_tokens=budget.web_context_budget)
             stage_ms["select_ms"] += int((time.time() - t0) * 1000)
 
-            conflict_result: ConflictResult = ConflictResult(has_conflict=False)
-
-            if not selected:
-                # Empty context guard: inform model explicitly
-                logger.warning("No context selected", extra={"component": "orchestrator", "turn_id": turn_id})
-                empty_note = "(No relevant web content could be retrieved for this query.)"
-                context_bundle = ContextBundle(
-                    xml=f"<context>{empty_note}</context>",
-                    doc_map={},
-                    fetched_urls=set(),
-                )
-            else:
-                # Pre-assign doc_ids so the probe can reference them
-                xml, doc_map = format_context_xml(selected)
-
-                # ── CONFLICT_CHECK (named pipeline stage) ─────────────────
-                _ck()
-                state_trace.append("CONFLICT_CHECK")
-                yield ExecutionEvent("probing", STREAM_LABELS["probing"])
-                t_probe = time.time()
-                try:
-                    conflict_result = await probe_contradictions(selected, query)
-                except Exception as e:
-                    logger.warning("Probe unexpectedly raised: %s", e,
-                                   extra={"component": "orchestrator", "turn_id": turn_id})
-                    conflict_result = ConflictResult(has_conflict=False, probe_skipped_reason="parse_fail")
-                probe_ms_hop = int((time.time() - t_probe) * 1000)
-                stage_ms["probe_ms"] += probe_ms_hop
-                if conflict_result.probe_skipped_reason:
-                    state_trace.append("CONFLICT_CHECK_SKIPPED")
-                    run_metadata["fallback_path_taken"].append(f"probe_{conflict_result.probe_skipped_reason}")
-
-                # Persist probe outcome (always, even on skip)
-                try:
-                    await save_contradiction_probe(
-                        turn_id=turn_id,
-                        result=conflict_result,
-                        probe_ms=probe_ms_hop,
-                        prompt_id=prompt_id("conflict_v3"),
-                    )
-                except Exception as e:
-                    logger.warning("Persist probe row failed: %s", e,
-                                   extra={"component": "orchestrator", "turn_id": turn_id})
-
-                if conflict_result.has_conflict and conflict_result.conflict_summary:
-                    xml = xml.replace(
-                        "<context>",
-                        f"<context>\n  <conflict_warning>{conflict_result.conflict_summary}</conflict_warning>",
-                        1,
-                    )
-                context_bundle = ContextBundle(
-                    xml=xml,
-                    doc_map=doc_map,
-                    fetched_urls=set(urls_opened),
-                    conflict_summary=conflict_result.conflict_summary if conflict_result.has_conflict else None,
-                )
-
-            final_context_bundle = context_bundle
-            state_holder["final_context_bundle"] = final_context_bundle
-
-            # ── SYNTHESIZING ──────────────────────────────────────────────────
-            _ck()
-            state_trace.append("SYNTHESIZING")
-            yield ExecutionEvent("generating", STREAM_LABELS["generating"])
-
-            full_answer = ""
-            hop_prompt_tokens = 0
-            hop_completion_tokens = 0
-
-            t0 = time.time()
-            try:
-                from agent.synthesizer import stream_synthesis
-                async def _collect_stream() -> None:
-                    nonlocal full_answer, hop_prompt_tokens, hop_completion_tokens
-                    async for text_chunk, pt, ct in stream_synthesis(
-                        query=query,
-                        context_xml=context_bundle.xml,
-                        doc_map=context_bundle.doc_map,
-                        history_text=history_text,
-                        conflict_note=context_bundle.conflict_summary,
-                        conflict_result=conflict_result,
-                        cancel_token=cancel_token,
-                    ):
-                        if cancel_token is not None and cancel_token.is_set():
-                            break
-                        full_answer += text_chunk
-                        if pt:
-                            hop_prompt_tokens = pt
-                        if ct:
-                            hop_completion_tokens = ct
-                        if text_chunk:
-                            yield_event.append(text_chunk)
-
-                yield_event: list[str] = []
-                async def _runner():
-                    await _collect_stream()
-                await asyncio.wait_for(_runner(), timeout=POLICY.synth_timeout_s)
-                for chunk_text in yield_event:
-                    _ck()
-                    yield ExecutionEvent("generating", STREAM_LABELS["generating"], data=chunk_text)
-            except asyncio.TimeoutError:
-                logger.error("Synthesis timed out", extra={"component": "orchestrator", "turn_id": turn_id})
-                run_metadata["timeout_hits"].append("synthesize")
-                run_metadata["fallback_path_taken"].append("synthesize_timeout_error")
-                run_metadata["budget_breach"].append("synthesize_timeout")
-                full_answer = "Synthesis timed out. Partial context retrieved."
-            except (asyncio.TimeoutError, httpx.TimeoutException, httpx.ConnectError, Exception) as e:
-                logger.error("Synthesis failed: %s", e, extra={"component": "orchestrator", "turn_id": turn_id})
-                run_metadata["fallback_path_taken"].append("synthesize_error")
-                full_answer = f"Synthesis error: {e}. Retrieved {len(selected)} context chunks."
-            stage_ms["synthesize_ms"] += int((time.time() - t0) * 1000)
-
-            prompt_tokens += hop_prompt_tokens
-            completion_tokens += hop_completion_tokens
-
-            # ── VERIFYING CLAIMS (V2.4) ───────────────────────────────────────
-            _ck()
-            snippet_lookup = {s.doc_id: s.text for s in (selected or [])}
-            if snippet_lookup and context_bundle.doc_map:
-                state_trace.append("VERIFYING_CLAIMS")
-                yield ExecutionEvent("verifying", STREAM_LABELS["verifying"])
-                t_v = time.time()
-                claim_score, claim_records, full_answer = await verify_claims(
-                    full_answer, context_bundle.doc_map, snippet_lookup,
-                )
-                verification_ms_hop = int((time.time() - t_v) * 1000)
-                verification_ms_total += verification_ms_hop
-                state_trace.append(
-                    "VERIFICATION_DONE" if claim_records else "VERIFICATION_SKIPPED"
-                )
-            else:
-                state_trace.append("VERIFICATION_SKIPPED")
-
-            # ── Post-processing: citation guard + format conversion ────────────
-            citation_score = self._guard.verify(full_answer, context_bundle.doc_map, context_bundle.fetched_urls)
-            formatted_answer = convert_citations(full_answer, context_bundle.doc_map)
-
-            # ── Iterative re-search (Phase 2.3) ───────────────────────────────
-            lower_ans = full_answer.lower()
-            is_uncertain = any(marker in lower_ans for marker in _UNCERTAINTY_MARKERS)
-            
-            if is_uncertain and hop < _MAX_ITER - 1:
-                new_queries = _extract_followup_queries(full_answer)
-                if new_queries:
-                    queries = new_queries
-                    typed_queries = [TypedQuery(text=q, intent=QueryIntent.PRIMARY) for q in new_queries]
-                    state_trace.append(f"RE-SEARCH (hop {hop+1})")
-                    yield ExecutionEvent(
-                        "planning",
-                        STREAM_LABELS["planning"],
-                        data={"strategy": "Follow-up uncertainty search", "queries": queries},
-                    )
-                    continue
-                else:
-                    break
-            else:
+            # ── V3.2 ADAPTIVE HOP GATE ────────────────────────────────────
+            # After SELECTING: decide whether to run a second hop.
+            if hop + 1 >= max_hops:
                 break
-        
+            from utils.token_counter import count_tokens as _count_tokens
+            selected_tokens = sum(s.token_count for s in (selected or [])) or _count_tokens(
+                "\n".join(s.text for s in (selected or []))
+            )
+            context_thin = selected_tokens < int(0.5 * budget.web_context_budget)
+            if planner.confidence != "low" or not context_thin:
+                break
+
+            # Run a second planner→search→fetch→select hop, restricted to
+            # RECENCY_CHECK / CONTRADICTION_PROBE intents.
+            _ck()
+            state_trace.append("PLANNING")
+            yield ExecutionEvent("planning", STREAM_LABELS["planning"], data={"hop": hop + 2})
+            t_plan2 = time.time()
+            hop1_summary = (history_text + "\n\n" if history_text else "") + (
+                "[Hop 1 retrieved context]\n"
+                + "\n".join(f"- {s.title} ({s.domain})" for s in (selected or [])[:10])
+            )
+            try:
+                from utils.provider_router import plan as _plan
+                planner2 = await asyncio.wait_for(
+                    _plan(query, prior_summary=hop1_summary),
+                    timeout=POLICY.plan_timeout_s,
+                )
+            except Exception as e:
+                logger.warning("Hop-2 planning failed: %s", e,
+                               extra={"component": "orchestrator", "turn_id": turn_id})
+                run_metadata["fallback_path_taken"].append("hop2_planning_error")
+                stage_ms["planning_ms"] += int((time.time() - t_plan2) * 1000)
+                break
+            stage_ms["planning_ms"] += int((time.time() - t_plan2) * 1000)
+
+            hop2_filtered = [
+                tq for tq in planner2.queries
+                if tq.text.strip() and tq.intent.value in _HOP2_ALLOWED_INTENTS
+            ]
+            if not hop2_filtered:
+                run_metadata["fallback_path_taken"].append("hop2_no_eligible_intents")
+                break
+            typed_queries = hop2_filtered[:3]
+            queries = [tq.text for tq in typed_queries]
+            run_metadata["hop2_planner_output"] = {
+                "strategy": planner2.strategy,
+                "confidence": planner2.confidence,
+                "queries": [
+                    {"text": tq.text, "intent": tq.intent.value, "rationale": tq.rationale}
+                    for tq in typed_queries
+                ],
+            }
+            yield ExecutionEvent(
+                "planning",
+                STREAM_LABELS["planning"],
+                data={"strategy": planner2.strategy, "queries": queries, "hop": hop + 2},
+            )
+            # continue to next iteration → SEARCHING/FETCHING/SELECTING for hop 2
+
+        # Record final hop count for provenance.
+        run_metadata["hop_count"] = hop_count
+
+        # ── CONFLICT_CHECK + Build final context bundle (once) ──────────
+        if not selected:
+            logger.warning("No context selected", extra={"component": "orchestrator", "turn_id": turn_id})
+            empty_note = "(No relevant web content could be retrieved for this query.)"
+            context_bundle = ContextBundle(
+                xml=f"<context>{empty_note}</context>",
+                doc_map={},
+                fetched_urls=set(),
+            )
+        else:
+            xml, doc_map = format_context_xml(selected)
+            _ck()
+            state_trace.append("CONFLICT_CHECK")
+            yield ExecutionEvent("probing", STREAM_LABELS["probing"])
+            t_probe = time.time()
+            try:
+                conflict_result = await probe_contradictions(selected, query)
+            except Exception as e:
+                logger.warning("Probe unexpectedly raised: %s", e,
+                               extra={"component": "orchestrator", "turn_id": turn_id})
+                conflict_result = ConflictResult(has_conflict=False, probe_skipped_reason="parse_fail")
+            probe_ms_hop = int((time.time() - t_probe) * 1000)
+            stage_ms["probe_ms"] += probe_ms_hop
+            if conflict_result.probe_skipped_reason:
+                state_trace.append("CONFLICT_CHECK_SKIPPED")
+                run_metadata["fallback_path_taken"].append(f"probe_{conflict_result.probe_skipped_reason}")
+            try:
+                await save_contradiction_probe(
+                    turn_id=turn_id,
+                    result=conflict_result,
+                    probe_ms=probe_ms_hop,
+                    prompt_id=prompt_id("conflict_v3"),
+                )
+            except Exception as e:
+                logger.warning("Persist probe row failed: %s", e,
+                               extra={"component": "orchestrator", "turn_id": turn_id})
+            if conflict_result.has_conflict and conflict_result.conflict_summary:
+                xml = xml.replace(
+                    "<context>",
+                    f"<context>\n  <conflict_warning>{conflict_result.conflict_summary}</conflict_warning>",
+                    1,
+                )
+            context_bundle = ContextBundle(
+                xml=xml,
+                doc_map=doc_map,
+                fetched_urls=set(urls_opened),
+                conflict_summary=conflict_result.conflict_summary if conflict_result.has_conflict else None,
+            )
+
+        final_context_bundle = context_bundle
+        state_holder["final_context_bundle"] = final_context_bundle
+
+        # ── SYNTHESIZING (once, after retrieval loop) ───────────────────
+        _ck()
+        state_trace.append("SYNTHESIZING")
+        yield ExecutionEvent("generating", STREAM_LABELS["generating"])
+        full_answer = ""
+        hop_prompt_tokens = 0
+        hop_completion_tokens = 0
+        t0 = time.time()
+        try:
+            from agent.synthesizer import stream_synthesis
+            yield_event: list[str] = []
+
+            async def _collect_stream() -> None:
+                nonlocal full_answer, hop_prompt_tokens, hop_completion_tokens
+                async for text_chunk, pt, ct in stream_synthesis(
+                    query=query,
+                    context_xml=context_bundle.xml,
+                    doc_map=context_bundle.doc_map,
+                    history_text=history_text,
+                    conflict_note=context_bundle.conflict_summary,
+                    conflict_result=conflict_result,
+                    cancel_token=cancel_token,
+                ):
+                    if cancel_token is not None and cancel_token.is_set():
+                        break
+                    full_answer += text_chunk
+                    if pt:
+                        hop_prompt_tokens = pt
+                    if ct:
+                        hop_completion_tokens = ct
+                    if text_chunk:
+                        yield_event.append(text_chunk)
+
+            await asyncio.wait_for(_collect_stream(), timeout=POLICY.synth_timeout_s)
+            for chunk_text in yield_event:
+                _ck()
+                yield ExecutionEvent("generating", STREAM_LABELS["generating"], data=chunk_text)
+        except asyncio.TimeoutError:
+            logger.error("Synthesis timed out", extra={"component": "orchestrator", "turn_id": turn_id})
+            run_metadata["timeout_hits"].append("synthesize")
+            run_metadata["fallback_path_taken"].append("synthesize_timeout_error")
+            run_metadata["budget_breach"].append("synthesize_timeout")
+            full_answer = "Synthesis timed out. Partial context retrieved."
+        except (asyncio.TimeoutError, httpx.TimeoutException, httpx.ConnectError, Exception) as e:
+            logger.error("Synthesis failed: %s", e, extra={"component": "orchestrator", "turn_id": turn_id})
+            run_metadata["fallback_path_taken"].append("synthesize_error")
+            full_answer = f"Synthesis error: {e}. Retrieved {len(selected)} context chunks."
+        stage_ms["synthesize_ms"] += int((time.time() - t0) * 1000)
+
+        prompt_tokens += hop_prompt_tokens
+        completion_tokens += hop_completion_tokens
+
+        # ── VERIFYING CLAIMS (V2.4) ─────────────────────────────────────
+        _ck()
+        snippet_lookup = {s.doc_id: s.text for s in (selected or [])}
+        if snippet_lookup and context_bundle.doc_map:
+            state_trace.append("VERIFYING_CLAIMS")
+            yield ExecutionEvent("verifying", STREAM_LABELS["verifying"])
+            t_v = time.time()
+            claim_score, claim_records, full_answer = await verify_claims(
+                full_answer, context_bundle.doc_map, snippet_lookup,
+            )
+            verification_ms_hop = int((time.time() - t_v) * 1000)
+            verification_ms_total += verification_ms_hop
+            state_trace.append(
+                "VERIFICATION_DONE" if claim_records else "VERIFICATION_SKIPPED"
+            )
+        else:
+            state_trace.append("VERIFICATION_SKIPPED")
+
+        # ── Post-processing: citation guard + format conversion ────────
+        citation_score = self._guard.verify(full_answer, context_bundle.doc_map, context_bundle.fetched_urls)
+        formatted_answer = convert_citations(full_answer, context_bundle.doc_map)
+
+        # V3.2: existing uncertainty markers are now an OBSERVABILITY signal
+        # only — they no longer trigger re-search. Logged for downstream eval.
+        lower_ans_obs = full_answer.lower()
+        if any(marker in lower_ans_obs for marker in _UNCERTAINTY_MARKERS):
+            run_metadata.setdefault("observed_signals", []).append("uncertainty_markers")
+
         # Enforce deterministic uncertainty contract if model missed required block.
         lower_ans = full_answer.lower()
         if any(marker in lower_ans for marker in _UNCERTAINTY_MARKERS):
@@ -605,6 +632,20 @@ class ResearchOrchestrator:
         await save_turn(turn)
         # Note: in a multi-hop scenario we just save the final selection to DB
         await save_turn_context(turn_id, selected if 'selected' in locals() else [])
+
+        # V3.1: ephemeral cleanup of per-turn chunk embeddings (hybrid path only).
+        try:
+            from agent.memory import delete_chunk_embeddings
+            ephemeral_ids = [
+                getattr(c, "_hybrid_chunk_id", None)
+                for c in (selected if 'selected' in locals() else [])
+            ]
+            ephemeral_ids = [cid for cid in ephemeral_ids if cid]
+            if ephemeral_ids:
+                await delete_chunk_embeddings(ephemeral_ids)
+        except Exception as e:
+            logger.warning("delete_chunk_embeddings cleanup failed: %s", e,
+                           extra={"component": "orchestrator", "turn_id": turn_id})
         try:
             await save_claim_audit(turn_id, claim_records)
         except Exception as e:

@@ -32,6 +32,7 @@ async def list_eval_runs() -> list[dict]:
         run_at,
         COUNT(*) AS n_questions,
         SUM(CASE WHEN failure_class = 'PASS' OR failure_class IS NULL THEN 1 ELSE 0 END) * 1.0 / COUNT(*) AS pass_rate,
+        COALESCE(MAX(retrieval_mode), 'bm25') AS retrieval_mode,
         {", ".join(f"AVG({c}) AS avg_{c}" for c in _METRIC_COLS)}
     FROM eval_runs
     GROUP BY run_at

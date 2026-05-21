@@ -162,6 +162,79 @@ def select_with_diversity(
     return selected
 
 
+# ── V3.1: Hybrid RRF (BM25 + dense) ────────────────────────────────────────
+
+def hybrid_retrieval_enabled() -> bool:
+    """Opt-in via HYBRID_RETRIEVAL=1. Default behavior unchanged."""
+    return os.getenv("HYBRID_RETRIEVAL", "0").strip() == "1"
+
+
+def reciprocal_rank_fusion(
+    rankings: list[list[str]], k: int = 60,
+) -> list[tuple[str, float]]:
+    """Standard RRF: score(doc) = sum over rankings of 1 / (k + rank).
+    Returns descending list of (doc_id, score)."""
+    scores: dict[str, float] = defaultdict(float)
+    for ranking in rankings:
+        for rank, doc_id in enumerate(ranking):
+            scores[doc_id] += 1.0 / (k + rank + 1)  # 1-indexed rank per RRF convention
+    return sorted(scores.items(), key=lambda x: x[1], reverse=True)
+
+
+def _hybrid_shortlist(
+    query: str,
+    all_chunks: list,
+    bm25_top_indices: list[int],
+) -> tuple[list[int], list[str]] | None:
+    """Embed query + chunks, persist to sqlite-vec, run vector KNN, fuse with BM25
+    via RRF. Returns (top_indices, chunk_ids) into all_chunks for the top-30 fused
+    list, or None on any failure (caller falls back to BM25 path).
+
+    Sync; called from within the asyncio.to_thread worker that drives the whole
+    pipeline. Drives async memory helpers via a private event loop.
+    """
+    try:
+        from agent import embedder, memory
+        from agent.embedder import _embed_sync as _sync_embed
+
+        import uuid as _uuid
+        # Per-turn unique chunk_ids; stamp onto chunk for later cleanup by
+        # orchestrator. Avoids collisions across results that share doc_N ids.
+        unique_ids: list[str] = []
+        run_prefix = _uuid.uuid4().hex[:8]
+        for i, c in enumerate(all_chunks):
+            cid = f"h-{run_prefix}-{i}"
+            unique_ids.append(cid)
+            try:
+                c._hybrid_chunk_id = cid  # type: ignore[attr-defined]
+            except Exception:
+                pass
+
+        texts = [c.text for c in all_chunks]
+        embeds = _sync_embed([query] + texts)
+        if not embeds or len(embeds) < 2:
+            return None
+        q_emb, chunk_embs = embeds[0], embeds[1:]
+
+        async def _persist_and_search():
+            await memory.save_chunk_embeddings(unique_ids, chunk_embs)
+            return await memory.vector_search(q_emb, unique_ids, top_k=_BM25_TOP_N)
+
+        vec_hits = asyncio.run(_persist_and_search())
+        if not vec_hits:
+            return None
+        id_to_idx = {cid: i for i, cid in enumerate(unique_ids)}
+        bm25_ranking = [unique_ids[i] for i in bm25_top_indices]
+        vec_ranking = [cid for cid, _ in vec_hits]
+        fused = reciprocal_rank_fusion([bm25_ranking, vec_ranking])
+        top_indices = [id_to_idx[cid] for cid, _ in fused if cid in id_to_idx][:_BM25_TOP_N]
+        return top_indices, unique_ids
+    except Exception as exc:
+        logger.warning("Hybrid RRF path failed, falling back to BM25: %s", exc,
+                       extra={"component": "context_engine"})
+        return None
+
+
 # ── BM25 + FlashRank pipeline ──────────────────────────────────────────────
 
 def rank_and_select(
@@ -179,7 +252,15 @@ def rank_and_select(
     query_tokens = query.lower().split()
     scores = bm25.get_scores(query_tokens)
     indexed = sorted(enumerate(scores), key=lambda x: x[1], reverse=True)
-    top_indices = [i for i, _ in indexed[:_BM25_TOP_N]]
+    bm25_top_indices = [i for i, _ in indexed[:_BM25_TOP_N]]
+
+    # V3.1: optional hybrid RRF fusion. Failure path returns None → BM25-only.
+    top_indices = bm25_top_indices
+    if hybrid_retrieval_enabled() and len(all_chunks) > 1:
+        fused = _hybrid_shortlist(query, all_chunks, bm25_top_indices)
+        if fused is not None:
+            top_indices, _ = fused
+
     top_chunks = [all_chunks[i] for i in top_indices]
     top_scores = [scores[i] for i in top_indices]
 

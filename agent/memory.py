@@ -149,6 +149,21 @@ CREATE_CIRCUIT_EVENTS_INDEX = """
 CREATE INDEX IF NOT EXISTS idx_circuit_events_provider ON circuit_events(provider);
 """
 
+# V3.1 — sqlite-vec virtual table for ephemeral per-turn chunk embeddings.
+# Created idempotently in init_db() AFTER the extension is loaded; if loading
+# fails the hybrid path silently degrades to BM25-only.
+CREATE_CHUNK_EMBEDDINGS = """
+CREATE VIRTUAL TABLE IF NOT EXISTS chunk_embeddings USING vec0(
+    chunk_id TEXT PRIMARY KEY,
+    embedding FLOAT[384]
+);
+"""
+
+# Module-level flag set by init_db(); helpers read it to short-circuit when
+# sqlite-vec isn't available on this build.
+_VEC_AVAILABLE: bool = False
+
+
 CREATE_EVAL_RUNS = """
 CREATE TABLE IF NOT EXISTS eval_runs (
     run_id                   TEXT PRIMARY KEY,
@@ -171,9 +186,35 @@ CREATE TABLE IF NOT EXISTS eval_runs (
 """
 
 
+async def _try_load_sqlite_vec(db: aiosqlite.Connection) -> bool:
+    """Best-effort load of the sqlite-vec extension. Returns True on success."""
+    try:
+        import sqlite_vec  # lazy
+        await db.enable_load_extension(True)
+        await db.load_extension(sqlite_vec.loadable_path())
+        await db.enable_load_extension(False)
+        return True
+    except Exception as exc:
+        logger.warning(
+            "sqlite-vec extension unavailable; hybrid retrieval disabled: %s",
+            exc, extra={"component": "memory"},
+        )
+        return False
+
+
 async def init_db() -> None:
+    global _VEC_AVAILABLE
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
     async with aiosqlite.connect(DB_PATH) as db:
+        # Attempt to load sqlite-vec BEFORE any CREATE so virtual table works.
+        _VEC_AVAILABLE = await _try_load_sqlite_vec(db)
+        if _VEC_AVAILABLE:
+            try:
+                await db.execute(CREATE_CHUNK_EMBEDDINGS)
+            except aiosqlite.Error as exc:
+                logger.warning("chunk_embeddings create failed: %s", exc,
+                               extra={"component": "memory"})
+                _VEC_AVAILABLE = False
         await db.execute(CREATE_SESSIONS)
         await db.execute(CREATE_TURNS)
         await db.execute(CREATE_TURN_CONTEXT)
@@ -203,6 +244,7 @@ async def init_db() -> None:
             ("claim_precision_score_eval", "ALTER TABLE eval_runs ADD COLUMN claim_precision_score REAL"),
             ("eval_turn_id", "ALTER TABLE eval_runs ADD COLUMN turn_id TEXT"),
             ("eval_language", "ALTER TABLE eval_runs ADD COLUMN language TEXT DEFAULT 'en'"),
+            ("eval_retrieval_mode", "ALTER TABLE eval_runs ADD COLUMN retrieval_mode TEXT DEFAULT 'bm25'"),
         ]:
             try:
                 await db.execute(ddl)
@@ -451,6 +493,86 @@ async def save_circuit_event(event: dict) -> None:
             ),
         )
         await db.commit()
+
+
+# ── V3.1 chunk embedding helpers ───────────────────────────────────────────
+
+async def _connect_with_vec() -> aiosqlite.Connection:
+    """Open a connection and load sqlite-vec. Caller closes."""
+    db = await aiosqlite.connect(DB_PATH)
+    try:
+        import sqlite_vec
+        await db.enable_load_extension(True)
+        await db.load_extension(sqlite_vec.loadable_path())
+        await db.enable_load_extension(False)
+    except Exception:
+        await db.close()
+        raise
+    return db
+
+
+async def save_chunk_embeddings(
+    chunk_ids: list[str], embeddings: list[list[float]]
+) -> None:
+    """Persist ephemeral embeddings for the current turn's chunks."""
+    if not _VEC_AVAILABLE or not chunk_ids:
+        return
+    import struct
+    db = await _connect_with_vec()
+    try:
+        rows = [
+            (cid, struct.pack(f"{len(emb)}f", *emb))
+            for cid, emb in zip(chunk_ids, embeddings)
+        ]
+        await db.executemany(
+            "INSERT OR REPLACE INTO chunk_embeddings(chunk_id, embedding) VALUES (?, ?)",
+            rows,
+        )
+        await db.commit()
+    finally:
+        await db.close()
+
+
+async def vector_search(
+    query_embedding: list[float], chunk_ids: list[str], top_k: int = 30,
+) -> list[tuple[str, float]]:
+    """KNN over the supplied chunk_id scope. Returns list of (chunk_id, distance)."""
+    if not _VEC_AVAILABLE or not chunk_ids:
+        return []
+    import struct
+    qbytes = struct.pack(f"{len(query_embedding)}f", *query_embedding)
+    placeholders = ",".join("?" * len(chunk_ids))
+    sql = (
+        f"SELECT chunk_id, distance FROM chunk_embeddings "
+        f"WHERE embedding MATCH ? AND chunk_id IN ({placeholders}) "
+        f"AND k = ? ORDER BY distance"
+    )
+    db = await _connect_with_vec()
+    try:
+        db.row_factory = aiosqlite.Row
+        rows = await db.execute_fetchall(sql, (qbytes, *chunk_ids, top_k))
+    finally:
+        await db.close()
+    return [(r["chunk_id"], float(r["distance"])) for r in rows]
+
+
+async def delete_chunk_embeddings(chunk_ids: list[str]) -> None:
+    """Per-turn cleanup so the corpus stays ephemeral."""
+    if not _VEC_AVAILABLE or not chunk_ids:
+        return
+    placeholders = ",".join("?" * len(chunk_ids))
+    db = await _connect_with_vec()
+    try:
+        await db.execute(
+            f"DELETE FROM chunk_embeddings WHERE chunk_id IN ({placeholders})",
+            chunk_ids,
+        )
+        await db.commit()
+    except Exception as exc:
+        logger.warning("delete_chunk_embeddings failed: %s", exc,
+                       extra={"component": "memory"})
+    finally:
+        await db.close()
 
 
 async def session_exists(session_id: str) -> bool:

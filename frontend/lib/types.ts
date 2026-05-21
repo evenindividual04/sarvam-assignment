@@ -114,6 +114,7 @@ export interface EvalRun {
   run_at: string;
   n_questions: number;
   pass_rate: number;
+  retrieval_mode?: "bm25" | "hybrid" | string;
   avg_faithfulness: number;
   avg_relevance: number;
   avg_context_precision: number;

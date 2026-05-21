@@ -85,8 +85,11 @@ export default function EvalListPage() {
                   className="grid grid-cols-[1.6fr_60px_80px_1fr_1fr_1fr_1fr_1fr_24px] gap-4 py-4 border-b border-border hover:bg-surface-hover/50 transition-colors items-center"
                 >
                   <div>
-                    <div className="text-[13px] text-foreground">
+                    <div className="text-[13px] text-foreground flex items-center gap-2">
                       {formatDateTime(r.run_at)}
+                      <span className="font-mono text-[9px] uppercase tracking-[0.14em] text-muted-foreground border border-border px-1.5 py-0.5">
+                        {(r.retrieval_mode ?? "bm25").toUpperCase()}
+                      </span>
                     </div>
                     <div className="font-mono text-[10px] text-subtle-foreground mt-0.5">
                       {r.run_at}
