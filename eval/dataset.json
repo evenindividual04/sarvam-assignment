@@ -13,6 +13,9 @@
     "category": "factual",
     "language": "en",
     "is_multiturn": false,
+    "gold_answer": "March 14, 2023",
+    "gold_aliases": ["March 2023", "14 March 2023", "March 14 2023"],
+    "gold_entities": ["March", "2023"],
     "notes": "March 14, 2023 — straightforward factual retrieval"
   },
   {
@@ -24,11 +27,48 @@
     "notes": "Sarvam-2B / Sarvam-1 — verify against current website"
   },
   {
+    "id": "F-4",
+    "query": "What is the capital of India?",
+    "category": "factual",
+    "language": "en",
+    "is_multiturn": false,
+    "concept_id": "capital-of-india",
+    "gold_answer": "New Delhi",
+    "gold_aliases": ["Delhi"],
+    "gold_entities": ["New Delhi"],
+    "notes": "Unambiguous factual — paired with HI-7 for cross-language consistency."
+  },
+  {
+    "id": "F-5",
+    "query": "Who is the current Prime Minister of India?",
+    "category": "factual",
+    "language": "en",
+    "is_multiturn": false,
+    "concept_id": "current-pm-of-india",
+    "gold_answer": "Narendra Modi",
+    "gold_aliases": ["Modi", "PM Modi"],
+    "gold_entities": ["Narendra Modi", "Modi"],
+    "notes": "Current-state factual — paired with HI-8."
+  },
+  {
+    "id": "F-6",
+    "query": "Who is the current Finance Minister of India?",
+    "category": "factual",
+    "language": "en",
+    "is_multiturn": false,
+    "concept_id": "finance-minister-of-india",
+    "gold_answer": "Nirmala Sitharaman",
+    "gold_aliases": ["Sitharaman"],
+    "gold_entities": ["Nirmala Sitharaman"],
+    "notes": "Paired with HI-2 for cross-language consistency."
+  },
+  {
     "id": "MH-1",
     "query": "What is the capital of the state where BITS Pilani Goa campus is located?",
     "category": "multi_hop",
     "language": "en",
     "is_multiturn": false,
+    "concept_id": "bits-goa-state-capital",
     "notes": "Hop 1: BITS Goa is in Goa. Hop 2: Capital of Goa is Panaji."
   },
   {
@@ -48,11 +88,28 @@
     "notes": "Python. LangChain and many others depend on it."
   },
   {
+    "id": "MH-4",
+    "query": "In what year did the founder of Microsoft step down as CEO?",
+    "category": "multi_hop",
+    "language": "en",
+    "is_multiturn": false,
+    "notes": "Hop 1: Bill Gates founded Microsoft. Hop 2: Stepped down as CEO in 2000."
+  },
+  {
+    "id": "MH-5",
+    "query": "Which Indian state has the largest economy and what is its current Chief Minister's party?",
+    "category": "multi_hop",
+    "language": "en",
+    "is_multiturn": false,
+    "notes": "Hop 1: Maharashtra has largest state GSDP. Hop 2: current CM and party affiliation."
+  },
+  {
     "id": "C-1",
     "query": "Compare BM25 and dense vector search for RAG retrieval",
     "category": "comparison",
     "language": "en",
     "is_multiturn": false,
+    "concept_id": "bm25-vs-dense",
     "notes": "Should cover keyword vs semantic, hybrid approaches"
   },
   {
@@ -70,6 +127,22 @@
     "language": "en",
     "is_multiturn": false,
     "notes": "LPU = Language Processing Unit, low-latency sequential token generation"
+  },
+  {
+    "id": "C-4",
+    "query": "Compare Llama 3 and Mistral as open-weight models for retrieval-augmented generation",
+    "category": "comparison",
+    "language": "en",
+    "is_multiturn": false,
+    "notes": "License, context window, performance benchmarks, ecosystem support."
+  },
+  {
+    "id": "C-5",
+    "query": "Compare FlashRank and Cohere Rerank for cross-encoder reranking in production",
+    "category": "comparison",
+    "language": "en",
+    "is_multiturn": false,
+    "notes": "Local vs hosted, latency, model size, accuracy tradeoffs."
   },
   {
     "id": "IE-1",
@@ -96,6 +169,22 @@
     "notes": "Very specific internal data — unlikely to be publicly indexed"
   },
   {
+    "id": "IE-4",
+    "query": "How many private repositories does Anthropic maintain internally?",
+    "category": "insufficient_evidence",
+    "language": "en",
+    "is_multiturn": false,
+    "notes": "Internal data not publicly disclosed — agent should refuse or express uncertainty."
+  },
+  {
+    "id": "IE-5",
+    "query": "What is the exact carbon footprint of a single GPT-4 inference call?",
+    "category": "insufficient_evidence",
+    "language": "en",
+    "is_multiturn": false,
+    "notes": "OpenAI does not publish per-call emissions; only rough estimates exist."
+  },
+  {
     "id": "CF-1",
     "query": "How many parameters does GPT-4 have?",
     "category": "conflicting",
@@ -117,7 +206,25 @@
     "category": "conflicting",
     "language": "en",
     "is_multiturn": false,
+    "concept_id": "india-china-gdp",
     "notes": "IMF vs World Bank vs Indian govt figures conflict. Agent must surface disagreement."
+  },
+  {
+    "id": "CF-4",
+    "query": "What is the current population of India?",
+    "category": "conflicting",
+    "language": "en",
+    "is_multiturn": false,
+    "concept_id": "population-of-india",
+    "notes": "UN ~1.43B, national projection ~1.45B, last-census-extrapolated ~1.41B — handpicked: probe should fire reliably."
+  },
+  {
+    "id": "CF-5",
+    "query": "Where does India rank in global CO2 emissions?",
+    "category": "conflicting",
+    "language": "en",
+    "is_multiturn": false,
+    "notes": "Absolute vs per-capita ranking yields very different answers (3rd absolute vs ~140th per capita) — handpicked trap."
   },
   {
     "id": "MT-1-T1",
@@ -162,6 +269,48 @@
     "notes": "Multi-turn coherence — must infer 'Tavily' from prior turn"
   },
   {
+    "id": "MT-3-T1",
+    "query": "What is sqlite-vec and how is it different from FAISS?",
+    "category": "multi_turn",
+    "language": "en",
+    "is_multiturn": true,
+    "turn": 1,
+    "scenario": "MT-3",
+    "notes": "Turn 1 — establishes sqlite-vec context."
+  },
+  {
+    "id": "MT-3-T2",
+    "query": "Can it be used as a drop-in for a hybrid retrieval system?",
+    "category": "multi_turn",
+    "language": "en",
+    "is_multiturn": true,
+    "turn": 2,
+    "scenario": "MT-3",
+    "prior_query": "What is sqlite-vec and how is it different from FAISS?",
+    "notes": "Turn 2 must resolve 'it' to sqlite-vec from prior turn."
+  },
+  {
+    "id": "MT-4-T1",
+    "query": "Who founded the company Sarvam AI?",
+    "category": "multi_turn",
+    "language": "en",
+    "is_multiturn": true,
+    "turn": 1,
+    "scenario": "MT-4",
+    "notes": "Turn 1 — establishes founders context."
+  },
+  {
+    "id": "MT-4-T2",
+    "query": "What was their previous company before this one?",
+    "category": "multi_turn",
+    "language": "en",
+    "is_multiturn": true,
+    "turn": 2,
+    "scenario": "MT-4",
+    "prior_query": "Who founded the company Sarvam AI?",
+    "notes": "Turn 2 must resolve 'their' to the founders from turn 1."
+  },
+  {
     "id": "HI-1",
     "query": "भारत में सबसे ऊंचा पर्वत कौन सा है?",
     "category": "factual",
@@ -175,6 +324,10 @@
     "category": "factual",
     "language": "hi",
     "is_multiturn": false,
+    "concept_id": "finance-minister-of-india",
+    "gold_answer": "Nirmala Sitharaman",
+    "gold_aliases": ["निर्मला सीतारमण", "Sitharaman"],
+    "gold_entities": ["Nirmala Sitharaman"],
     "notes": "Hindi current-state factual: Who is India's current Finance Minister? Nirmala Sitharaman as of 2026."
   },
   {
@@ -191,7 +344,26 @@
     "category": "comparison",
     "language": "hi",
     "is_multiturn": false,
+    "concept_id": "india-china-gdp",
     "notes": "Hindi comparison: Compare current GDP growth rates of India and China."
+  },
+  {
+    "id": "HI-9",
+    "query": "BITS पिलानी गोवा परिसर जिस राज्य में है, उसकी राजधानी क्या है?",
+    "category": "multi_hop",
+    "language": "hi",
+    "is_multiturn": false,
+    "concept_id": "bits-goa-state-capital",
+    "notes": "Hindi multi-hop paired with MH-1. Hop 1: BITS Goa is in Goa. Hop 2: capital is Panaji."
+  },
+  {
+    "id": "C-HI-1",
+    "query": "RAG retrieval के लिए BM25 और dense vector search की तुलना करें",
+    "category": "comparison",
+    "language": "hi",
+    "is_multiturn": false,
+    "concept_id": "bm25-vs-dense",
+    "notes": "Hindi comparison paired with C-1."
   },
   {
     "id": "HI-5",
@@ -207,6 +379,31 @@
     "category": "conflicting",
     "language": "hi",
     "is_multiturn": false,
-    "notes": "Hindi conflicting/temporal: What is India's current population? UN, govt estimates, projections differ; no recent census since 2011."
+    "concept_id": "population-of-india",
+    "notes": "Hindi conflicting/temporal: What is India's current population? Paired with CF-4 for cross-language consistency."
+  },
+  {
+    "id": "HI-7",
+    "query": "भारत की राजधानी क्या है?",
+    "category": "factual",
+    "language": "hi",
+    "is_multiturn": false,
+    "concept_id": "capital-of-india",
+    "gold_answer": "New Delhi",
+    "gold_aliases": ["नई दिल्ली", "दिल्ली", "Delhi"],
+    "gold_entities": ["New Delhi"],
+    "notes": "Hindi factual paired with F-4. Tests cross-language consistency on a stable canonical answer."
+  },
+  {
+    "id": "HI-8",
+    "query": "भारत के वर्तमान प्रधानमंत्री कौन हैं?",
+    "category": "factual",
+    "language": "hi",
+    "is_multiturn": false,
+    "concept_id": "current-pm-of-india",
+    "gold_answer": "Narendra Modi",
+    "gold_aliases": ["नरेंद्र मोदी", "मोदी", "Modi"],
+    "gold_entities": ["Narendra Modi", "Modi"],
+    "notes": "Hindi factual paired with F-5."
   }
 ]

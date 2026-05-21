@@ -25,18 +25,26 @@ _METRIC_COLS = [
 
 
 async def list_eval_runs() -> list[dict]:
-    """Aggregate per run_at timestamp. Includes a per-language breakdown
-    (V3.4) when any non-default language is present in the run."""
+    """Aggregate per run_at timestamp. JOINs the eval_run_summary table when
+    rows exist there (post-V3.5) for canonical aggregates; otherwise falls
+    back to inline AVGs. Includes per-language breakdown (V3.4)."""
     sql = f"""
     SELECT
-        run_at,
+        e.run_at,
         COUNT(*) AS n_questions,
-        SUM(CASE WHEN failure_class = 'PASS' OR failure_class IS NULL THEN 1 ELSE 0 END) * 1.0 / COUNT(*) AS pass_rate,
-        COALESCE(MAX(retrieval_mode), 'bm25') AS retrieval_mode,
-        {", ".join(f"AVG({c}) AS avg_{c}" for c in _METRIC_COLS)}
-    FROM eval_runs
-    GROUP BY run_at
-    ORDER BY run_at DESC
+        SUM(CASE WHEN e.failure_class = 'PASS' OR e.failure_class IS NULL THEN 1 ELSE 0 END) * 1.0 / COUNT(*) AS pass_rate,
+        COALESCE(MAX(e.retrieval_mode), 'bm25') AS retrieval_mode,
+        MAX(e.ablation_id) AS ablation_id,
+        MAX(e.calibration_correlation) AS calibration_correlation,
+        AVG(e.factual_accuracy_score) AS avg_factual_accuracy_score,
+        {", ".join(f"AVG(e.{c}) AS avg_{c}" for c in _METRIC_COLS)},
+        MAX(s.total_cost_usd) AS total_cost_usd,
+        MAX(s.p50_latency_ms) AS p50_latency_ms,
+        MAX(s.p95_latency_ms) AS p95_latency_ms
+    FROM eval_runs e
+    LEFT JOIN eval_run_summary s ON s.run_at = e.run_at
+    GROUP BY e.run_at
+    ORDER BY e.run_at DESC
     """
     lang_sql = f"""
     SELECT
@@ -68,12 +76,14 @@ async def list_eval_runs() -> list[dict]:
 
 
 async def get_run_summary(run_at: str) -> dict:
-    """Per-category averages + failure_class distribution."""
+    """Per-category averages + failure_class distribution + cross-language +
+    calibration sub-sections."""
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         cat_sql = f"""
         SELECT category,
                COUNT(*) AS n,
+               AVG(factual_accuracy_score) AS avg_factual_accuracy_score,
                {", ".join(f"AVG({c}) AS avg_{c}" for c in _METRIC_COLS)}
         FROM eval_runs
         WHERE run_at = ?
@@ -87,14 +97,64 @@ async def get_run_summary(run_at: str) -> dict:
         """
         failure_dist = [dict(r) for r in await db.execute_fetchall(fail_sql, (run_at,))]
 
-    return {"run_at": run_at, "by_category": by_category, "failure_distribution": failure_dist}
+        cl_rows = [
+            dict(r) for r in await db.execute_fetchall(
+                "SELECT * FROM cross_language_consistency WHERE run_at = ? ORDER BY concept_id",
+                (run_at,),
+            )
+        ]
+
+        conf_sql = """
+        SELECT
+          json_extract(t.run_metadata_json, '$.planner_output.confidence') AS confidence,
+          AVG(e.faithfulness_score) AS mean_faithfulness,
+          AVG(e.claim_precision_score) AS mean_claim_precision,
+          COUNT(*) AS n
+        FROM eval_runs e LEFT JOIN turns t ON t.turn_id = e.turn_id
+        WHERE e.run_at = ? AND confidence IS NOT NULL
+        GROUP BY confidence
+        """
+        try:
+            calib_buckets = [dict(r) for r in await db.execute_fetchall(conf_sql, (run_at,))]
+        except Exception:
+            calib_buckets = []
+
+        summary_row = await db.execute_fetchall(
+            "SELECT * FROM eval_run_summary WHERE run_at = ? LIMIT 1", (run_at,),
+        )
+        summary_row = dict(summary_row[0]) if summary_row else {}
+
+    flagged = [r for r in cl_rows if r.get("flagged_inconsistent")]
+    mean_jaccard = (
+        sum(r["jaccard_score"] for r in cl_rows) / len(cl_rows)
+        if cl_rows else None
+    )
+
+    return {
+        "run_at": run_at,
+        "by_category": by_category,
+        "failure_distribution": failure_dist,
+        "cross_language": {
+            "rows": cl_rows,
+            "flagged": flagged,
+            "mean_jaccard": mean_jaccard,
+        },
+        "calibration": {
+            "buckets": calib_buckets,
+            "correlation": summary_row.get("calibration_correlation"),
+        },
+        "run_summary": summary_row,
+    }
 
 
 async def get_run_questions(run_at: str) -> list[dict]:
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         rows = await db.execute_fetchall(
-            "SELECT * FROM eval_runs WHERE run_at = ? ORDER BY question_id ASC", (run_at,)
+            "SELECT e.*, t.prompt_tokens, t.completion_tokens "
+            "FROM eval_runs e LEFT JOIN turns t ON t.turn_id = e.turn_id "
+            "WHERE e.run_at = ? ORDER BY e.question_id ASC",
+            (run_at,),
         )
         return [dict(r) for r in rows]
 
@@ -116,7 +176,8 @@ async def get_question_detail(run_at: str, question_id: str) -> Optional[dict]:
         probe: Optional[dict] = None
         if turn_id:
             t = await db.execute_fetchall(
-                "SELECT context_xml_sent, doc_map, claim_verification_json, state_trace "
+                "SELECT context_xml_sent, doc_map, claim_verification_json, state_trace, "
+                "prompt_tokens, completion_tokens "
                 "FROM turns WHERE turn_id = ? LIMIT 1",
                 (turn_id,),
             )

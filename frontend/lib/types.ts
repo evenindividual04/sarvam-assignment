@@ -72,6 +72,7 @@ export interface Turn {
   select_ms?: number;
   probe_ms?: number;
   synthesize_ms?: number;
+  cost_usd?: number;
 }
 
 export interface TurnDetail extends Turn {
@@ -143,6 +144,21 @@ export interface EvalSummary {
   avg_conflict_adherence?: number;
   by_category: EvalSummaryCategoryRow[];
   failure_class_distribution: Record<string, number>;
+  calibration?: {
+    buckets: Array<{
+      confidence: "low" | "medium" | "high" | string;
+      mean_faithfulness: number | null;
+      mean_claim_precision: number | null;
+      n: number;
+    }>;
+    correlation: number | null;
+  };
+  run_summary?: {
+    total_cost_usd?: number;
+    p50_latency_ms?: number;
+    p95_latency_ms?: number;
+    calibration_correlation?: number | null;
+  };
 }
 
 export interface EvalQuestion {
@@ -156,9 +172,13 @@ export interface EvalQuestion {
   citation_integrity?: number;
   claim_precision?: number;
   conflict_adherence?: number;
+  factual_accuracy_score?: number;
   failure_class?: string;
   pass?: boolean;
   latency_ms?: number;
+  prompt_tokens?: number;
+  completion_tokens?: number;
+  cost_usd?: number;
 }
 
 export interface EvalQuestionDetail extends EvalQuestion {

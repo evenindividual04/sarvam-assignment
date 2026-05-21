@@ -21,6 +21,7 @@ import {
   formatScore,
   truncate,
 } from "@/lib/format";
+import { costFor, formatCost } from "@/lib/cost";
 
 interface PageProps {
   params: Promise<{ runAt: string; questionId: string }>;
@@ -120,6 +121,12 @@ export default function QuestionDetailPage({ params }: PageProps) {
             {detail.latency_ms !== undefined && (
               <span className="tabular-nums">{formatMs(detail.latency_ms)}</span>
             )}
+            <span className="text-border-strong">·</span>
+            <span className="tabular-nums">
+              {formatCost(
+                costFor(undefined, detail.prompt_tokens, detail.completion_tokens),
+              )}
+            </span>
           </div>
 
           {/* Tabs — text-based underline */}

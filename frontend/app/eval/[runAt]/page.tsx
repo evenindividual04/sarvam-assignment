@@ -5,6 +5,8 @@ import Link from "next/link";
 import {
   BarChart,
   Bar,
+  LineChart,
+  Line,
   XAxis,
   YAxis,
   CartesianGrid,
@@ -15,6 +17,7 @@ import {
 import { getRunSummary, getRunQuestions } from "@/lib/api";
 import type { EvalQuestion, EvalSummary } from "@/lib/types";
 import { failureClassColor, formatDateTime, formatScore } from "@/lib/format";
+import { costFor, formatCost } from "@/lib/cost";
 
 interface PageProps {
   params: Promise<{ runAt: string }>;
@@ -109,6 +112,9 @@ export default function RunSummaryPage({ params }: PageProps) {
             <Metric label="Citation" value={summary.avg_citation_integrity} />
             <Metric label="Claim prec" value={summary.avg_claim_precision} />
           </div>
+
+          {/* Calibration — confidence vs faithfulness (V3.5) */}
+          <CalibrationStrip summary={summary} />
 
           {/* Charts */}
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-12">
@@ -223,7 +229,7 @@ export default function RunSummaryPage({ params }: PageProps) {
               </span>
             </div>
             <div className="border-t border-border">
-              <div className="grid grid-cols-[60px_1fr_100px_36px_60px_60px_60px_60px_120px_24px] gap-4 py-3 border-b border-border font-mono text-[10px] uppercase tracking-[0.14em] text-muted-foreground">
+              <div className="grid grid-cols-[60px_1fr_100px_36px_60px_60px_60px_60px_70px_120px_24px] gap-4 py-3 border-b border-border font-mono text-[10px] uppercase tracking-[0.14em] text-muted-foreground">
                 <div>ID</div>
                 <div>Question</div>
                 <div>Category</div>
@@ -232,6 +238,7 @@ export default function RunSummaryPage({ params }: PageProps) {
                 <div className="text-right">Relv</div>
                 <div className="text-right">Cite</div>
                 <div className="text-right">Claim</div>
+                <div className="text-right">Cost</div>
                 <div>Failure</div>
                 <div />
               </div>
@@ -239,7 +246,7 @@ export default function RunSummaryPage({ params }: PageProps) {
                 <Link
                   key={q.question_id}
                   href={`/eval/${encodeURIComponent(decodedRunAt)}/questions/${encodeURIComponent(q.question_id)}`}
-                  className="grid grid-cols-[60px_1fr_100px_36px_60px_60px_60px_60px_120px_24px] gap-4 py-3 border-b border-border hover:bg-surface-hover/50 transition-colors items-center"
+                  className="grid grid-cols-[60px_1fr_100px_36px_60px_60px_60px_60px_70px_120px_24px] gap-4 py-3 border-b border-border hover:bg-surface-hover/50 transition-colors items-center"
                 >
                   <div className="font-mono text-[11px] text-muted-foreground">
                     {q.question_id}
@@ -264,6 +271,9 @@ export default function RunSummaryPage({ params }: PageProps) {
                   </div>
                   <div className="text-right font-mono tabular-nums text-[12px] text-foreground">
                     {formatScore(q.claim_precision)}
+                  </div>
+                  <div className="text-right font-mono tabular-nums text-[11px] text-muted-foreground">
+                    {formatCost(costFor(undefined, q.prompt_tokens, q.completion_tokens))}
                   </div>
                   <div>
                     <span
@@ -314,6 +324,88 @@ function ChartCard({
         {title}
       </div>
       <div className="h-56">{children}</div>
+    </div>
+  );
+}
+
+function CalibrationStrip({ summary }: { summary: EvalSummary }) {
+  const buckets = summary.calibration?.buckets ?? [];
+  const correlation =
+    summary.calibration?.correlation ??
+    summary.run_summary?.calibration_correlation ??
+    null;
+  const ordered = ["low", "medium", "high"].map((c) =>
+    buckets.find((b) => b.confidence === c),
+  );
+  const enough = ordered.every((b) => b && b.n >= 3);
+  if (!enough) {
+    return (
+      <div className="mb-12 border-t border-b border-border py-6">
+        <div className="font-mono text-[10px] uppercase tracking-[0.18em] text-muted-foreground">
+          Confidence calibration
+        </div>
+        <div className="mt-2 font-mono text-[11px] uppercase tracking-[0.12em] text-subtle-foreground">
+          insufficient data for calibration.
+        </div>
+      </div>
+    );
+  }
+  const data = ordered.map((b) => ({
+    confidence: b!.confidence.toUpperCase(),
+    faithfulness: b!.mean_faithfulness ?? 0,
+    n: b!.n,
+  }));
+  return (
+    <div className="mb-12 border-t border-b border-border py-6">
+      <div className="flex items-baseline justify-between mb-3">
+        <div className="font-mono text-[10px] uppercase tracking-[0.18em] text-muted-foreground">
+          Confidence calibration
+        </div>
+        <div className="font-mono text-[10px] uppercase tracking-[0.18em] text-muted-foreground tabular-nums">
+          CORR: {correlation === null ? "—" : correlation.toFixed(2)}
+        </div>
+      </div>
+      <div className="h-20">
+        <ResponsiveContainer>
+          <LineChart data={data} margin={{ top: 4, right: 12, bottom: 4, left: 0 }}>
+            <CartesianGrid
+              strokeDasharray="2 2"
+              stroke="rgba(255,255,255,0.06)"
+              vertical={false}
+            />
+            <XAxis
+              dataKey="confidence"
+              stroke="#6b6b73"
+              fontSize={10}
+              tickLine={false}
+              axisLine={false}
+              tick={{ fontFamily: "var(--font-mono)" }}
+            />
+            <YAxis
+              stroke="#6b6b73"
+              fontSize={10}
+              tickLine={false}
+              axisLine={false}
+              domain={[0, 1]}
+              tick={{ fontFamily: "var(--font-mono)" }}
+              width={28}
+            />
+            <Tooltip
+              cursor={{ stroke: "rgba(255,255,255,0.08)" }}
+              contentStyle={tooltipStyle}
+              labelStyle={tooltipLabelStyle}
+            />
+            <Line
+              type="monotone"
+              dataKey="faithfulness"
+              stroke="rgba(13, 148, 136, 0.6)"
+              strokeWidth={1.5}
+              dot={{ fill: "rgba(13, 148, 136, 0.6)", r: 3 }}
+              isAnimationActive={false}
+            />
+          </LineChart>
+        </ResponsiveContainer>
+      </div>
     </div>
   );
 }
