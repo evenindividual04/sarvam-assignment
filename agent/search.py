@@ -13,7 +13,10 @@ import httpx
 from tenacity import retry, stop_after_attempt, wait_exponential
 
 from agent.models import QueryIntent, SearchResult, TypedQuery
+from utils.circuit_breaker import CircuitOpenError, breaker
 from utils.provider_adapters import normalize_search_items
+# Importing failure_policy registers all breakers at module import time.
+from utils import failure_policy as _failure_policy  # noqa: F401
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +46,7 @@ def _dedup(results: list[SearchResult]) -> list[SearchResult]:
     return out
 
 
+@breaker("parallel")
 @retry(wait=wait_exponential(multiplier=1, min=2, max=10), stop=stop_after_attempt(3), reraise=True)
 async def _search_parallel(query: str, client: httpx.AsyncClient, num_results: int = _MAX_RESULTS) -> list[SearchResult]:
     """Parallel AI — returns AI-native structured excerpts; no separate fetch needed."""
@@ -81,6 +85,7 @@ async def _search_parallel(query: str, client: httpx.AsyncClient, num_results: i
     return results
 
 
+@breaker("tavily")
 @retry(wait=wait_exponential(multiplier=1, min=2, max=10), stop=stop_after_attempt(3), reraise=True)
 async def _search_tavily(query: str, client: httpx.AsyncClient) -> list[SearchResult]:
     """Tavily fallback — include_raw_content=True collapses the fetch pipeline."""
@@ -125,6 +130,7 @@ async def _search_tavily(query: str, client: httpx.AsyncClient) -> list[SearchRe
     return results
 
 
+@breaker("serper")
 @retry(wait=wait_exponential(multiplier=1, min=2, max=10), stop=stop_after_attempt(3), reraise=True)
 async def _search_serper(query: str, client: httpx.AsyncClient) -> list[SearchResult]:
     """Serper last resort — returns snippets only; Trafilatura extracts full content."""
@@ -153,6 +159,7 @@ async def _search_serper(query: str, client: httpx.AsyncClient) -> list[SearchRe
     return results
 
 
+@breaker("tavily")
 @retry(wait=wait_exponential(multiplier=1, min=2, max=10), stop=stop_after_attempt(3), reraise=True)
 async def _search_tavily_news(query: str, client: httpx.AsyncClient, days: int = 30) -> list[SearchResult]:
     """Tavily in news mode for RECENCY_CHECK intent."""
@@ -193,6 +200,9 @@ async def _search_tavily_news(query: str, client: httpx.AsyncClient, days: int =
 async def _try(coro_factory, label: str, q: str) -> list[SearchResult]:
     try:
         return await coro_factory()
+    except CircuitOpenError as e:
+        logger.info("%s skipped (breaker open) for query '%s': %s", label, q, e, extra={"component": "search"})
+        return []
     except (httpx.HTTPStatusError, httpx.TimeoutException, httpx.ConnectError, Exception) as e:
         logger.warning("%s failed for query '%s': %s", label, q, e, extra={"component": "search"})
         return []

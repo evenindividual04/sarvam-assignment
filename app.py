@@ -29,9 +29,15 @@ except EnvironmentError as e:
     st.error(f"**Configuration error:** {e}")
     st.stop()
 
-from agent.memory import init_db
+from agent.memory import init_db, save_circuit_event
 from agent.orchestrator import ResearchOrchestrator
 from utils.async_bridge import run_agent_sync
+from utils.circuit_breaker import get_breaker
+from utils.failure_policy import register_all_breakers
+
+# Wire breakers (idempotent under Streamlit reruns).
+register_all_breakers()
+get_breaker().set_event_persister(save_circuit_event)
 
 import asyncio
 

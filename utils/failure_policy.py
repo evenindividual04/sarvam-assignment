@@ -4,6 +4,8 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 
+from utils.circuit_breaker import BreakerConfig, get_breaker
+
 
 @dataclass
 class FailurePolicy:
@@ -18,3 +20,25 @@ class FailurePolicy:
 
 
 POLICY = FailurePolicy()
+
+
+CIRCUIT_THRESHOLDS: dict[str, BreakerConfig] = {
+    "groq":          BreakerConfig(threshold=5, window_s=60.0, open_duration_s=30.0),
+    "gemini":        BreakerConfig(threshold=5, window_s=60.0, open_duration_s=30.0),
+    "openrouter":    BreakerConfig(threshold=5, window_s=60.0, open_duration_s=30.0),
+    "github_models": BreakerConfig(threshold=3, window_s=60.0, open_duration_s=30.0),
+    "parallel":      BreakerConfig(threshold=4, window_s=60.0, open_duration_s=30.0),
+    "tavily":        BreakerConfig(threshold=4, window_s=60.0, open_duration_s=30.0),
+    "serper":        BreakerConfig(threshold=4, window_s=60.0, open_duration_s=30.0),
+}
+
+
+def register_all_breakers() -> None:
+    cb = get_breaker()
+    for name, cfg in CIRCUIT_THRESHOLDS.items():
+        cb.register(name, cfg)
+
+
+# Register at import time so any code path that imports failure_policy gets
+# the breakers wired up. Idempotent (setdefault inside register).
+register_all_breakers()
