@@ -48,8 +48,8 @@ async def _persist_eval_run(result: dict) -> None:
                     faithfulness_score, answer_relevance_score, context_precision_score,
                     citation_integrity_score, conflict_adherence_score,
                     session_coherence_score, claim_precision_score, judge_reasoning,
-                    failure_class, latency_ms, turn_id, language
-                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    failure_class, latency_ms, turn_id, language, retrieval_mode
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     result["run_id"], result["run_at"], result["question_id"],
                     result["question"], result["category"], result.get("agent_answer", ""),
@@ -65,6 +65,7 @@ async def _persist_eval_run(result: dict) -> None:
                     result.get("latency_ms", 0),
                     result.get("turn_id") or None,
                     result.get("language", "en"),
+                    result.get("retrieval_mode", "bm25"),
                 ),
             )
             await db.commit()
@@ -79,6 +80,7 @@ async def run_eval() -> None:
     with open(_DATASET) as f:
         questions = json.load(f)
 
+    retrieval_mode = "hybrid" if os.environ.get("HYBRID_RETRIEVAL") == "1" else "bm25"
     run_ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     out_path = _RESULTS_DIR / f"eval_{run_ts}.jsonl"
     agent = ResearchOrchestrator()
@@ -223,6 +225,7 @@ async def run_eval() -> None:
                 "question": query,
                 "category": category,
                 "language": language,
+                "retrieval_mode": retrieval_mode,
                 "agent_answer": answer[:1000],
                 "faithfulness_score": faithfulness_score,
                 "answer_relevance_score": relevance_score,

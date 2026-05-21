@@ -605,6 +605,20 @@ class ResearchOrchestrator:
         await save_turn(turn)
         # Note: in a multi-hop scenario we just save the final selection to DB
         await save_turn_context(turn_id, selected if 'selected' in locals() else [])
+
+        # V3.1: ephemeral cleanup of per-turn chunk embeddings (hybrid path only).
+        try:
+            from agent.memory import delete_chunk_embeddings
+            ephemeral_ids = [
+                getattr(c, "_hybrid_chunk_id", None)
+                for c in (selected if 'selected' in locals() else [])
+            ]
+            ephemeral_ids = [cid for cid in ephemeral_ids if cid]
+            if ephemeral_ids:
+                await delete_chunk_embeddings(ephemeral_ids)
+        except Exception as e:
+            logger.warning("delete_chunk_embeddings cleanup failed: %s", e,
+                           extra={"component": "orchestrator", "turn_id": turn_id})
         try:
             await save_claim_audit(turn_id, claim_records)
         except Exception as e:
