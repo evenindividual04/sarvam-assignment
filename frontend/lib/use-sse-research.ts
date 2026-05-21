@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { BACKEND, cancelResearch } from "./api";
 import type { DoneEventData, ExecutionEvent } from "./types";
 
@@ -44,6 +44,14 @@ export function useSseResearch(): UseSseResearchReturn {
     const tid = turnIdRef.current;
     if (tid) void cancelResearch(tid);
     abortRef.current?.abort();
+  }, []);
+
+  // On hook unmount (e.g. navigating to /sessions or /eval mid-stream),
+  // abort the in-flight fetch so we don't leak a detached reader/decoder.
+  useEffect(() => {
+    return () => {
+      abortRef.current?.abort();
+    };
   }, []);
 
   const start = useCallback(async (query: string, sessionId: string) => {

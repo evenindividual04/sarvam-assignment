@@ -87,8 +87,8 @@ def test_eval_question_detail_includes_language_field(hindi_app_client):
     r = client.get(f"/eval/runs/{run_at}/questions/HI-1")
     assert r.status_code == 200
     data = r.json()
-    assert data["eval_row"]["language"] == "hi"
-    assert data["eval_row"]["question_id"] == "HI-1"
+    assert data["language"] == "hi"
+    assert data["question_id"] == "HI-1"
 
 
 def test_eval_runs_no_language_breakdown_when_only_english(hindi_app_client):

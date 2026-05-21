@@ -214,6 +214,8 @@ class ResearchOrchestrator:
                 plan(query, prior_summary=history_text or "No prior context."),
                 timeout=POLICY.plan_timeout_s,
             )
+        except OperationCancelledError:
+            raise
         except asyncio.TimeoutError:
             run_metadata["timeout_hits"].append("planning")
             run_metadata["fallback_path_taken"].append("planning_timeout_fallback")
@@ -294,6 +296,8 @@ class ResearchOrchestrator:
                     search(typed_queries, cancel_token=cancel_token),
                     timeout=POLICY.search_timeout_s,
                 )
+            except OperationCancelledError:
+                raise
             except asyncio.TimeoutError:
                 logger.error("Search timed out", extra={"component": "orchestrator", "turn_id": turn_id})
                 run_metadata["timeout_hits"].append("search")
@@ -320,6 +324,8 @@ class ResearchOrchestrator:
                     extractor.extract_all(results, cancel_token=cancel_token),
                     timeout=POLICY.fetch_timeout_s,
                 )
+            except OperationCancelledError:
+                raise
             except asyncio.TimeoutError:
                 logger.error("Extraction timed out", extra={"component": "orchestrator", "turn_id": turn_id})
                 run_metadata["timeout_hits"].append("fetch")
@@ -356,6 +362,8 @@ class ResearchOrchestrator:
                         asyncio.to_thread(rank_and_select, query, all_chunks, budget.web_context_budget),
                         timeout=POLICY.select_timeout_s,
                     )
+            except OperationCancelledError:
+                raise
             except asyncio.TimeoutError:
                 run_metadata["timeout_hits"].append("select")
                 run_metadata["fallback_path_taken"].append("select_timeout_heuristic")
@@ -443,6 +451,8 @@ class ResearchOrchestrator:
             t_probe = time.time()
             try:
                 conflict_result = await probe_contradictions(selected, query)
+            except OperationCancelledError:
+                raise
             except Exception as e:
                 logger.warning("Probe unexpectedly raised: %s", e,
                                extra={"component": "orchestrator", "turn_id": turn_id})
@@ -515,6 +525,8 @@ class ResearchOrchestrator:
             for chunk_text in yield_event:
                 _ck()
                 yield ExecutionEvent("generating", STREAM_LABELS["generating"], data=chunk_text)
+        except OperationCancelledError:
+            raise
         except asyncio.TimeoutError:
             logger.error("Synthesis timed out", extra={"component": "orchestrator", "turn_id": turn_id})
             run_metadata["timeout_hits"].append("synthesize")

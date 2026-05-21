@@ -11,9 +11,15 @@ import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { CodeBlock } from "./code-block";
 import { LatencyBar } from "./latency-bar";
 import { MetricBar } from "@/components/chat/metric-bar";
+import { ClaimsTable } from "@/components/eval/claims-table";
+import { ProbePanel } from "@/components/eval/probe-panel";
 import { formatMs, formatScore } from "@/lib/format";
 import { costFor, formatCost } from "@/lib/cost";
-import type { DocMap } from "@/lib/types";
+import type {
+  ClaimAuditRow,
+  ContradictionProbeRow,
+  DocMap,
+} from "@/lib/types";
 
 export interface TraceInspectorData {
   turn_id?: string;
@@ -34,6 +40,8 @@ export interface TraceInspectorData {
   urls?: string[];
   doc_map?: DocMap;
   context_xml?: string;
+  claim_audit?: ClaimAuditRow[];
+  contradiction_probes?: ContradictionProbeRow | null;
 }
 
 interface TraceInspectorProps {
@@ -82,6 +90,12 @@ export function TraceInspector({
                 </TabsTrigger>
                 <TabsTrigger value="context" className={TAB_TRIGGER}>
                   Context
+                </TabsTrigger>
+                <TabsTrigger value="claims" className={TAB_TRIGGER}>
+                  Claims ({data.claim_audit?.length ?? 0})
+                </TabsTrigger>
+                <TabsTrigger value="probe" className={TAB_TRIGGER}>
+                  Probe
                 </TabsTrigger>
               </TabsList>
 
@@ -200,6 +214,14 @@ export function TraceInspector({
                   </div>
                 )}
               </TabsContent>
+
+              <TabsContent value="claims" className="pt-6">
+                <ClaimsTable rows={data.claim_audit ?? []} />
+              </TabsContent>
+
+              <TabsContent value="probe" className="pt-6">
+                <ProbePanel probe={data.contradiction_probes ?? null} />
+              </TabsContent>
             </Tabs>
           </div>
         )}
@@ -271,6 +293,8 @@ export function turnToTraceData(t: {
   select_ms?: number;
   probe_ms?: number;
   synthesize_ms?: number;
+  claim_audit?: ClaimAuditRow[];
+  contradiction_probes?: ContradictionProbeRow | null;
 }): TraceInspectorData {
   return {
     turn_id: t.turn_id,
@@ -291,6 +315,8 @@ export function turnToTraceData(t: {
     select_ms: t.select_ms,
     probe_ms: t.probe_ms,
     synthesize_ms: t.synthesize_ms,
+    claim_audit: t.claim_audit,
+    contradiction_probes: t.contradiction_probes,
   };
 }
 

@@ -10,13 +10,15 @@ import { useSseResearch } from "@/lib/use-sse-research";
 import {
   TraceInspector,
   doneToTraceData,
+  turnToTraceData,
   type TraceInspectorData,
 } from "@/components/trace/trace-inspector";
 import { Button } from "@/components/ui/button";
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
 import { formatMs } from "@/lib/format";
-import type { DoneEventData, ExecutionEvent } from "@/lib/types";
+import { getSessionHistory, getTurnDetail } from "@/lib/api";
+import type { DoneEventData, ExecutionEvent, Turn } from "@/lib/types";
 import type { SseStatus } from "@/lib/use-sse-research";
 
 interface ChatRow {
@@ -26,6 +28,8 @@ interface ChatRow {
   liveText?: string;
   final?: DoneEventData;
   error?: string | null;
+  /** Set when row was rehydrated from /sessions history (not from a live SSE stream). */
+  historyTurn?: Turn;
 }
 
 const SUGGESTED = [
@@ -100,6 +104,38 @@ export default function ChatPage() {
     if (sse.status === "done") setRefreshKey((k) => k + 1);
   }, [sse.status]);
 
+  // Hydrate rows from backend whenever the active session changes (initial mount,
+  // returning from /sessions or /eval tabs, or selecting a session from the rail).
+  // Skip while a stream is in flight so we don't blow away live state.
+  useEffect(() => {
+    if (!sessionId) return;
+    if (sse.status === "streaming") return;
+    let alive = true;
+    getSessionHistory(sessionId)
+      .then((turns) => {
+        if (!alive) return;
+        if (!turns || turns.length === 0) return;
+        const hydrated: ChatRow[] = turns.map((t) => ({
+          query: t.query,
+          events: [],
+          status: "done" as SseStatus,
+          liveText: t.response,
+          historyTurn: t,
+        }));
+        // eslint-disable-next-line react-hooks/set-state-in-effect
+        setRows(hydrated);
+      })
+      .catch(() => {
+        /* leave rows empty; backend may be unreachable or session is brand-new */
+      });
+    return () => {
+      alive = false;
+    };
+    // sse.status intentionally excluded — we only want to hydrate on session change,
+    // not on every status transition during a live stream.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionId]);
+
   const inFlight = sse.status === "streaming";
 
   const handleSubmit = (query: string) => {
@@ -117,19 +153,33 @@ export default function ChatPage() {
   };
 
   const handleNewSession = () => {
-    const id = newSessionId();
-    setSessionId(id);
-    setRows([]);
+    if (sse.status === "streaming") sse.cancel();
     sse.reset();
+    const id = newSessionId();
+    setRows([]);
+    setSessionId(id);
     if (typeof window !== "undefined") {
       window.localStorage.setItem("dra:lastSessionId", id);
     }
   };
 
   const openTrace = (row: ChatRow) => {
-    if (!row.final) return;
-    setTraceData(doneToTraceData(row.query, row.final));
-    setTraceOpen(true);
+    if (row.final) {
+      setTraceData(doneToTraceData(row.query, row.final));
+      setTraceOpen(true);
+      return;
+    }
+    if (row.historyTurn) {
+      const turn = row.historyTurn;
+      setTraceData(turnToTraceData(turn));
+      setTraceOpen(true);
+      // Fetch full detail (claim audit, contradiction probe, context_xml) lazily.
+      getTurnDetail(sessionId, turn.turn_id)
+        .then((detail) => setTraceData(turnToTraceData(detail)))
+        .catch(() => {
+          /* keep partial */
+        });
+    }
   };
 
   const isEmpty = useMemo(() => rows.length === 0, [rows]);
@@ -140,9 +190,10 @@ export default function ChatPage() {
         <SessionsRail
           currentSessionId={sessionId}
           onSelect={(id) => {
-            setSessionId(id);
-            setRows([]);
+            if (id === sessionId) return;
             sse.reset();
+            setRows([]);
+            setSessionId(id);
             if (typeof window !== "undefined") {
               window.localStorage.setItem("dra:lastSessionId", id);
             }
@@ -295,13 +346,15 @@ function ChatTurn({
         </div>
       </div>
 
-      <div className={cn(row.status === "done" && "opacity-90")}>
-        <StreamProgress
-          events={row.events}
-          status={row.status}
-          error={row.error}
-        />
-      </div>
+      {!row.historyTurn && (
+        <div className={cn(row.status === "done" && "opacity-90")}>
+          <StreamProgress
+            events={row.events}
+            status={row.status}
+            error={row.error}
+          />
+        </div>
+      )}
 
       {/* Assistant message */}
       <div>
@@ -342,6 +395,54 @@ function ChatTurn({
                     variant="ghost"
                     size="sm"
                     onClick={copyAnswer}
+                    className="font-mono text-[11px] uppercase tracking-[0.12em]"
+                  >
+                    Copy
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={onOpenTrace}
+                    className="font-mono text-[11px] uppercase tracking-[0.12em]"
+                  >
+                    Trace
+                  </Button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {!row.final && row.historyTurn && (
+            <div className="mt-6 pt-5 border-t border-border space-y-4">
+              <div className="grid grid-cols-2 gap-6">
+                <MetricBar
+                  label="Citation integrity"
+                  value={row.historyTurn.citation_integrity_score}
+                />
+                <MetricBar
+                  label="Claim precision"
+                  value={row.historyTurn.claim_precision_score}
+                />
+              </div>
+              <div className="flex items-center justify-between pt-1">
+                <span className="font-mono text-[11px] tabular-nums text-muted-foreground">
+                  {(row.historyTurn.urls_opened?.length ?? 0)} sources ·{" "}
+                  {formatMs(row.historyTurn.latency_ms)}
+                </span>
+                <div className="flex items-center gap-1">
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={async () => {
+                      try {
+                        await navigator.clipboard.writeText(
+                          row.historyTurn?.response ?? "",
+                        );
+                        toast.success("Copied");
+                      } catch {
+                        /* no-op */
+                      }
+                    }}
                     className="font-mono text-[11px] uppercase tracking-[0.12em]"
                   >
                     Copy

@@ -201,7 +201,7 @@ def test_eval_runs_returns_aggregated_list(app_client):
     assert "run_at" in row
     assert "n_questions" in row
     assert "pass_rate" in row
-    assert "avg_faithfulness_score" in row
+    assert "avg_faithfulness" in row
 
 
 def test_eval_run_summary_per_category_breakdown(app_client):
@@ -214,7 +214,7 @@ def test_eval_run_summary_per_category_breakdown(app_client):
     assert data["run_at"] == run_at
     categories = {row["category"] for row in data["by_category"]}
     assert "factual" in categories and "multihop" in categories
-    fclasses = {row["failure_class"] for row in data["failure_distribution"]}
+    fclasses = set(data["failure_class_distribution"].keys())
     assert "PASS" in fclasses or "HALLUCINATION" in fclasses
 
 
@@ -257,11 +257,11 @@ def test_eval_question_detail_joins_claim_audit_and_probes(app_client):
     r = client.get(f"/eval/runs/{run_at}/questions/q1")
     assert r.status_code == 200
     data = r.json()
-    assert data["eval_row"]["question_id"] == "q1"
+    assert data["question_id"] == "q1"
     assert len(data["claim_audit"]) == 1
     assert data["claim_audit"][0]["cited_doc_ids"] == ["doc_1"]
-    assert data["contradiction_probe"] is not None
-    assert data["turn"]["doc_map"] == {"doc_1": ["t", "u", "d"]}
+    assert data["contradiction_probes"] is not None
+    assert data["doc_map"] == {"doc_1": ["t", "u", "d"]}
 
 
 def test_eval_question_detail_404_on_unknown(app_client):
@@ -301,5 +301,5 @@ def test_sessions_turn_detail_joins_claim_audit_and_probes(app_client):
     r = client.get(f"/sessions/sess-detail/turns/{turn_id}")
     assert r.status_code == 200
     data = r.json()
-    assert data["turn"]["turn_id"] == turn_id
+    assert data["turn_id"] == turn_id
     assert data["claim_audit"][0]["cited_doc_ids"] == ["doc_1"]
