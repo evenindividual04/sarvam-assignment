@@ -40,6 +40,8 @@ class ContextSnippet:
     diversity_score: float = 0.0
     final_score: float = 0.0
     intent_origin: Optional[str] = None  # V2.1: provenance from the originating typed query
+    trust_score: float = 0.7  # V2.3: deterministic source trust prior in [0.45, 1.00]
+    trust_tier: str = "unknown"
 
 
 @dataclass

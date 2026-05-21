@@ -26,6 +26,7 @@ except ImportError:
 from agent.models import ClaimContradiction, ContextSnippet, ConflictResult, SearchResult
 from utils.failure_policy import POLICY
 from utils.prompt_registry import PROMPT_REGISTRY
+from utils.source_trust import trust_for, trust_weight_enabled
 from utils.token_counter import count_tokens
 
 import asyncio
@@ -51,6 +52,7 @@ def chunk(result: SearchResult, text: str) -> list[ContextSnippet]:
     chunks: list[ContextSnippet] = []
     start = 0
     doc_idx = 0
+    trust_score, trust_tier = trust_for(result.domain or "")
     while start < len(words):
         end = start + _CHUNK_SIZE_WORDS
         segment = " ".join(words[start:end])
@@ -65,6 +67,8 @@ def chunk(result: SearchResult, text: str) -> list[ContextSnippet]:
             token_count=tok_count,
             retrieved_at=result.retrieved_at,
             intent_origin=result.intent_origin,
+            trust_score=trust_score,
+            trust_tier=trust_tier,
         ))
         start = end - _CHUNK_OVERLAP
         doc_idx += 1
@@ -82,8 +86,14 @@ def score_chunk(
     intent_origin: str | None = None,
 ) -> float:
     """
-    Three-factor score: 0.6 * relevance + 0.2 * recency + 0.2 * diversity.
-    Weights sum to 1.0. No division by zero anywhere.
+    Four-factor additive score (V2.3):
+        final = 0.50*relevance + 0.15*recency + 0.15*diversity + 0.20*trust
+    Weights sum to 1.0. Trust contribution is bounded — even max-trust cannot
+    promote a chunk with near-zero relevance.
+
+    When SOURCE_TRUST_DISABLED=1 (ablation), trust weight is zeroed and the
+    remaining three factors get the original 0.6/0.2/0.2 weighting.
+
     When intent_origin == "contradiction_probe", diversity is multiplied by 1.25
     (capped at 1.0) BEFORE additive scoring to help adversarial chunks survive.
     """
@@ -109,13 +119,16 @@ def score_chunk(
     if intent_origin == "contradiction_probe":
         diversity = min(1.0, diversity * 1.25)
 
-    # 4. Credibility (Domain reputation)
-    reputable_suffixes = ('.edu', '.gov', 'wikipedia.org', 'nature.com', 'ncbi.nlm.nih.gov', 'arxiv.org', '.ac.uk')
-    credibility = 1.2 if chunk.domain and any(chunk.domain.endswith(s) for s in reputable_suffixes) else 1.0
+    # 4. Trust: tiered source prior (additive, not multiplicative)
+    trust = chunk.trust_score
 
     chunk.recency_score = recency
     chunk.diversity_score = diversity
-    return (0.6 * relevance + 0.2 * recency + 0.2 * diversity) * credibility
+
+    if trust_weight_enabled():
+        return 0.50 * relevance + 0.15 * recency + 0.15 * diversity + 0.20 * trust
+    # Ablation mode: redistribute the trust weight back to the original 3 factors
+    return 0.60 * relevance + 0.20 * recency + 0.20 * diversity
 
 
 # ── Domain-diversity-aware selection ──────────────────────────────────────
