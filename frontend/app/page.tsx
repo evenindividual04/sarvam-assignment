@@ -120,11 +120,20 @@ export default function ChatPage() {
   const sse = useSseResearch();
 
   useEffect(() => {
-    const stored =
-      typeof window !== "undefined"
-        ? window.localStorage.getItem("dra:lastSessionId")
-        : null;
-    const id = stored || newSessionId();
+    // `/` always starts a fresh session — matches Claude/ChatGPT/Perplexity
+    // semantics where the root route means "new chat". To resume a previous
+    // session, the sidebar surfaces them by `first_query` title; clicking
+    // one dispatches `dra:session-select` (handlePickSession below).
+    //
+    // The previous behaviour of restoring `dra:lastSessionId` made `/`
+    // silently re-hydrate the most recent chat, which was confusing after a
+    // user finished a turn: refreshing or navigating back to `/` showed
+    // their stale conversation instead of an empty state.
+    //
+    // Mid-stream refresh recovery is intentionally NOT supported here: the
+    // backend turn keeps running, and the user can pick the session up
+    // again from the sidebar once it's done.
+    const id = newSessionId();
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setSessionId(id);
     if (typeof window !== "undefined") {
