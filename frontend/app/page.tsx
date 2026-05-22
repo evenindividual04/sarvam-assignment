@@ -472,9 +472,22 @@ export default function ChatPage() {
  */
 function EmptyState({ onPick }: { onPick: (q: string) => void }) {
   const [shuffleTick, setShuffleTick] = useState(0);
+  // SSR-safety: Math.random() inside pickSuggestions produces different
+  // results on the server and the client, which trips React #418
+  // (hydration mismatch) the moment the home page loads. We start with
+  // a deterministic "first N from the pool" slice that's identical on
+  // both sides, then trigger one shuffle in useEffect after mount so
+  // the visible suggestions still feel fresh per visit.
+  const [mounted, setMounted] = useState(false);
+  useEffect(() => {
+    setMounted(true);
+  }, []);
   const suggestions = useMemo(
-    () => pickSuggestions(SUGGESTED_POOL, SUGGESTED_COUNT),
-    [shuffleTick],
+    () =>
+      mounted
+        ? pickSuggestions(SUGGESTED_POOL, SUGGESTED_COUNT)
+        : SUGGESTED_POOL.slice(0, SUGGESTED_COUNT),
+    [shuffleTick, mounted],
   );
   return (
     <div className="max-w-[640px] mx-auto py-20 md:py-28">
