@@ -10,7 +10,7 @@ import {
   useState,
   type KeyboardEvent as ReactKeyboardEvent,
 } from "react";
-import { PlusIcon, SearchIcon } from "lucide-react";
+import { Activity, BarChart3, PlusIcon, SearchIcon, Settings as SettingsIcon, type LucideIcon } from "lucide-react";
 import { cn } from "@/lib/utils";
 import {
   getProviderHealth,
@@ -32,10 +32,14 @@ const HEALTH_POLL_MS = 30_000;
 const SESSIONS_POLL_MS = 60_000;
 const SEARCH_THRESHOLD = 5; // show search input only when list grows beyond this
 
-const ADMIN_NAV = [
-  { href: "/eval", label: "Eval" },
-  { href: "/settings", label: "Settings" },
-  { href: "/status", label: "Status" },
+const ADMIN_NAV: ReadonlyArray<{
+  href: string;
+  label: string;
+  icon: LucideIcon;
+}> = [
+  { href: "/eval", label: "Eval", icon: BarChart3 },
+  { href: "/settings", label: "Settings", icon: SettingsIcon },
+  { href: "/status", label: "Status", icon: Activity },
 ] as const;
 
 /**
@@ -244,8 +248,8 @@ export function Sidebar() {
         </div>
       )}
 
-      {/* Session list */}
-      <ScrollArea className="flex-1">
+      {/* Session list — the only scrolling area */}
+      <ScrollArea className="flex-1 min-h-0">
         <div
           className="py-2 outline-none"
           tabIndex={0}
@@ -313,28 +317,47 @@ export function Sidebar() {
         </div>
       </ScrollArea>
 
-      {/* Admin nav */}
-      <nav className="px-5 py-3 border-t border-border flex flex-col gap-0.5">
-        {ADMIN_NAV.map((item) => {
-          const active = pathname?.startsWith(item.href);
-          const isStatus = item.href === "/status";
-          return (
-            <Link
-              key={item.href}
-              href={item.href}
-              className={cn(
-                "flex items-center justify-between py-1.5 font-sans text-[12px] tracking-tight transition-colors",
-                active
-                  ? "text-foreground"
-                  : "text-muted-foreground hover:text-foreground",
-              )}
-            >
-              <span>{item.label}</span>
-              {isStatus && <HealthDot health={health} />}
-            </Link>
-          );
-        })}
-      </nav>
+      {/* Admin nav — always visible, never scrolls */}
+      <div className="border-t border-border px-3 pt-3 pb-1 shrink-0">
+        <div className="font-mono text-[10px] uppercase tracking-[0.14em] text-subtle-foreground px-2 pb-1">
+          More
+        </div>
+        <nav className="flex flex-col gap-0.5">
+          {ADMIN_NAV.map((item) => {
+            const active = pathname?.startsWith(item.href);
+            const isStatus = item.href === "/status";
+            const ItemIcon = item.icon;
+            return (
+              <Link
+                key={item.href}
+                href={item.href}
+                aria-current={active ? "page" : undefined}
+                className={cn(
+                  "group flex items-center justify-between px-3 py-2 rounded-[5px] border-l-2 font-sans text-[13px] tracking-tight transition-colors",
+                  active
+                    ? "border-accent bg-surface-hover/60 text-foreground"
+                    : "border-transparent text-foreground/80 hover:text-foreground hover:bg-surface-hover/40",
+                )}
+              >
+                <span className="flex items-center gap-2.5">
+                  <ItemIcon
+                    size={14}
+                    aria-hidden
+                    className={cn(
+                      "transition-colors",
+                      active
+                        ? "text-foreground"
+                        : "text-muted-foreground group-hover:text-foreground",
+                    )}
+                  />
+                  {item.label}
+                </span>
+                {isStatus && <HealthDot health={health} />}
+              </Link>
+            );
+          })}
+        </nav>
+      </div>
 
       {/* Footer */}
       <div className="px-5 py-3 border-t border-border space-y-2">

@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useRouter, usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
-import { MenuIcon, PlusIcon } from "lucide-react";
+import { Activity, BarChart3, MenuIcon, PlusIcon, Settings as SettingsIcon, type LucideIcon } from "lucide-react";
 import {
   Sheet,
   SheetContent,
@@ -23,10 +23,14 @@ import {
   sessionDisplayTitle,
 } from "@/lib/sessions";
 
-const ADMIN_NAV = [
-  { href: "/eval", label: "Eval" },
-  { href: "/settings", label: "Settings" },
-  { href: "/status", label: "Status" },
+const ADMIN_NAV: ReadonlyArray<{
+  href: string;
+  label: string;
+  icon: LucideIcon;
+}> = [
+  { href: "/eval", label: "Eval", icon: BarChart3 },
+  { href: "/settings", label: "Settings", icon: SettingsIcon },
+  { href: "/status", label: "Status", icon: Activity },
 ] as const;
 
 export function MobileNav() {
@@ -110,7 +114,7 @@ export function MobileNav() {
             </button>
           </div>
 
-          <ScrollArea className="flex-1">
+          <ScrollArea className="flex-1 min-h-0">
             <div className="py-1">
               {!loaded && (
                 <div className="px-5 py-3 space-y-2">
@@ -156,26 +160,43 @@ export function MobileNav() {
             </div>
           </ScrollArea>
 
-          <nav className="px-5 py-3 border-t border-border flex flex-col gap-0.5">
-            {ADMIN_NAV.map((item) => {
-              const active = pathname?.startsWith(item.href);
-              return (
-                <Link
-                  key={item.href}
-                  href={item.href}
-                  onClick={() => setOpen(false)}
-                  className={cn(
-                    "py-1.5 font-sans text-[12px] tracking-tight transition-colors",
-                    active
-                      ? "text-foreground"
-                      : "text-muted-foreground hover:text-foreground",
-                  )}
-                >
-                  {item.label}
-                </Link>
-              );
-            })}
-          </nav>
+          <div className="border-t border-border px-3 pt-3 pb-1 shrink-0">
+            <div className="font-mono text-[10px] uppercase tracking-[0.14em] text-subtle-foreground px-2 pb-1">
+              More
+            </div>
+            <nav className="flex flex-col gap-0.5">
+              {ADMIN_NAV.map((item) => {
+                const active = pathname?.startsWith(item.href);
+                const ItemIcon = item.icon;
+                return (
+                  <Link
+                    key={item.href}
+                    href={item.href}
+                    onClick={() => setOpen(false)}
+                    aria-current={active ? "page" : undefined}
+                    className={cn(
+                      "group flex items-center gap-2.5 px-3 py-2 rounded-[5px] border-l-2 font-sans text-[13px] tracking-tight transition-colors",
+                      active
+                        ? "border-accent bg-surface-hover/60 text-foreground"
+                        : "border-transparent text-foreground/80 hover:text-foreground hover:bg-surface-hover/40",
+                    )}
+                  >
+                    <ItemIcon
+                      size={14}
+                      aria-hidden
+                      className={cn(
+                        "transition-colors",
+                        active
+                          ? "text-foreground"
+                          : "text-muted-foreground group-hover:text-foreground",
+                      )}
+                    />
+                    {item.label}
+                  </Link>
+                );
+              })}
+            </nav>
+          </div>
 
           <div className="px-5 py-3 border-t border-border space-y-2">
             <QuotaPill />
