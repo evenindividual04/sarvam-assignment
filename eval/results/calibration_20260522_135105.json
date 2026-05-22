@@ -1,0 +1,65 @@
+{
+  "buckets": {
+    "low": {
+      "n": 0
+    },
+    "medium": {
+      "n": 10,
+      "mean_faithfulness": 0.5,
+      "mean_claim_precision": 1.0,
+      "pass_rate": 0.0
+    },
+    "high": {
+      "n": 3,
+      "mean_faithfulness": 0.5,
+      "mean_claim_precision": 1.0,
+      "pass_rate": 0.0
+    }
+  },
+  "correlation": 0.0,
+  "n_paired": 13,
+  "c3": {
+    "calibration_score": 0.875,
+    "brier_score": 0.9375,
+    "mean_abs_error": 0.125,
+    "n_cases": 4,
+    "per_category": {
+      "conflicting": {
+        "n_cases": 4,
+        "calibration_score": 0.875,
+        "brier_score": 0.9375,
+        "mean_abs_error": 0.125
+      }
+    },
+    "per_case": [
+      {
+        "question_id": "CF-1",
+        "category": "conflicting",
+        "model_self_confidence": 1.0,
+        "judge_confidence": 0.5,
+        "abs_error": 0.5
+      },
+      {
+        "question_id": "CF-3",
+        "category": "conflicting",
+        "model_self_confidence": 0.5,
+        "judge_confidence": 0.5,
+        "abs_error": 0.0
+      },
+      {
+        "question_id": "CF-5",
+        "category": "conflicting",
+        "model_self_confidence": 0.5,
+        "judge_confidence": 0.5,
+        "abs_error": 0.0
+      },
+      {
+        "question_id": "ADV-5",
+        "category": "conflicting",
+        "model_self_confidence": 0.5,
+        "judge_confidence": 0.5,
+        "abs_error": 0.0
+      }
+    ]
+  }
+}

@@ -1,0 +1,197 @@
+{
+  "buckets": {
+    "low": {
+      "n": 0
+    },
+    "medium": {
+      "n": 39,
+      "mean_faithfulness": 0.5,
+      "mean_claim_precision": 1.0,
+      "pass_rate": 0.0
+    },
+    "high": {
+      "n": 37,
+      "mean_faithfulness": 0.5,
+      "mean_claim_precision": 0.9864864864864865,
+      "pass_rate": 0.0
+    }
+  },
+  "correlation": 0.0,
+  "n_paired": 76,
+  "c3": {
+    "calibration_score": 0.8863636363636364,
+    "brier_score": 0.9431818181818182,
+    "mean_abs_error": 0.11363636363636363,
+    "n_cases": 22,
+    "per_category": {
+      "conflicting": {
+        "n_cases": 10,
+        "calibration_score": 0.9,
+        "brier_score": 0.95,
+        "mean_abs_error": 0.1
+      },
+      "insufficient_evidence": {
+        "n_cases": 12,
+        "calibration_score": 0.875,
+        "brier_score": 0.9375,
+        "mean_abs_error": 0.125
+      }
+    },
+    "per_case": [
+      {
+        "question_id": "IE-1",
+        "category": "insufficient_evidence",
+        "model_self_confidence": 0.5,
+        "judge_confidence": 0.5,
+        "abs_error": 0.0
+      },
+      {
+        "question_id": "IE-2",
+        "category": "insufficient_evidence",
+        "model_self_confidence": 0.5,
+        "judge_confidence": 0.5,
+        "abs_error": 0.0
+      },
+      {
+        "question_id": "IE-3",
+        "category": "insufficient_evidence",
+        "model_self_confidence": 0.5,
+        "judge_confidence": 0.5,
+        "abs_error": 0.0
+      },
+      {
+        "question_id": "IE-4",
+        "category": "insufficient_evidence",
+        "model_self_confidence": 0.0,
+        "judge_confidence": 0.5,
+        "abs_error": 0.5
+      },
+      {
+        "question_id": "IE-5",
+        "category": "insufficient_evidence",
+        "model_self_confidence": 0.5,
+        "judge_confidence": 0.5,
+        "abs_error": 0.0
+      },
+      {
+        "question_id": "CF-1",
+        "category": "conflicting",
+        "model_self_confidence": 0.5,
+        "judge_confidence": 0.5,
+        "abs_error": 0.0
+      },
+      {
+        "question_id": "CF-2",
+        "category": "conflicting",
+        "model_self_confidence": 1.0,
+        "judge_confidence": 0.5,
+        "abs_error": 0.5
+      },
+      {
+        "question_id": "CF-3",
+        "category": "conflicting",
+        "model_self_confidence": 0.5,
+        "judge_confidence": 0.5,
+        "abs_error": 0.0
+      },
+      {
+        "question_id": "CF-4",
+        "category": "conflicting",
+        "model_self_confidence": 0.5,
+        "judge_confidence": 0.5,
+        "abs_error": 0.0
+      },
+      {
+        "question_id": "CF-5",
+        "category": "conflicting",
+        "model_self_confidence": 0.5,
+        "judge_confidence": 0.5,
+        "abs_error": 0.0
+      },
+      {
+        "question_id": "HI-5",
+        "category": "insufficient_evidence",
+        "model_self_confidence": 1.0,
+        "judge_confidence": 0.5,
+        "abs_error": 0.5
+      },
+      {
+        "question_id": "HI-6",
+        "category": "conflicting",
+        "model_self_confidence": 1.0,
+        "judge_confidence": 0.5,
+        "abs_error": 0.5
+      },
+      {
+        "question_id": "BN-3",
+        "category": "conflicting",
+        "model_self_confidence": 0.5,
+        "judge_confidence": 0.5,
+        "abs_error": 0.0
+      },
+      {
+        "question_id": "MR-3",
+        "category": "conflicting",
+        "model_self_confidence": 0.5,
+        "judge_confidence": 0.5,
+        "abs_error": 0.0
+      },
+      {
+        "question_id": "HG-2",
+        "category": "insufficient_evidence",
+        "model_self_confidence": 0.5,
+        "judge_confidence": 0.5,
+        "abs_error": 0.0
+      },
+      {
+        "question_id": "HG-3",
+        "category": "insufficient_evidence",
+        "model_self_confidence": 0.5,
+        "judge_confidence": 0.5,
+        "abs_error": 0.0
+      },
+      {
+        "question_id": "HG-6",
+        "category": "conflicting",
+        "model_self_confidence": 0.5,
+        "judge_confidence": 0.5,
+        "abs_error": 0.0
+      },
+      {
+        "question_id": "TA-5",
+        "category": "insufficient_evidence",
+        "model_self_confidence": 0.5,
+        "judge_confidence": 0.5,
+        "abs_error": 0.0
+      },
+      {
+        "question_id": "MR-5",
+        "category": "insufficient_evidence",
+        "model_self_confidence": 0.5,
+        "judge_confidence": 0.5,
+        "abs_error": 0.0
+      },
+      {
+        "question_id": "ADV-2",
+        "category": "insufficient_evidence",
+        "model_self_confidence": 1.0,
+        "judge_confidence": 0.5,
+        "abs_error": 0.5
+      },
+      {
+        "question_id": "ADV-4",
+        "category": "insufficient_evidence",
+        "model_self_confidence": 0.5,
+        "judge_confidence": 0.5,
+        "abs_error": 0.0
+      },
+      {
+        "question_id": "ADV-5",
+        "category": "conflicting",
+        "model_self_confidence": 0.5,
+        "judge_confidence": 0.5,
+        "abs_error": 0.0
+      }
+    ]
+  }
+}

@@ -11,6 +11,12 @@ eval/results/*
 !eval/results/.gitkeep
 !eval/results/SAMPLE_REPORT.md
 !eval/results/JUDGE_FAMILY_COMPARISON.md
+# Eval result JSONL files are seeded into the deployed HF Space's
+# SQLite via utils/eval_seed.py on first boot. Track them.
+!eval/results/eval_*.jsonl
+!eval/results/summary_*.json
+!eval/results/calibration_*.json
+!eval/results/report_*.md
 .streamlit/secrets.toml
 .DS_Store
 *.egg-info/

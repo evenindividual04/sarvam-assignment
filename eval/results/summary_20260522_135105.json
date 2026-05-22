@@ -1,0 +1,276 @@
+{
+  "run_at": "2026-05-22T13:51:05.915858+00:00",
+  "ablation_id": "40b3871b-18ee-4f80-bc14-e606ad84d400",
+  "n_questions": 13,
+  "pass_rate": 0.0,
+  "mean_faithfulness": 0.5,
+  "mean_relevance": null,
+  "mean_context_precision": 0.5,
+  "mean_citation_integrity": 1.0,
+  "mean_claim_precision": 1.0,
+  "mean_factual_accuracy": 1.0,
+  "p50_latency_ms": 75774,
+  "p95_latency_ms": 143714,
+  "total_cost_usd": 0.0,
+  "retrieval_mode": "hybrid",
+  "calibration_correlation": 0.0,
+  "c3_calibration_score": 0.875,
+  "c3_brier_score": 0.9375,
+  "c3_n_cases": 4,
+  "created_at": "2026-05-22T14:20:28.406861+00:00",
+  "aggregates": {
+    "overall": {
+      "n_questions": 13,
+      "pass_rate": 0.0,
+      "p50_latency_ms": 75774,
+      "p95_latency_ms": 143714,
+      "total_cost_usd": 0.0,
+      "mean_faithfulness": 0.5,
+      "p50_faithfulness": 0.5,
+      "p95_faithfulness": 0.5,
+      "mean_faithfulness_ci_low": 0.5,
+      "mean_faithfulness_ci_high": 0.5,
+      "mean_answer_relevance": 0.5,
+      "p50_answer_relevance": 0.5,
+      "p95_answer_relevance": 0.5,
+      "mean_answer_relevance_ci_low": 0.5,
+      "mean_answer_relevance_ci_high": 0.5,
+      "mean_context_precision": 0.5,
+      "p50_context_precision": 0.5,
+      "p95_context_precision": 0.5,
+      "mean_context_precision_ci_low": 0.5,
+      "mean_context_precision_ci_high": 0.5,
+      "mean_citation_integrity": 1.0,
+      "p50_citation_integrity": 1.0,
+      "p95_citation_integrity": 1.0,
+      "mean_citation_integrity_ci_low": 1.0,
+      "mean_citation_integrity_ci_high": 1.0,
+      "mean_claim_precision": 1.0,
+      "p50_claim_precision": 1.0,
+      "p95_claim_precision": 1.0,
+      "mean_claim_precision_ci_low": 1.0,
+      "mean_claim_precision_ci_high": 1.0,
+      "mean_factual_accuracy": 1.0,
+      "p50_factual_accuracy": 1.0,
+      "p95_factual_accuracy": 1.0,
+      "mean_factual_accuracy_ci_low": 1.0,
+      "mean_factual_accuracy_ci_high": 1.0,
+      "mean_quote_grounding_ratio": 0.9230769230769231,
+      "p50_quote_grounding_ratio": 1.0,
+      "p95_quote_grounding_ratio": 1.0,
+      "mean_quote_grounding_ratio_ci_low": 0.7692307692307693,
+      "mean_quote_grounding_ratio_ci_high": 1.0,
+      "mean_uncertainty_handling": null,
+      "mean_numeric_grounding_ratio": 0.9742552319475396,
+      "p50_numeric_grounding_ratio": 1.0,
+      "p95_numeric_grounding_ratio": 1.0,
+      "mean_numeric_grounding_ratio_ci_low": 0.9518776095699173,
+      "mean_numeric_grounding_ratio_ci_high": 0.9930069930069929,
+      "mean_criteria_coverage_ratio": 0.43333333333333335,
+      "p50_criteria_coverage_ratio": 0.5,
+      "p95_criteria_coverage_ratio": 0.9333333333333333,
+      "mean_criteria_coverage_ratio_ci_low": 0.1,
+      "mean_criteria_coverage_ratio_ci_high": 0.7666666666666666,
+      "script_preservation_mean": 0.28411013642025645,
+      "script_preservation_pass_rate": 0.0,
+      "script_preservation_n": 5,
+      "terminator_fired_distribution": {
+        "MAX_HOPS_REACHED": 4,
+        "STOP_RAG_GATE": 4,
+        "CONFIDENCE_HIGH_ENOUGH": 3,
+        "TOKEN_BUDGET_EXHAUSTED": 2
+      },
+      "planner_provider_distribution": {
+        "groq": 13
+      },
+      "reranker_used_distribution": {
+        "cohere": 6,
+        "flashrank": 4
+      },
+      "synth_chain_primary_distribution": {
+        "sarvam": 13
+      },
+      "language_detection_method_distribution": {
+        "default": 7,
+        "script": 4,
+        "keyword": 1,
+        "fasttext": 1
+      },
+      "total_evidence_gaps": 1,
+      "turns_with_extraction_fallbacks": 8,
+      "turns_with_context_fallbacks": 0
+    },
+    "by_category": {
+      "conflicting": {
+        "n": 4,
+        "pass_rate": 0.0,
+        "mean_faithfulness": 0.5,
+        "mean_answer_relevance": 0.5,
+        "mean_context_precision": 0.5,
+        "mean_citation_integrity": 1.0,
+        "mean_claim_precision": 1.0,
+        "mean_factual_accuracy": null,
+        "mean_quote_grounding_ratio": 1.0,
+        "mean_uncertainty_handling": null,
+        "mean_numeric_grounding_ratio": 0.9653679653679653,
+        "mean_criteria_coverage_ratio": 0.5
+      },
+      "factual": {
+        "n": 5,
+        "pass_rate": 0.0,
+        "mean_faithfulness": 0.5,
+        "mean_answer_relevance": 0.5,
+        "mean_context_precision": 0.5,
+        "mean_citation_integrity": 1.0,
+        "mean_claim_precision": 1.0,
+        "mean_factual_accuracy": 1.0,
+        "mean_quote_grounding_ratio": 0.8,
+        "mean_uncertainty_handling": null,
+        "mean_numeric_grounding_ratio": 1.0,
+        "mean_criteria_coverage_ratio": 0.25
+      },
+      "multi_turn": {
+        "n": 4,
+        "pass_rate": 0.0,
+        "mean_faithfulness": 0.5,
+        "mean_answer_relevance": 0.5,
+        "mean_context_precision": 0.5,
+        "mean_citation_integrity": 1.0,
+        "mean_claim_precision": 1.0,
+        "mean_factual_accuracy": null,
+        "mean_quote_grounding_ratio": 1.0,
+        "mean_uncertainty_handling": null,
+        "mean_numeric_grounding_ratio": 0.9509615384615384,
+        "mean_criteria_coverage_ratio": 0.6666666666666666
+      }
+    }
+  },
+  "failure_taxonomy": {
+    "KNOWLEDGE_BLEED": 13
+  },
+  "calibration": {
+    "buckets": {
+      "low": {
+        "n": 0
+      },
+      "medium": {
+        "n": 10,
+        "mean_faithfulness": 0.5,
+        "mean_claim_precision": 1.0,
+        "pass_rate": 0.0
+      },
+      "high": {
+        "n": 3,
+        "mean_faithfulness": 0.5,
+        "mean_claim_precision": 1.0,
+        "pass_rate": 0.0
+      }
+    },
+    "correlation": 0.0,
+    "n_paired": 13,
+    "c3": {
+      "calibration_score": 0.875,
+      "brier_score": 0.9375,
+      "mean_abs_error": 0.125,
+      "n_cases": 4,
+      "per_category": {
+        "conflicting": {
+          "n_cases": 4,
+          "calibration_score": 0.875,
+          "brier_score": 0.9375,
+          "mean_abs_error": 0.125
+        }
+      },
+      "per_case": [
+        {
+          "question_id": "CF-1",
+          "category": "conflicting",
+          "model_self_confidence": 1.0,
+          "judge_confidence": 0.5,
+          "abs_error": 0.5
+        },
+        {
+          "question_id": "CF-3",
+          "category": "conflicting",
+          "model_self_confidence": 0.5,
+          "judge_confidence": 0.5,
+          "abs_error": 0.0
+        },
+        {
+          "question_id": "CF-5",
+          "category": "conflicting",
+          "model_self_confidence": 0.5,
+          "judge_confidence": 0.5,
+          "abs_error": 0.0
+        },
+        {
+          "question_id": "ADV-5",
+          "category": "conflicting",
+          "model_self_confidence": 0.5,
+          "judge_confidence": 0.5,
+          "abs_error": 0.0
+        }
+      ]
+    }
+  },
+  "c3_calibration": {
+    "calibration_score": 0.875,
+    "brier_score": 0.9375,
+    "mean_abs_error": 0.125,
+    "n_cases": 4,
+    "per_category": {
+      "conflicting": {
+        "n_cases": 4,
+        "calibration_score": 0.875,
+        "brier_score": 0.9375,
+        "mean_abs_error": 0.125
+      }
+    },
+    "per_case": [
+      {
+        "question_id": "CF-1",
+        "category": "conflicting",
+        "model_self_confidence": 1.0,
+        "judge_confidence": 0.5,
+        "abs_error": 0.5
+      },
+      {
+        "question_id": "CF-3",
+        "category": "conflicting",
+        "model_self_confidence": 0.5,
+        "judge_confidence": 0.5,
+        "abs_error": 0.0
+      },
+      {
+        "question_id": "CF-5",
+        "category": "conflicting",
+        "model_self_confidence": 0.5,
+        "judge_confidence": 0.5,
+        "abs_error": 0.0
+      },
+      {
+        "question_id": "ADV-5",
+        "category": "conflicting",
+        "model_self_confidence": 0.5,
+        "judge_confidence": 0.5,
+        "abs_error": 0.0
+      }
+    ]
+  },
+  "cross_language": [],
+  "cross_script": {
+    "mean_citation_overlap": null,
+    "mean_entity_overlap": null,
+    "n_pairs": 0,
+    "n_topics": 0,
+    "per_topic": {},
+    "pairs": []
+  },
+  "cross_family_judge": {},
+  "groq_key_count": 4,
+  "groq_key_rotator": {
+    "provider": "groq",
+    "total_keys": 4,
+    "throttled_now": 4
+  }
+}

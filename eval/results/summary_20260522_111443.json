@@ -1,0 +1,697 @@
+{
+  "run_at": "2026-05-22T11:14:43.560295+00:00",
+  "ablation_id": "40b3871b-18ee-4f80-bc14-e606ad84d400",
+  "n_questions": 76,
+  "pass_rate": 0.0,
+  "mean_faithfulness": 0.5,
+  "mean_relevance": null,
+  "mean_context_precision": 0.5,
+  "mean_citation_integrity": 0.9692982456140351,
+  "mean_claim_precision": 0.993421052631579,
+  "mean_factual_accuracy": 0.7142857142857143,
+  "p50_latency_ms": 35156,
+  "p95_latency_ms": 86503,
+  "total_cost_usd": 0.000728775,
+  "retrieval_mode": "bm25",
+  "calibration_correlation": 0.0,
+  "c3_calibration_score": 0.8863636363636364,
+  "c3_brier_score": 0.9431818181818182,
+  "c3_n_cases": 22,
+  "created_at": "2026-05-22T13:08:10.786539+00:00",
+  "aggregates": {
+    "overall": {
+      "n_questions": 76,
+      "pass_rate": 0.0,
+      "p50_latency_ms": 35156,
+      "p95_latency_ms": 86503,
+      "total_cost_usd": 0.000728775,
+      "mean_faithfulness": 0.5,
+      "p50_faithfulness": 0.5,
+      "p95_faithfulness": 0.5,
+      "mean_faithfulness_ci_low": 0.5,
+      "mean_faithfulness_ci_high": 0.5,
+      "mean_answer_relevance": 0.5,
+      "p50_answer_relevance": 0.5,
+      "p95_answer_relevance": 0.5,
+      "mean_answer_relevance_ci_low": 0.5,
+      "mean_answer_relevance_ci_high": 0.5,
+      "mean_context_precision": 0.5,
+      "p50_context_precision": 0.5,
+      "p95_context_precision": 0.5,
+      "mean_context_precision_ci_low": 0.5,
+      "mean_context_precision_ci_high": 0.5,
+      "mean_citation_integrity": 0.9692982456140351,
+      "p50_citation_integrity": 1.0,
+      "p95_citation_integrity": 1.0,
+      "mean_citation_integrity_ci_low": 0.9265350877192983,
+      "mean_citation_integrity_ci_high": 0.9967105263157895,
+      "mean_claim_precision": 0.993421052631579,
+      "p50_claim_precision": 1.0,
+      "p95_claim_precision": 1.0,
+      "mean_claim_precision_ci_low": 0.9802631578947368,
+      "mean_claim_precision_ci_high": 1.0,
+      "mean_factual_accuracy": 0.7142857142857143,
+      "p50_factual_accuracy": 1.0,
+      "p95_factual_accuracy": 1.0,
+      "mean_factual_accuracy_ci_low": 0.5,
+      "mean_factual_accuracy_ci_high": 0.9285714285714286,
+      "mean_quote_grounding_ratio": 0.9057017543859649,
+      "p50_quote_grounding_ratio": 1.0,
+      "p95_quote_grounding_ratio": 1.0,
+      "mean_quote_grounding_ratio_ci_low": 0.8399122807017544,
+      "mean_quote_grounding_ratio_ci_high": 0.9605263157894737,
+      "mean_uncertainty_handling": 0.23333333333333334,
+      "p50_uncertainty_handling": 0.2,
+      "p95_uncertainty_handling": 0.5899999999999999,
+      "mean_uncertainty_handling_ci_low": 0.10833333333333334,
+      "mean_uncertainty_handling_ci_high": 0.375,
+      "mean_numeric_grounding_ratio": 0.9523193760262726,
+      "p50_numeric_grounding_ratio": 1.0,
+      "p95_numeric_grounding_ratio": 1.0,
+      "mean_numeric_grounding_ratio_ci_low": 0.9209638680033416,
+      "mean_numeric_grounding_ratio_ci_high": 0.9782289776164549,
+      "mean_criteria_coverage_ratio": 0.453551912568306,
+      "p50_criteria_coverage_ratio": 0.5,
+      "p95_criteria_coverage_ratio": 1.0,
+      "mean_criteria_coverage_ratio_ci_low": 0.3387978142076503,
+      "mean_criteria_coverage_ratio_ci_high": 0.5683060109289617,
+      "script_preservation_mean": 0.21634775087332567,
+      "script_preservation_pass_rate": 0.09375,
+      "script_preservation_n": 32,
+      "terminator_fired_distribution": {
+        "MAX_HOPS_REACHED": 47,
+        "CONFIDENCE_HIGH_ENOUGH": 14,
+        "TOKEN_BUDGET_EXHAUSTED": 15
+      },
+      "planner_provider_distribution": {
+        "groq": 76
+      },
+      "reranker_used_distribution": {
+        "cohere": 43,
+        "flashrank": 33
+      },
+      "synth_chain_primary_distribution": {
+        "sarvam": 75
+      },
+      "language_detection_method_distribution": {
+        "default": 43,
+        "script": 25,
+        "keyword": 7,
+        "fasttext": 1
+      },
+      "total_evidence_gaps": 11,
+      "turns_with_extraction_fallbacks": 68,
+      "turns_with_context_fallbacks": 0
+    },
+    "by_category": {
+      "comparison": {
+        "n": 10,
+        "pass_rate": 0.0,
+        "mean_faithfulness": 0.5,
+        "mean_answer_relevance": 0.5,
+        "mean_context_precision": 0.5,
+        "mean_citation_integrity": 0.9166666666666666,
+        "mean_claim_precision": 1.0,
+        "mean_factual_accuracy": null,
+        "mean_quote_grounding_ratio": 1.0,
+        "mean_uncertainty_handling": null,
+        "mean_numeric_grounding_ratio": 0.9263888888888889,
+        "mean_criteria_coverage_ratio": 0.625
+      },
+      "conflicting": {
+        "n": 10,
+        "pass_rate": 0.0,
+        "mean_faithfulness": 0.5,
+        "mean_answer_relevance": 0.5,
+        "mean_context_precision": 0.5,
+        "mean_citation_integrity": 1.0,
+        "mean_claim_precision": 1.0,
+        "mean_factual_accuracy": null,
+        "mean_quote_grounding_ratio": 0.9,
+        "mean_uncertainty_handling": null,
+        "mean_numeric_grounding_ratio": 0.9664285714285714,
+        "mean_criteria_coverage_ratio": 0.1875
+      },
+      "factual": {
+        "n": 21,
+        "pass_rate": 0.0,
+        "mean_faithfulness": 0.5,
+        "mean_answer_relevance": 0.5,
+        "mean_context_precision": 0.5,
+        "mean_citation_integrity": 0.9523809523809523,
+        "mean_claim_precision": 0.9761904761904762,
+        "mean_factual_accuracy": 0.7142857142857143,
+        "mean_quote_grounding_ratio": 0.8253968253968254,
+        "mean_uncertainty_handling": null,
+        "mean_numeric_grounding_ratio": 0.9484126984126984,
+        "mean_criteria_coverage_ratio": 0.5
+      },
+      "insufficient_evidence": {
+        "n": 12,
+        "pass_rate": 0.0,
+        "mean_faithfulness": 0.5,
+        "mean_answer_relevance": 0.5,
+        "mean_context_precision": 0.5,
+        "mean_citation_integrity": 0.9583333333333334,
+        "mean_claim_precision": 1.0,
+        "mean_factual_accuracy": null,
+        "mean_quote_grounding_ratio": 1.0,
+        "mean_uncertainty_handling": 0.23333333333333334,
+        "mean_numeric_grounding_ratio": 0.9668057836161285,
+        "mean_criteria_coverage_ratio": 0.3
+      },
+      "multi_hop": {
+        "n": 13,
+        "pass_rate": 0.0,
+        "mean_faithfulness": 0.5,
+        "mean_answer_relevance": 0.5,
+        "mean_context_precision": 0.5,
+        "mean_citation_integrity": 1.0,
+        "mean_claim_precision": 1.0,
+        "mean_factual_accuracy": null,
+        "mean_quote_grounding_ratio": 0.8461538461538461,
+        "mean_uncertainty_handling": null,
+        "mean_numeric_grounding_ratio": 0.9826923076923076,
+        "mean_criteria_coverage_ratio": 0.4074074074074074
+      },
+      "multi_turn": {
+        "n": 10,
+        "pass_rate": 0.0,
+        "mean_faithfulness": 0.5,
+        "mean_answer_relevance": 0.5,
+        "mean_context_precision": 0.5,
+        "mean_citation_integrity": 1.0,
+        "mean_claim_precision": 1.0,
+        "mean_factual_accuracy": null,
+        "mean_quote_grounding_ratio": 0.95,
+        "mean_uncertainty_handling": null,
+        "mean_numeric_grounding_ratio": 0.9154761904761904,
+        "mean_criteria_coverage_ratio": 0.6875
+      }
+    }
+  },
+  "failure_taxonomy": {
+    "KNOWLEDGE_BLEED": 72,
+    "HALLUCINATION_FACT": 4
+  },
+  "calibration": {
+    "buckets": {
+      "low": {
+        "n": 0
+      },
+      "medium": {
+        "n": 39,
+        "mean_faithfulness": 0.5,
+        "mean_claim_precision": 1.0,
+        "pass_rate": 0.0
+      },
+      "high": {
+        "n": 37,
+        "mean_faithfulness": 0.5,
+        "mean_claim_precision": 0.9864864864864865,
+        "pass_rate": 0.0
+      }
+    },
+    "correlation": 0.0,
+    "n_paired": 76,
+    "c3": {
+      "calibration_score": 0.8863636363636364,
+      "brier_score": 0.9431818181818182,
+      "mean_abs_error": 0.11363636363636363,
+      "n_cases": 22,
+      "per_category": {
+        "conflicting": {
+          "n_cases": 10,
+          "calibration_score": 0.9,
+          "brier_score": 0.95,
+          "mean_abs_error": 0.1
+        },
+        "insufficient_evidence": {
+          "n_cases": 12,
+          "calibration_score": 0.875,
+          "brier_score": 0.9375,
+          "mean_abs_error": 0.125
+        }
+      },
+      "per_case": [
+        {
+          "question_id": "IE-1",
+          "category": "insufficient_evidence",
+          "model_self_confidence": 0.5,
+          "judge_confidence": 0.5,
+          "abs_error": 0.0
+        },
+        {
+          "question_id": "IE-2",
+          "category": "insufficient_evidence",
+          "model_self_confidence": 0.5,
+          "judge_confidence": 0.5,
+          "abs_error": 0.0
+        },
+        {
+          "question_id": "IE-3",
+          "category": "insufficient_evidence",
+          "model_self_confidence": 0.5,
+          "judge_confidence": 0.5,
+          "abs_error": 0.0
+        },
+        {
+          "question_id": "IE-4",
+          "category": "insufficient_evidence",
+          "model_self_confidence": 0.0,
+          "judge_confidence": 0.5,
+          "abs_error": 0.5
+        },
+        {
+          "question_id": "IE-5",
+          "category": "insufficient_evidence",
+          "model_self_confidence": 0.5,
+          "judge_confidence": 0.5,
+          "abs_error": 0.0
+        },
+        {
+          "question_id": "CF-1",
+          "category": "conflicting",
+          "model_self_confidence": 0.5,
+          "judge_confidence": 0.5,
+          "abs_error": 0.0
+        },
+        {
+          "question_id": "CF-2",
+          "category": "conflicting",
+          "model_self_confidence": 1.0,
+          "judge_confidence": 0.5,
+          "abs_error": 0.5
+        },
+        {
+          "question_id": "CF-3",
+          "category": "conflicting",
+          "model_self_confidence": 0.5,
+          "judge_confidence": 0.5,
+          "abs_error": 0.0
+        },
+        {
+          "question_id": "CF-4",
+          "category": "conflicting",
+          "model_self_confidence": 0.5,
+          "judge_confidence": 0.5,
+          "abs_error": 0.0
+        },
+        {
+          "question_id": "CF-5",
+          "category": "conflicting",
+          "model_self_confidence": 0.5,
+          "judge_confidence": 0.5,
+          "abs_error": 0.0
+        },
+        {
+          "question_id": "HI-5",
+          "category": "insufficient_evidence",
+          "model_self_confidence": 1.0,
+          "judge_confidence": 0.5,
+          "abs_error": 0.5
+        },
+        {
+          "question_id": "HI-6",
+          "category": "conflicting",
+          "model_self_confidence": 1.0,
+          "judge_confidence": 0.5,
+          "abs_error": 0.5
+        },
+        {
+          "question_id": "BN-3",
+          "category": "conflicting",
+          "model_self_confidence": 0.5,
+          "judge_confidence": 0.5,
+          "abs_error": 0.0
+        },
+        {
+          "question_id": "MR-3",
+          "category": "conflicting",
+          "model_self_confidence": 0.5,
+          "judge_confidence": 0.5,
+          "abs_error": 0.0
+        },
+        {
+          "question_id": "HG-2",
+          "category": "insufficient_evidence",
+          "model_self_confidence": 0.5,
+          "judge_confidence": 0.5,
+          "abs_error": 0.0
+        },
+        {
+          "question_id": "HG-3",
+          "category": "insufficient_evidence",
+          "model_self_confidence": 0.5,
+          "judge_confidence": 0.5,
+          "abs_error": 0.0
+        },
+        {
+          "question_id": "HG-6",
+          "category": "conflicting",
+          "model_self_confidence": 0.5,
+          "judge_confidence": 0.5,
+          "abs_error": 0.0
+        },
+        {
+          "question_id": "TA-5",
+          "category": "insufficient_evidence",
+          "model_self_confidence": 0.5,
+          "judge_confidence": 0.5,
+          "abs_error": 0.0
+        },
+        {
+          "question_id": "MR-5",
+          "category": "insufficient_evidence",
+          "model_self_confidence": 0.5,
+          "judge_confidence": 0.5,
+          "abs_error": 0.0
+        },
+        {
+          "question_id": "ADV-2",
+          "category": "insufficient_evidence",
+          "model_self_confidence": 1.0,
+          "judge_confidence": 0.5,
+          "abs_error": 0.5
+        },
+        {
+          "question_id": "ADV-4",
+          "category": "insufficient_evidence",
+          "model_self_confidence": 0.5,
+          "judge_confidence": 0.5,
+          "abs_error": 0.0
+        },
+        {
+          "question_id": "ADV-5",
+          "category": "conflicting",
+          "model_self_confidence": 0.5,
+          "judge_confidence": 0.5,
+          "abs_error": 0.0
+        }
+      ]
+    }
+  },
+  "c3_calibration": {
+    "calibration_score": 0.8863636363636364,
+    "brier_score": 0.9431818181818182,
+    "mean_abs_error": 0.11363636363636363,
+    "n_cases": 22,
+    "per_category": {
+      "conflicting": {
+        "n_cases": 10,
+        "calibration_score": 0.9,
+        "brier_score": 0.95,
+        "mean_abs_error": 0.1
+      },
+      "insufficient_evidence": {
+        "n_cases": 12,
+        "calibration_score": 0.875,
+        "brier_score": 0.9375,
+        "mean_abs_error": 0.125
+      }
+    },
+    "per_case": [
+      {
+        "question_id": "IE-1",
+        "category": "insufficient_evidence",
+        "model_self_confidence": 0.5,
+        "judge_confidence": 0.5,
+        "abs_error": 0.0
+      },
+      {
+        "question_id": "IE-2",
+        "category": "insufficient_evidence",
+        "model_self_confidence": 0.5,
+        "judge_confidence": 0.5,
+        "abs_error": 0.0
+      },
+      {
+        "question_id": "IE-3",
+        "category": "insufficient_evidence",
+        "model_self_confidence": 0.5,
+        "judge_confidence": 0.5,
+        "abs_error": 0.0
+      },
+      {
+        "question_id": "IE-4",
+        "category": "insufficient_evidence",
+        "model_self_confidence": 0.0,
+        "judge_confidence": 0.5,
+        "abs_error": 0.5
+      },
+      {
+        "question_id": "IE-5",
+        "category": "insufficient_evidence",
+        "model_self_confidence": 0.5,
+        "judge_confidence": 0.5,
+        "abs_error": 0.0
+      },
+      {
+        "question_id": "CF-1",
+        "category": "conflicting",
+        "model_self_confidence": 0.5,
+        "judge_confidence": 0.5,
+        "abs_error": 0.0
+      },
+      {
+        "question_id": "CF-2",
+        "category": "conflicting",
+        "model_self_confidence": 1.0,
+        "judge_confidence": 0.5,
+        "abs_error": 0.5
+      },
+      {
+        "question_id": "CF-3",
+        "category": "conflicting",
+        "model_self_confidence": 0.5,
+        "judge_confidence": 0.5,
+        "abs_error": 0.0
+      },
+      {
+        "question_id": "CF-4",
+        "category": "conflicting",
+        "model_self_confidence": 0.5,
+        "judge_confidence": 0.5,
+        "abs_error": 0.0
+      },
+      {
+        "question_id": "CF-5",
+        "category": "conflicting",
+        "model_self_confidence": 0.5,
+        "judge_confidence": 0.5,
+        "abs_error": 0.0
+      },
+      {
+        "question_id": "HI-5",
+        "category": "insufficient_evidence",
+        "model_self_confidence": 1.0,
+        "judge_confidence": 0.5,
+        "abs_error": 0.5
+      },
+      {
+        "question_id": "HI-6",
+        "category": "conflicting",
+        "model_self_confidence": 1.0,
+        "judge_confidence": 0.5,
+        "abs_error": 0.5
+      },
+      {
+        "question_id": "BN-3",
+        "category": "conflicting",
+        "model_self_confidence": 0.5,
+        "judge_confidence": 0.5,
+        "abs_error": 0.0
+      },
+      {
+        "question_id": "MR-3",
+        "category": "conflicting",
+        "model_self_confidence": 0.5,
+        "judge_confidence": 0.5,
+        "abs_error": 0.0
+      },
+      {
+        "question_id": "HG-2",
+        "category": "insufficient_evidence",
+        "model_self_confidence": 0.5,
+        "judge_confidence": 0.5,
+        "abs_error": 0.0
+      },
+      {
+        "question_id": "HG-3",
+        "category": "insufficient_evidence",
+        "model_self_confidence": 0.5,
+        "judge_confidence": 0.5,
+        "abs_error": 0.0
+      },
+      {
+        "question_id": "HG-6",
+        "category": "conflicting",
+        "model_self_confidence": 0.5,
+        "judge_confidence": 0.5,
+        "abs_error": 0.0
+      },
+      {
+        "question_id": "TA-5",
+        "category": "insufficient_evidence",
+        "model_self_confidence": 0.5,
+        "judge_confidence": 0.5,
+        "abs_error": 0.0
+      },
+      {
+        "question_id": "MR-5",
+        "category": "insufficient_evidence",
+        "model_self_confidence": 0.5,
+        "judge_confidence": 0.5,
+        "abs_error": 0.0
+      },
+      {
+        "question_id": "ADV-2",
+        "category": "insufficient_evidence",
+        "model_self_confidence": 1.0,
+        "judge_confidence": 0.5,
+        "abs_error": 0.5
+      },
+      {
+        "question_id": "ADV-4",
+        "category": "insufficient_evidence",
+        "model_self_confidence": 0.5,
+        "judge_confidence": 0.5,
+        "abs_error": 0.0
+      },
+      {
+        "question_id": "ADV-5",
+        "category": "conflicting",
+        "model_self_confidence": 0.5,
+        "judge_confidence": 0.5,
+        "abs_error": 0.0
+      }
+    ]
+  },
+  "cross_language": [
+    {
+      "concept_id": "capital-of-india",
+      "en_question_id": "F-4",
+      "indic_language": "hi",
+      "hi_question_id": "HI-7",
+      "indic_question_id": "HI-7",
+      "jaccard_score": 0.13636363636363635,
+      "flagged_inconsistent": true,
+      "reasoning": "|en|=24 |hi|=26 |\u2229|=6 |\u222a|=44"
+    },
+    {
+      "concept_id": "capital-of-india",
+      "en_question_id": "F-4",
+      "indic_language": "ta",
+      "hi_question_id": "TA-1",
+      "indic_question_id": "TA-1",
+      "jaccard_score": 0.5,
+      "flagged_inconsistent": true,
+      "reasoning": "|en|=24 |ta|=15 |\u2229|=13 |\u222a|=26"
+    },
+    {
+      "concept_id": "capital-of-india",
+      "en_question_id": "F-4",
+      "indic_language": "bn",
+      "hi_question_id": "BN-1",
+      "indic_question_id": "BN-1",
+      "jaccard_score": 0.15,
+      "flagged_inconsistent": true,
+      "reasoning": "|en|=24 |bn|=45 |\u2229|=9 |\u222a|=60"
+    },
+    {
+      "concept_id": "current-pm-of-india",
+      "en_question_id": "F-5",
+      "indic_language": "hi",
+      "hi_question_id": "HI-8",
+      "indic_question_id": "HI-8",
+      "jaccard_score": 0.058823529411764705,
+      "flagged_inconsistent": true,
+      "reasoning": "|en|=5 |hi|=13 |\u2229|=1 |\u222a|=17"
+    },
+    {
+      "concept_id": "current-pm-of-india",
+      "en_question_id": "F-5",
+      "indic_language": "ta",
+      "hi_question_id": "TA-2",
+      "indic_question_id": "TA-2",
+      "jaccard_score": 0.5,
+      "flagged_inconsistent": true,
+      "reasoning": "|en|=5 |ta|=4 |\u2229|=3 |\u222a|=6"
+    },
+    {
+      "concept_id": "current-pm-of-india",
+      "en_question_id": "F-5",
+      "indic_language": "mr",
+      "hi_question_id": "MR-2",
+      "indic_question_id": "MR-2",
+      "jaccard_score": 0.05714285714285714,
+      "flagged_inconsistent": true,
+      "reasoning": "|en|=5 |mr|=32 |\u2229|=2 |\u222a|=35"
+    },
+    {
+      "concept_id": "finance-minister-of-india",
+      "en_question_id": "F-6",
+      "indic_language": "hi",
+      "hi_question_id": "HI-2",
+      "indic_question_id": "HI-2",
+      "jaccard_score": 0.0851063829787234,
+      "flagged_inconsistent": true,
+      "reasoning": "|en|=18 |hi|=33 |\u2229|=4 |\u222a|=47"
+    },
+    {
+      "concept_id": "bits-goa-state-capital",
+      "en_question_id": "MH-1",
+      "indic_language": "hi",
+      "hi_question_id": "HI-9",
+      "indic_question_id": "HI-9",
+      "jaccard_score": 0.3333333333333333,
+      "flagged_inconsistent": true,
+      "reasoning": "|en|=17 |hi|=23 |\u2229|=10 |\u222a|=30"
+    },
+    {
+      "concept_id": "bm25-vs-dense",
+      "en_question_id": "C-1",
+      "indic_language": "hi",
+      "hi_question_id": "C-HI-1",
+      "indic_question_id": "C-HI-1",
+      "jaccard_score": 0.09375,
+      "flagged_inconsistent": true,
+      "reasoning": "|en|=29 |hi|=41 |\u2229|=6 |\u222a|=64"
+    },
+    {
+      "concept_id": "india-china-gdp",
+      "en_question_id": "CF-3",
+      "indic_language": "hi",
+      "hi_question_id": "HI-4",
+      "indic_question_id": "HI-4",
+      "jaccard_score": 0.01282051282051282,
+      "flagged_inconsistent": true,
+      "reasoning": "|en|=7 |hi|=72 |\u2229|=1 |\u222a|=78"
+    },
+    {
+      "concept_id": "population-of-india",
+      "en_question_id": "CF-4",
+      "indic_language": "hi",
+      "hi_question_id": "HI-6",
+      "indic_question_id": "HI-6",
+      "jaccard_score": 0.047619047619047616,
+      "flagged_inconsistent": true,
+      "reasoning": "|en|=3 |hi|=19 |\u2229|=1 |\u222a|=21"
+    }
+  ],
+  "cross_script": {
+    "mean_citation_overlap": null,
+    "mean_entity_overlap": null,
+    "n_pairs": 0,
+    "n_topics": 0,
+    "per_topic": {},
+    "pairs": []
+  },
+  "cross_family_judge": {},
+  "groq_key_count": 4,
+  "groq_key_rotator": {
+    "provider": "groq",
+    "total_keys": 4,
+    "throttled_now": 3
+  }
+}
