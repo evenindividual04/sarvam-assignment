@@ -641,6 +641,73 @@ async def settings_defaults():
                     "Use 'none' to disable the blocklist entirely."
                 ),
             },
+            # --- Routing knobs (Phase 6 polish): expose provider preferences so
+            # reviewers can A/B-test the routing decisions live without re-deploy.
+            {
+                "key": "PLANNER_PROVIDER",
+                "label": "Planner provider",
+                "type": "enum",
+                "choices": ["auto", "cerebras", "groq", "gemini"],
+                "note": "auto = capability-probed cascade. Explicit choice forces that provider for the planning call.",
+            },
+            {
+                "key": "CLAIM_VERIFIER_PROVIDER",
+                "label": "Claim verifier provider",
+                "type": "enum",
+                "choices": ["auto", "deepseek", "gpt4o"],
+                "note": "Used to re-check whether each claim's cited snippet actually supports it.",
+            },
+            {
+                "key": "CONFLICT_PROBE_PROVIDER",
+                "label": "Conflict probe provider",
+                "type": "enum",
+                "choices": ["auto", "cerebras", "groq"],
+                "note": "Short LLM call that surfaces disagreements between sources.",
+            },
+            {
+                "key": "FOLLOW_UP_PROVIDER",
+                "label": "Follow-up suggestion provider",
+                "type": "enum",
+                "choices": ["auto", "cerebras", "groq"],
+                "note": "Generates the 2–3 follow-up questions surfaced under the answer.",
+            },
+            # --- Approval gate
+            {
+                "key": "APPROVAL_TIMEOUT_S",
+                "label": "Approval gate timeout (seconds)",
+                "type": "integer",
+                "min": 30,
+                "max": 1800,
+                "note": "How long a paused plan-approval gate waits before auto-cancelling.",
+            },
+            # --- Supplementary provider toggles
+            {
+                "key": "SARVAM_INDIC_AUTO",
+                "label": "Auto-route Indic queries to Sarvam",
+                "type": "boolean",
+                "note": "When on, queries detected as Indic-language route through Sarvam's translation + retrieval path.",
+            },
+            {
+                "key": "LANG_DETECT_DISABLE_FASTTEXT",
+                "label": "Disable fastText language detection",
+                "type": "boolean",
+                "note": "Falls back to the lighter Tier 1/2 detector. Useful on hosts where fastText isn't installable.",
+            },
+            {
+                "key": "WIKIPEDIA_DISABLED",
+                "label": "Disable Wikipedia supplementary provider",
+                "type": "boolean",
+            },
+            {
+                "key": "SCHOLAR_DISABLED",
+                "label": "Disable Scholar supplementary provider",
+                "type": "boolean",
+            },
+            {
+                "key": "JINA_READER_DISABLED",
+                "label": "Disable Jina Reader fallback fetcher",
+                "type": "boolean",
+            },
         ],
     }
 

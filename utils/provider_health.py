@@ -30,7 +30,11 @@ _PROBE_TIMEOUT_S = 8.0
 class ProviderProbe:
     name: str
     role: str  # "search" | "synth" | "planner" | "judge" | "synth-indic"
-    status: str  # "ok" | "degraded" | "down" | "missing_key"
+    # "ok" | "degraded" | "down" | "missing_key" | "not_configured"
+    # Backwards-compat: existing clients that check status != "ok" still work.
+    # `not_configured` means the provider is intentionally absent (e.g. local
+    # Ollama on a remote deployment), so it should not count as a failure.
+    status: str
     latency_ms: Optional[int] = None
     detail: str = ""
 
@@ -54,12 +58,51 @@ _cache: Optional[HealthSnapshot] = None
 _lock = asyncio.Lock()
 
 
+def _is_deployed_env() -> bool:
+    """Heuristic: are we running in a remote/deployed environment where a
+    'localhost' service can't exist? Used to suppress noisy 'down' reports
+    for optional local-only providers (e.g. Ollama)."""
+    for v in ("HF_SPACE_ID", "SPACE_ID", "RENDER", "FLY_APP_NAME",
+              "RAILWAY_ENVIRONMENT", "VERCEL"):
+        if os.environ.get(v):
+            return True
+    return False
+
+
+def _ollama_not_configured() -> Optional[str]:
+    """Return a 'not_configured' detail message for Ollama if it shouldn't be
+    probed, else None. Local Ollama is optional — if the user hasn't set
+    OLLAMA_BASE_URL and we're deployed, OR if base URL is local-only and
+    we're deployed, skip the probe."""
+    base = os.environ.get("OLLAMA_BASE_URL")
+    if base is None and _is_deployed_env():
+        return "Local Ollama not running (optional fallback)"
+    if base is not None:
+        # Explicitly configured — let the probe run (user opted in).
+        return None
+    # No env var, not deployed → local dev. Run the probe; if it fails,
+    # surface as not_configured (not "down") because Ollama is optional.
+    return None
+
+
+def _not_configured(name: str, role: str, detail: str) -> ProviderProbe:
+    return ProviderProbe(name=name, role=role, status="not_configured",
+                         detail=detail)
+
+
 async def _probe(
     name: str, role: str, coro_factory
 ) -> ProviderProbe:
+    # Provider-specific not_configured short-circuits.
+    if name == "ollama":
+        msg = _ollama_not_configured()
+        if msg:
+            return _not_configured(name, role, msg)
     if not _has_required_key(name):
-        return ProviderProbe(name=name, role=role, status="missing_key",
-                             detail="API key not configured")
+        # Promote missing-key providers (other than Ollama which is keyless)
+        # to "not_configured" so the UI can de-emphasize them rather than
+        # treating absence as failure.
+        return _not_configured(name, role, "API key not configured (optional)")
     start = time.perf_counter()
     try:
         await asyncio.wait_for(coro_factory(), timeout=_PROBE_TIMEOUT_S)
@@ -69,9 +112,21 @@ async def _probe(
         return ProviderProbe(name=name, role=role, status="degraded",
                              detail=f"timeout after {_PROBE_TIMEOUT_S}s")
     except httpx.HTTPStatusError as e:
-        return ProviderProbe(name=name, role=role, status="down",
-                             detail=f"HTTP {e.response.status_code}")
+        code = e.response.status_code
+        if code in (401, 403):
+            env_var = _REQUIRED_KEYS.get(name) or f"{name.upper()}_API_KEY"
+            detail = (f"HTTP {code} — invalid or expired key. "
+                      f"Check your {env_var} value.")
+        else:
+            detail = f"HTTP {code}"
+        return ProviderProbe(name=name, role=role, status="down", detail=detail)
     except Exception as e:
+        # Ollama unreachable on a local box with no server running → optional,
+        # not a real failure. Same for any provider with no key (defensive).
+        if name == "ollama":
+            return _not_configured(
+                name, role, "Local Ollama not running (optional fallback)"
+            )
         return ProviderProbe(name=name, role=role, status="down",
                              detail=f"{type(e).__name__}: {str(e)[:80]}")
 
@@ -161,8 +216,18 @@ async def _probe_github(c: httpx.AsyncClient) -> None:
 
 
 async def _probe_openrouter(c: httpx.AsyncClient) -> None:
-    await _probe_chat(c, "https://openrouter.ai/api/v1",
-                      os.environ["OPENROUTER_API_KEY"], "deepseek/deepseek-r1")
+    """Probe OpenRouter via /models (metadata, no generation).
+
+    The actual synthesis fallback uses DeepSeek R1 — a reasoning model with
+    5-30s typical latency that legitimately exceeds the 8s probe budget. The
+    /models endpoint proves auth + connectivity with no token cost and ~200ms
+    response, giving an honest signal of OpenRouter health without conflating
+    it with R1's intrinsic slowness."""
+    r = await c.get(
+        "https://openrouter.ai/api/v1/models",
+        headers={"Authorization": f"Bearer {os.environ['OPENROUTER_API_KEY']}"},
+    )
+    r.raise_for_status()
 
 
 async def _probe_sarvam(c: httpx.AsyncClient) -> None:
@@ -224,9 +289,11 @@ async def _run_all_probes() -> HealthSnapshot:
         probes = await asyncio.gather(*tasks)
 
     statuses = {p.name: p.status for p in probes}
+    # `not_configured` is missing-by-design (e.g. optional Ollama on a remote
+    # deployment) — it must NOT count toward degraded/down.
     if any(statuses.get(n) == "down" for n in _CRITICAL):
         overall = "down"
-    elif any(p.status != "ok" for p in probes):
+    elif any(p.status in ("down", "degraded") for p in probes):
         overall = "degraded"
     else:
         overall = "ok"
