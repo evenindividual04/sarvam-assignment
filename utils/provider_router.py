@@ -1048,14 +1048,21 @@ async def judge(prompt: str) -> str:
     cfg = _JUDGE_PROVIDERS.get(provider) or _JUDGE_PROVIDERS["groq"]
     model = os.environ.get("JUDGE_MODEL", cfg["default_model"])
 
-    # Groq judges pull from the multi-key rotator so the same key pool covers
-    # planner + conflict + judge calls and shares throttle state.
+    # Groq/Cerebras judges pull from the multi-key rotator so the same key pool
+    # covers planner + conflict + judge calls and shares throttle state.
     is_groq = provider == "groq"
+    is_cerebras = provider == "cerebras"
     api_key: str | None = None
     if is_groq:
         api_key = _GROQ_ROTATOR.next_key()
         if not api_key:
             raise RuntimeError("No GROQ_API_KEY / GROQ_API_KEYS configured")
+    elif is_cerebras:
+        api_key = _CEREBRAS_ROTATOR.next_key()
+        if not api_key:
+            raise RuntimeError(
+                "No CEREBRAS_API_KEY / CEREBRAS_API_KEYS configured"
+            )
     else:
         api_key = os.environ[cfg["api_key_env"]]
 
@@ -1074,17 +1081,25 @@ async def judge(prompt: str) -> str:
     except Exception as e:
         # OpenAI SDK surfaces 429 as openai.RateLimitError; we treat anything
         # with .status_code == 429 as a throttle to stay SDK-version-tolerant.
-        if is_groq and api_key:
+        if api_key:
             status = getattr(e, "status_code", None) or getattr(
                 getattr(e, "response", None), "status_code", None
             )
             if status == 429:
-                _GROQ_ROTATOR.mark_throttled(
-                    api_key, retry_after_s=_extract_retry_after_s(e)
-                )
+                if is_groq:
+                    _GROQ_ROTATOR.mark_throttled(
+                        api_key, retry_after_s=_extract_retry_after_s(e)
+                    )
+                elif is_cerebras:
+                    _CEREBRAS_ROTATOR.mark_throttled(
+                        api_key, retry_after_s=_extract_retry_after_s(e)
+                    )
         raise
-    if is_groq and api_key:
-        _GROQ_ROTATOR.mark_success(api_key)
+    if api_key:
+        if is_groq:
+            _GROQ_ROTATOR.mark_success(api_key)
+        elif is_cerebras:
+            _CEREBRAS_ROTATOR.mark_success(api_key)
     return resp.choices[0].message.content.strip()
 
 
