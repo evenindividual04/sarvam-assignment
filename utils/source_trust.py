@@ -23,19 +23,33 @@ TRUST_TIERS: tuple[TrustTier, ...] = (
         "tier_1_primary",
         1.00,
         (".gov", ".edu", ".ac.uk", "nih.gov", "europa.eu", "who.int",
-         "imf.org", "worldbank.org", "rbi.org.in"),
+         "imf.org", "worldbank.org",
+         # India: official / government / regulator. `gov.in` covers
+         # all `*.gov.in` subdomains via trust_for's suffix logic.
+         "rbi.org.in", "sebi.gov.in", "gov.in", "pib.gov.in", "mygov.in",
+         "niti.gov.in", "mea.gov.in", "india.gov.in", "meity.gov.in",
+         "dpiit.gov.in"),
     ),
     TrustTier(
         "tier_2_reference",
         0.90,
         ("nature.com", "science.org", "arxiv.org", "ncbi.nlm.nih.gov",
-         "wikipedia.org", "ieee.org", "acm.org"),
+         "wikipedia.org", "ieee.org", "acm.org",
+         # India: research / think tanks / Sarvam easter egg.
+         "sarvam.ai", "research.sarvam.ai", "iitb.ac.in", "iitm.ac.in",
+         "iitd.ac.in", "iitkgp.ac.in", "iitk.ac.in", "iisc.ac.in",
+         "idfcinstitute.org", "prsindia.org", "orfonline.org"),
     ),
     TrustTier(
         "tier_3_journalism",
         0.80,
         ("reuters.com", "apnews.com", "bloomberg.com", "ft.com", "wsj.com",
-         "economist.com", "bbc.com", "bbc.co.uk", "nytimes.com"),
+         "economist.com", "bbc.com", "bbc.co.uk", "nytimes.com",
+         # India: high-quality Indian press.
+         "indianexpress.com", "thehindu.com", "livemint.com",
+         "business-standard.com", "hindustantimes.com", "scroll.in",
+         "theprint.in", "moneycontrol.com",
+         "economictimes.indiatimes.com", "timesofindia.indiatimes.com"),
     ),
     TrustTier(
         "tier_4_mid",

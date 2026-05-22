@@ -50,12 +50,32 @@ interface ChatRow {
   historyTurn?: Turn;
 }
 
-const SUGGESTED = [
+// F7: Bharat-themed query pool. The empty state samples 4 at random per
+// mount; ↻ Shuffle re-rolls. Mix of English / Hindi / Hinglish, mix of
+// factual / multi-hop / comparison / recent. Curly quotes match the
+// typography pass; Devanagari and Hinglish keep their native punctuation.
+const SUGGESTED_POOL = [
   "What is India’s current repo rate, and how has it changed in the last 12 months?",
   "भारत में मानसून कब आता है और इस वर्ष कैसा रहा?",
-  "What is the current status of India’s Digital India initiative and DPI exports?",
-  "Compare GPT-5 and Claude Opus 4.7 on coding benchmarks.",
+  "Compare India’s UPI and ONDC adoption — what’s the state of DPI exports?",
+  "DPI exports kaha kaha ho rahe hain abhi?",
+  "What’s the latest from IndiaAI mission — funding allocated, deliverables shipped?",
+  "Sarvam-30B vs Llama 3.3 70B Indic benchmark comparison",
+  "How is Aadhaar enabling DPI globally? Recent country adoptions?",
+  "What is the current status of India’s semiconductor mission and SemiconIndia program?",
 ];
+
+const SUGGESTED_COUNT = 4;
+
+function pickSuggestions(pool: readonly string[], n: number): string[] {
+  // Fisher–Yates over a copy; deterministic only within a single render.
+  const copy = [...pool];
+  for (let i = copy.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [copy[i], copy[j]] = [copy[j], copy[i]];
+  }
+  return copy.slice(0, n);
+}
 
 function newSessionId(): string {
   if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
@@ -384,6 +404,11 @@ export default function ChatPage() {
  * Instrument Serif italic appears. Its scarcity is the point.
  */
 function EmptyState({ onPick }: { onPick: (q: string) => void }) {
+  const [shuffleTick, setShuffleTick] = useState(0);
+  const suggestions = useMemo(
+    () => pickSuggestions(SUGGESTED_POOL, SUGGESTED_COUNT),
+    [shuffleTick],
+  );
   return (
     <div className="max-w-[640px] mx-auto py-20 md:py-28">
       <h1 className="font-display italic text-5xl md:text-6xl leading-[1.05] tracking-tight">
@@ -405,7 +430,7 @@ function EmptyState({ onPick }: { onPick: (q: string) => void }) {
         <div className="font-mono text-[11px] uppercase tracking-[0.14em] text-subtle-foreground mb-1 pb-2 border-b border-border">
           Suggested
         </div>
-        {SUGGESTED.map((s) => (
+        {suggestions.map((s) => (
           <button
             key={s}
             onClick={() => onPick(s)}
@@ -419,6 +444,14 @@ function EmptyState({ onPick }: { onPick: (q: string) => void }) {
             </span>
           </button>
         ))}
+        <button
+          type="button"
+          onClick={() => setShuffleTick((prev) => prev + 1)}
+          aria-label="Shuffle suggested queries"
+          className="mt-3 font-sans text-[12px] text-muted-foreground hover:text-foreground transition-colors"
+        >
+          ↻ Shuffle
+        </button>
       </div>
     </div>
   );

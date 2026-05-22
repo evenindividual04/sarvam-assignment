@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import { Instrument_Serif, Geist, JetBrains_Mono } from "next/font/google";
+import Script from "next/script";
 import "./globals.css";
 import { Toaster } from "@/components/ui/sonner";
 import { Sidebar } from "@/components/shell/sidebar";
@@ -41,18 +42,18 @@ export default function RootLayout({
       suppressHydrationWarning
       className={`${display.variable} ${sans.variable} ${mono.variable}`}
     >
-      <head>
-        {/* FOUC-prevention: applies the persisted theme class to <html> before
-            first paint. Server-rendered into <head> so the browser executes it
-            synchronously at parse time (the React-19-friendly pattern — script
-            tags inside client components never re-execute on hydration). */}
-        <script
-          dangerouslySetInnerHTML={{
-            __html: `(function(){try{var t=localStorage.getItem('theme');if(t!=='light'&&t!=='dark')t='dark';var d=document.documentElement;d.classList.remove('light','dark');d.classList.add(t);d.style.colorScheme=t;}catch(e){document.documentElement.classList.add('dark');}})();`,
-          }}
-        />
-      </head>
       <body className="bg-background text-foreground min-h-screen antialiased">
+        {/* FOUC-prevention: applies the persisted theme class to <html> before
+            first paint. next/script with strategy="beforeInteractive" injects
+            this into <head> at server-render time, executes synchronously
+            before React hydrates, and avoids React 19's "script in render tree"
+            warning that a bare <script> would trigger. */}
+        <Script
+          id="theme-fouc-prevent"
+          strategy="beforeInteractive"
+        >
+          {`(function(){try{var t=localStorage.getItem('theme');if(t!=='light'&&t!=='dark')t='dark';var d=document.documentElement;d.classList.remove('light','dark');d.classList.add(t);d.style.colorScheme=t;}catch(e){document.documentElement.classList.add('dark');}})();`}
+        </Script>
         <ThemeProvider>
           {/* Subtle radial vignette: bright glow in dark mode, soft dark glow in
               light mode. Avoids the "flat wall of color" look in either theme. */}

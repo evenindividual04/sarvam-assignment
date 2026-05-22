@@ -83,6 +83,50 @@ def test_trust_for_subdomain_inherits_tier():
     assert score == 0.45
 
 
+# ── F5: Bharat-friendly source trust ───────────────────────────────────────
+
+def test_trust_for_rbi_org_in_is_tier_1():
+    """RBI — India's central bank — should sit in the tier_1 official bucket."""
+    score, tier = trust_for("rbi.org.in")
+    assert tier == "tier_1_primary"
+    assert score == 1.00
+
+
+def test_trust_for_sarvam_ai_is_tier_3():
+    """Easter egg: sarvam.ai is bucketed alongside arxiv.org / research orgs."""
+    score, tier = trust_for("sarvam.ai")
+    # Spec's conceptual "tier 3" (research/think tanks) maps to the
+    # internal tier_2_reference bucket (same score as arxiv.org).
+    assert tier == "tier_2_reference"
+    assert score == 0.90
+
+
+def test_trust_for_indianexpress_com_is_tier_2():
+    """Indian Express — high-quality Indian press, same as nytimes.com."""
+    score, tier = trust_for("indianexpress.com")
+    # Spec's conceptual "tier 2" (press) maps to internal tier_3_journalism.
+    assert tier == "tier_3_journalism"
+    assert score == 0.80
+
+
+def test_trust_for_subdomain_of_gov_in_inherits_tier():
+    """meity.gov.in and other *.gov.in domains inherit tier_1 trust."""
+    score, tier = trust_for("meity.gov.in")
+    assert tier == "tier_1_primary"
+    assert score == 1.00
+    # Also: a subdomain of an explicitly-listed gov.in entry.
+    score2, tier2 = trust_for("data.india.gov.in")
+    assert tier2 == "tier_1_primary"
+    assert score2 == 1.00
+
+
+def test_unrelated_indian_domain_not_boosted():
+    """A random .in domain must fall through to the neutral default."""
+    score, tier = trust_for("someblog.in")
+    assert score == DEFAULT_TRUST == 0.70
+    assert tier == DEFAULT_TIER == "unknown"
+
+
 # ── score_chunk additive math ──────────────────────────────────────────────
 
 def test_score_chunk_additive_trust_does_not_dominate_zero_relevance():
