@@ -42,7 +42,7 @@ export default function RootLayout({
       suppressHydrationWarning
       className={`${display.variable} ${sans.variable} ${mono.variable}`}
     >
-      <body className="bg-background text-foreground min-h-screen antialiased">
+      <body className="bg-background text-foreground h-screen overflow-hidden antialiased">
         {/* FOUC-prevention: applies the persisted theme class to <html> before
             first paint. next/script with strategy="beforeInteractive" injects
             this into <head> at server-render time, executes synchronously
@@ -61,11 +61,11 @@ export default function RootLayout({
             aria-hidden
             className="pointer-events-none fixed inset-0 -z-10 bg-[radial-gradient(ellipse_at_top,rgba(0,0,0,0.025),transparent_60%)] dark:bg-[radial-gradient(ellipse_at_top,rgba(255,255,255,0.025),transparent_60%)]"
           />
-          <div className="flex min-h-screen">
+          <div className="flex h-screen overflow-hidden">
             <Sidebar />
-            <div className="flex-1 flex flex-col min-w-0">
+            <div className="flex-1 flex flex-col min-w-0 min-h-0">
               <MobileNav />
-              <main className="flex-1 flex flex-col min-w-0">{children}</main>
+              <main className="flex-1 flex flex-col min-w-0 min-h-0 overflow-hidden">{children}</main>
             </div>
           </div>
           <Toaster position="bottom-right" />
