@@ -7,6 +7,7 @@ import time
 import uuid
 from collections import OrderedDict, deque
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from typing import AsyncIterator
 from urllib.parse import unquote
 
@@ -1378,6 +1379,12 @@ async def _smoke_eval_stream(request: Request):
         _smoke_record_run(client_ip, now)
         run_at_holder: dict = {"value": None}
 
+        # Capture a wall-clock sentinel BEFORE kicking off the run so the
+        # progress poller can filter eval_runs.run_at >= this value. Without
+        # this, the first few polls see the previous run's row count (e.g.
+        # "10/8" when the prior full eval left 10 rows in the table).
+        start_wall_iso = datetime.now(timezone.utc).isoformat()
+
         async def _do_run():
             from eval.eval_runner import run_eval
             run_at_holder["value"] = await run_eval(question_ids=_SMOKE_QUESTION_IDS)
@@ -1396,7 +1403,7 @@ async def _smoke_eval_stream(request: Request):
 
         # Poll progress every 3s. We can't know the exact per-question state
         # without an instrumentation channel into run_eval; we approximate by
-        # counting rows whose run_at is the newest in the DB.
+        # counting eval_runs rows written since `start_wall_iso`.
         start_wall = asyncio.get_running_loop().time()
         while not task.done():
             try:
@@ -1404,7 +1411,10 @@ async def _smoke_eval_stream(request: Request):
             except asyncio.TimeoutError:
                 pass
             elapsed = int(asyncio.get_running_loop().time() - start_wall)
-            done_count = await _smoke_completed_count(start_wall_iso=None)
+            done_count = await _smoke_completed_count(start_wall_iso=start_wall_iso)
+            # Defensive clamp: a bug elsewhere should never make the UI
+            # display "10/8". Cap completed at total.
+            done_count = min(done_count, len(_SMOKE_QUESTION_IDS))
             yield _format_event({
                 "step": "progress",
                 "label": f"Running ({elapsed}s)",
@@ -1431,16 +1441,29 @@ async def _smoke_eval_stream(request: Request):
 
 
 async def _smoke_completed_count(start_wall_iso: str | None) -> int:
-    """Count rows in eval_runs whose run_at is the most-recent timestamp
-    (i.e. belonging to the currently-running smoke eval). Returns 0 on any
-    error so a flaky DB read can't kill the SSE stream."""
+    """Count rows in eval_runs written since `start_wall_iso`, which the
+    caller captures just before kicking off the eval task. This is the
+    correct scope: counting rows for "the most-recent run_at" would pick
+    up the previous completed run until the new smoke writes its first
+    row, briefly showing stale progress like "10/8".
+
+    Returns 0 on any error so a flaky DB read can't kill the SSE stream.
+    """
     try:
         async with aiosqlite.connect(DB_PATH) as db:
             db.row_factory = aiosqlite.Row
-            row = await db.execute_fetchall(
-                "SELECT run_at, COUNT(*) AS n FROM eval_runs "
-                "GROUP BY run_at ORDER BY run_at DESC LIMIT 1"
-            )
+            if start_wall_iso:
+                row = await db.execute_fetchall(
+                    "SELECT COUNT(*) AS n FROM eval_runs WHERE run_at >= ?",
+                    (start_wall_iso,),
+                )
+            else:
+                # Backwards-compat fallback for callers that don't pass a
+                # sentinel: count rows for the latest run_at in the table.
+                row = await db.execute_fetchall(
+                    "SELECT COUNT(*) AS n FROM eval_runs "
+                    "WHERE run_at = (SELECT MAX(run_at) FROM eval_runs)"
+                )
             return row[0]["n"] if row else 0
     except Exception:
         return 0
