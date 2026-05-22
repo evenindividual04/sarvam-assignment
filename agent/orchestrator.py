@@ -1530,9 +1530,20 @@ class ResearchOrchestrator:
             _all_chunk_tokens = sum(
                 getattr(c, "token_count", 0) or 0 for c in (all_chunks or [])
             )
+            # The previous formula was
+            #   prompt_tokens + completion_tokens + max(all_chunk_tokens, selected_tokens)
+            # which counted the *whole fetched pool* (including chunks
+            # that got pruned by FlashRank + 3-factor selection). Those
+            # chunks don't cost any tokens going forward — they were
+            # dropped before reaching the prompt. Counting them as spent
+            # made R3 fire after hop 1 on any wide-retrieval query (14
+            # fetched × ~1k tokens = 14k, already past the 12k threshold)
+            # so multi-hop was invisible whenever the conflict probe
+            # gathered evidence from many sources. Switching to
+            # `selected_tokens` reflects the actual context that will
+            # ride into the next hop's prompt.
             _cumulative = (
-                prompt_tokens + completion_tokens
-                + max(_all_chunk_tokens, _selected_tokens)
+                prompt_tokens + completion_tokens + _selected_tokens
             )
             _hop_state = _HopState(
                 hop_index=hop,
