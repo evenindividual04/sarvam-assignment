@@ -52,7 +52,14 @@ interface StreamProgressProps {
  *   per-stage `*_ms` fields; queued/cancelled steps show no time at all.
  */
 export function StreamProgress({ events, status, error }: StreamProgressProps) {
-  const [now, setNow] = useState<number>(() => Date.now());
+  // SSR-safety: Date.now() differs between server render and client
+  // hydration. StreamProgress only mounts after user interaction (so
+  // SSR rarely sees it), but render this defensively — start with 0
+  // and set the real timestamp in an effect after mount.
+  const [now, setNow] = useState<number>(0);
+  useEffect(() => {
+    setNow(Date.now());
+  }, []);
   const [firstSeen, setFirstSeen] = useState<Map<StreamStep, number>>(
     () => new Map(),
   );
