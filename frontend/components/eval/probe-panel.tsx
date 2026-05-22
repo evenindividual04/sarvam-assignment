@@ -1,6 +1,6 @@
 "use client";
 
-import type { ContradictionProbeRow } from "@/lib/types";
+import type { ConflictKind, ContradictionProbeRow } from "@/lib/types";
 import { MetricBar } from "@/components/chat/metric-bar";
 
 interface ProbePanelProps {
@@ -14,6 +14,24 @@ const SKIP_EXPLAIN: Record<string, string> = {
     "Probing was skipped because there were fewer than two distinct sources to compare.",
   breaker_open:
     "The circuit breaker for this provider was open. Probing was skipped to avoid cascading failures.",
+};
+
+// DRAGged-into-Conflict taxonomy (Cattan et al., Google, arXiv:2506.08500).
+// Three kinds with explicit reader-facing copy so the inspector teaches the
+// taxonomy without naming the paper inline.
+const KIND_LABEL: Record<ConflictKind, string> = {
+  self: "internal contradiction",
+  pair: "sources disagree",
+  conditional: "agree under qualifier",
+  none: "no conflict",
+};
+
+const KIND_HINT: Record<ConflictKind, string> = {
+  self: "A single source contradicts itself.",
+  pair: "Two sources disagree on a fact; the answer cites both.",
+  conditional:
+    "Sources agree once a qualifier (time, region, sub-domain) is applied.",
+  none: "",
 };
 
 export function ProbePanel({ probe }: ProbePanelProps) {
@@ -55,9 +73,22 @@ export function ProbePanel({ probe }: ProbePanelProps) {
             >
               {probe.has_conflict ? "Conflict found" : "No conflict"}
             </span>
+            {probe.dominant_kind && probe.dominant_kind !== "none" && (
+              <span
+                className="font-mono text-[10px] uppercase tracking-[0.10em] px-1.5 py-0.5 rounded-[3px] border border-border text-foreground"
+                title={KIND_HINT[probe.dominant_kind]}
+              >
+                {KIND_LABEL[probe.dominant_kind]}
+              </span>
+            )}
           </div>
         </div>
         <MetricBar label="Probe confidence" value={probe.confidence} />
+        {probe.dominant_kind && probe.dominant_kind !== "none" && (
+          <p className="mt-3 text-[12px] text-subtle-foreground leading-snug">
+            {KIND_HINT[probe.dominant_kind]}
+          </p>
+        )}
       </div>
 
       {(probe.contradictions ?? []).map((c, i) => (
@@ -103,8 +134,15 @@ export function ProbePanel({ probe }: ProbePanelProps) {
               </p>
             </div>
           </div>
-          <div className="px-5 py-2 border-t border-border text-center font-mono text-[10px] uppercase tracking-[0.18em] text-accent">
-            Sources disagree
+          <div className="px-5 py-2 border-t border-border flex items-baseline justify-center gap-3 font-mono text-[10px] uppercase tracking-[0.18em]">
+            <span className="text-accent">
+              {c.kind ? KIND_LABEL[c.kind] : "sources disagree"}
+            </span>
+            {c.qualifier && (
+              <span className="text-subtle-foreground tracking-[0.10em] normal-case font-normal text-[11px]">
+                under qualifier: <em>{c.qualifier}</em>
+              </span>
+            )}
           </div>
         </div>
       ))}

@@ -48,10 +48,23 @@ export type TypedEventName =
   //   - "evidence_gap"          — a planner sub-query yielded no usable evidence
   | "clarification_offered"
   | "evidence_gap"
+  // Forensic-differentiation events (see docs/FORENSIC_DIFFERENTIATION.md).
+  //   - "hop_evidence"        — newly-grounded tokens + still-open criteria per hop
+  //   - "source_contribution" — per-URL token-share of final context + citation count
+  //   - "source_role"         — LLM-classified role per URL (primary / analysis / …)
+  //   - "terminator"          — explicit hop-loop stop reason
+  | "hop_evidence"
+  | "source_contribution"
+  | "source_role"
+  | "terminator"
   // Phase 2: human-in-the-loop plan-approval gate. Emitted between PLANNING
   // and SEARCHING when ChatRequest.approval_required=true. The orchestrator
   // pauses until POST /research/approve/{turn_id} or /cancel fires.
-  | "plan_approval";
+  | "plan_approval"
+  // B3: retrieval-grounded reasoning. Emitted twice per hop. The `intent`
+  // payload carries planner-derived rationales (NOT model-streamed CoT); the
+  // `observation` payload carries title/domain/score from selected chunks.
+  | "reasoning";
 
 export type UncertaintyKind = "weak" | "missing" | "conflict";
 
@@ -145,6 +158,80 @@ export type StreamEvent =
       turn_id: string;
       planner_output: PlannerOutput;
       sub_queries: string[];
+    }
+  | {
+      // B3: retrieval-grounded reasoning. `phase` discriminates the two
+      // emissions per hop. All fields originate from structured data
+      // (planner JSON or selected chunk metadata) — no model-streamed CoT.
+      type: "reasoning";
+      hop: number;
+      phase: "intent" | "observation";
+      queries?: { text: string; intent: string; rationale: string | null }[];
+      observation?: { title: string; domain: string; url: string; score: number }[];
+    }
+  // Forensic ledger: what the hop *mechanically* established and what remains.
+  // `grounded` items come from the planner's success_criteria intersected with
+  // claim_verifier+numeric_audit outputs — NOT model-generated prose. `open`
+  // items are the planner criteria that did not get grounded this hop.
+  | {
+      type: "hop_evidence";
+      hop: number;
+      grounded: {
+        token: string;
+        kind: "entity" | "number" | "criterion";
+        doc_id?: string;
+        url?: string;
+        quote?: string;
+      }[];
+      open: {
+        criterion: string;
+        reason: "no_evidence" | "partial" | "conflicting";
+      }[];
+    }
+  // Token-share of final context per URL — replaces the chunk-count ratio.
+  // `tokens` is the tiktoken count, `share` is tokens / total_context_tokens.
+  | {
+      type: "source_contribution";
+      contributions: {
+        url: string;
+        domain: string;
+        title: string;
+        tokens: number;
+        share: number;
+        citations: number;
+      }[];
+      total_tokens: number;
+    }
+  // LLM-classified source role over the chunk pool. One classifier call,
+  // results applied per URL.
+  | {
+      type: "source_role";
+      roles: {
+        url: string;
+        role:
+          | "primary_source"
+          | "secondary_analysis"
+          | "statistical"
+          | "news_event"
+          | "official"
+          | "encyclopedic"
+          | "contradicting"
+          | "unclassified";
+        confidence: number;
+      }[];
+    }
+  // Why the hop loop stopped. `reason` mirrors `run_metadata.terminator_fired`.
+  | {
+      type: "terminator";
+      reason:
+        | "MAX_HOPS_REACHED"
+        | "EVIDENCE_SUFFICIENT"
+        | "MARGINAL_GAIN_LOW"
+        | "NO_NEW_QUERIES"
+        | "BUDGET_EXHAUSTED"
+        | "CRITERIA_SATISFIED";
+      hop: number;
+      detail?: string;
     };
 
 // Phase 1.875: planner-output surfaced to UI (see PlanCard).
@@ -183,6 +270,84 @@ export interface EvidenceGap {
   reason: "no_results" | "all_filtered";
 }
 
+// Forensic-differentiation payload shapes used by `run_metadata`.
+// Mirror the backend constants emitted by the orchestrator (see
+// docs/FORENSIC_DIFFERENTIATION.md).
+export interface RunMetadataHopEvidence {
+  hop: number;
+  grounded: Array<{
+    token: string;
+    kind: "entity" | "number" | "criterion";
+    doc_id?: string;
+    url?: string;
+    quote?: string;
+  }>;
+  open: Array<{
+    criterion: string;
+    reason: "no_evidence" | "partial" | "conflicting";
+  }>;
+}
+
+export interface RunMetadataSourceContribution {
+  url: string;
+  domain: string;
+  title: string;
+  tokens: number;
+  share: number;
+  citations: number;
+}
+
+export interface UnreachablePage {
+  url: string;
+  status?: string;
+  reason?: string;
+}
+
+/**
+ * Structured shape for `Turn.run_metadata_json` (a.k.a. `run_metadata` on
+ * the DoneEventData payload). All fields are optional — older turns and
+ * forward-compatible additions are preserved via the index signature.
+ */
+export interface RunMetadata {
+  retrieval_mode?: {
+    requested?: string;
+    effective?: string;
+    reason?: string | null;
+  };
+  uncertainty_kind?: "none" | "weak" | "missing" | "conflict" | null;
+  follow_up_queries?: string[];
+  evidence_gaps_reason?: string | null;
+  budget_distribution?: {
+    system?: number;
+    history?: number;
+    web_context?: number;
+    output_reserved?: number;
+  };
+  context_fallbacks?: string[];
+  numeric_grounding_ratio?: number | null;
+  criteria_coverage?: boolean[];
+  terminator_fired?: string | null;
+  evidence_gaps?: Array<{ query: string; intent: string; reason: string }>;
+  hop_evidence?: RunMetadataHopEvidence[];
+  source_contributions?: RunMetadataSourceContribution[];
+  total_context_tokens?: number;
+  source_roles?: Record<string, { role: string; confidence: number }>;
+  terminator_hop?: number | null;
+  terminator_detail?: string | null;
+  unreachable_pages?: UnreachablePage[];
+  cite_quote_map?: Record<string, string>;
+  next_step_suggestions?: string[];
+  refinement_triggered?: boolean;
+  refinement_count?: number;
+  refinement_reason?: string;
+  conflict_table_missing?: boolean;
+  terminator_source?: "stop_rag" | "deterministic";
+  domain_blocklist_drops?: string[];
+  extraction_fallbacks?: Record<string, number>;
+  reasoner_used?: string;
+  [k: string]: unknown;
+}
+
 export interface NumericAuditEntry {
   token: string;
   kind: "number" | "year" | "date";
@@ -215,7 +380,7 @@ export interface DoneEventData {
   select_ms: number;
   probe_ms: number;
   synthesize_ms: number;
-  run_metadata: Record<string, unknown>;
+  run_metadata: RunMetadata;
   context_xml: string;
   selection_strategy: string;
   planning_strategy: string;
@@ -285,7 +450,7 @@ export interface ContextSnippetRow {
 
 export interface TurnDetail extends Turn {
   claim_verification_json?: unknown;
-  run_metadata_json?: Record<string, unknown>;
+  run_metadata_json?: RunMetadata;
   claim_audit?: ClaimAuditRow[];
   contradiction_probes?: ContradictionProbeRow | null;
   context_snippets?: ContextSnippetRow[];
@@ -302,6 +467,13 @@ export interface ClaimAuditRow {
   reasoning?: string;
 }
 
+/**
+ * DRAGged-into-Conflict taxonomy (Cattan et al., arXiv:2506.08500).
+ * Surfaced from the backend `contradiction_probes.dominant_kind` column
+ * and per-contradiction `kind` field. "none" means no real conflict.
+ */
+export type ConflictKind = "self" | "pair" | "conditional" | "none";
+
 export interface Contradiction {
   topic?: string;
   position_a: string;
@@ -309,6 +481,9 @@ export interface Contradiction {
   position_b: string;
   position_b_doc_ids: string[];
   is_temporal_evolution?: boolean;
+  // P3: DRAGged-into-Conflict taxonomy (arXiv:2506.08500).
+  kind?: ConflictKind;
+  qualifier?: string | null;
 }
 
 export interface ContradictionProbeRow {
@@ -319,6 +494,8 @@ export interface ContradictionProbeRow {
   contradictions?: Contradiction[];
   skip_reason?: "timeout" | "parse_fail" | "lt_2_chunks" | "breaker_open" | string;
   raw_response?: string;
+  // P3: overall verdict across all contradictions.
+  dominant_kind?: ConflictKind;
 }
 
 export interface EvalRun {
@@ -377,6 +554,21 @@ export interface EvalSummary {
     mean_numeric_grounding_ratio: number | null;
     mean_criteria_coverage_ratio: number | null;
   };
+  cross_language?: {
+    rows: CrossLanguageRow[];
+    flagged: CrossLanguageRow[];
+    mean_jaccard: number | null;
+  } | null;
+}
+
+export interface CrossLanguageRow {
+  concept_id: string;
+  en_question_id: string;
+  hi_question_id: string;
+  jaccard_score: number;
+  /** SQLite stores 0/1 — kept as numeric literal type, truthy-checked at use sites. */
+  flagged_inconsistent: 0 | 1;
+  reasoning?: string | null;
 }
 
 export interface EvalQuestion {
@@ -416,4 +608,22 @@ export interface EvalQuestionDetail extends EvalQuestion {
   planner_provider?: string | null;
   reranker_used?: string | null;
   language_method?: string | null;
+  // Refactor #3: terminator-policy trace. `terminator_source` is which gate
+  // emitted the primary terminator ("stop_rag" or "deterministic").
+  // `terminator_history` is the ordered list of gate decisions across hops
+  // (1 entry per hop that terminated). `stop_rag_decisions` is the per-hop
+  // log of the LLM gate, including degraded (continue-by-default) entries.
+  terminator_source?: "stop_rag" | "deterministic" | null;
+  terminator_history?: Array<{
+    source: "stop_rag" | "deterministic";
+    reason: string;
+    hop: number;
+  }>;
+  stop_rag_decisions?: Array<{
+    hop: number;
+    useful: boolean | null;
+    confidence: number | null;
+    reason: string;
+    degraded_reason: string | null;
+  }>;
 }

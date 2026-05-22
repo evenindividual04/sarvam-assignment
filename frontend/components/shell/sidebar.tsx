@@ -132,9 +132,20 @@ export function Sidebar() {
   }, [refresh]);
 
   // ---- provider health polling --------------------------------------------
+  // Visibility-gated to avoid burning real provider quotas while the tab is
+  // backgrounded. With several open tabs and a 30s interval, the old loop
+  // could eat the Gemini free-tier (1500 reqs/day) on its own. The server
+  // also caches probes for ~90s, so even visible tabs only trigger real
+  // probes about once per minute and a half.
   useEffect(() => {
     let alive = true;
     const tick = async () => {
+      if (
+        typeof document !== "undefined" &&
+        document.visibilityState === "hidden"
+      ) {
+        return;
+      }
       try {
         const snap = await getProviderHealth();
         if (alive) setHealth(snap);
@@ -144,9 +155,14 @@ export function Sidebar() {
     };
     tick();
     const id = window.setInterval(tick, HEALTH_POLL_MS);
+    const onVisibility = () => {
+      if (document.visibilityState === "visible") tick();
+    };
+    document.addEventListener("visibilitychange", onVisibility);
     return () => {
       alive = false;
       window.clearInterval(id);
+      document.removeEventListener("visibilitychange", onVisibility);
     };
   }, []);
 

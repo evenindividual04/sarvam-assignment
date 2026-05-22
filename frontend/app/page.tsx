@@ -31,7 +31,14 @@ import type {
   PlanQueryPhase,
   Turn,
 } from "@/lib/types";
-import type { SseStatus } from "@/lib/use-sse-research";
+import type {
+  SseStatus,
+  HopEvidenceItem,
+  SourceContributionBundle,
+  SourceRoleByUrl,
+  TerminatorPayload,
+  ReasoningEvent,
+} from "@/lib/use-sse-research";
 
 interface ChatRow {
   query: string;
@@ -46,6 +53,12 @@ interface ChatRow {
   plan?: PlannerOutput | null;
   phaseProgress?: Record<string, PlanQueryPhase>;
   evidenceGaps?: EvidenceGap[];
+  /** Forensic-differentiation events captured live from this turn. */
+  hopEvidence?: HopEvidenceItem[];
+  sourceContribution?: SourceContributionBundle | null;
+  sourceRoles?: SourceRoleByUrl;
+  terminator?: TerminatorPayload | null;
+  reasoningEvents?: ReasoningEvent[];
   /** Set when row was rehydrated from /sessions history (not from a live SSE stream). */
   historyTurn?: Turn;
 }
@@ -134,6 +147,11 @@ export default function ChatPage() {
         plan: sse.plan,
         phaseProgress: sse.phaseProgress,
         evidenceGaps: sse.evidenceGaps,
+        hopEvidence: sse.hopEvidence,
+        sourceContribution: sse.sourceContribution,
+        sourceRoles: sse.sourceRoles,
+        terminator: sse.terminator,
+        reasoningEvents: sse.reasoningEvents,
       };
       return [...prev.slice(0, -1), updated];
     });
@@ -147,6 +165,11 @@ export default function ChatPage() {
     sse.plan,
     sse.phaseProgress,
     sse.evidenceGaps,
+    sse.hopEvidence,
+    sse.sourceContribution,
+    sse.sourceRoles,
+    sse.terminator,
+    sse.reasoningEvents,
   ]);
 
   // Auto-stick to bottom while streaming, but only when the user hasn't
@@ -297,7 +320,15 @@ export default function ChatPage() {
 
   const openTrace = (row: ChatRow) => {
     if (row.final) {
-      setTraceData(doneToTraceData(row.query, row.final, sessionId));
+      setTraceData(
+        doneToTraceData(row.query, row.final, sessionId, {
+          hopEvidence: row.hopEvidence,
+          sourceContribution: row.sourceContribution ?? null,
+          sourceRoles: row.sourceRoles,
+          terminator: row.terminator ?? null,
+          reasoningEvents: row.reasoningEvents,
+        }),
+      );
       setTraceOpen(true);
       return;
     }
@@ -490,6 +521,22 @@ function ChatTurn({
     return s.size > 0 ? s : undefined;
   })();
 
+  // B5: URL-keyed quote map for citation hover popovers. The orchestrator
+  // emits cite_quote_map keyed by doc_id; we re-key by URL because the
+  // rewritten markdown contains only [Title — domain](URL).
+  const citeQuoteByUrl = (() => {
+    const meta = row.final?.run_metadata;
+    const quotes = meta?.cite_quote_map;
+    const docMap = row.final?.doc_map;
+    if (!quotes || !docMap) return undefined;
+    const out: Record<string, string> = {};
+    for (const [docId, quote] of Object.entries(quotes)) {
+      const entry = docMap[docId];
+      if (entry && entry[1] && quote) out[entry[1]] = quote;
+    }
+    return Object.keys(out).length > 0 ? out : undefined;
+  })();
+
   const copyAnswer = async () => {
     if (!row.final?.answer) return;
     try {
@@ -541,7 +588,10 @@ function ChatTurn({
             />
           )}
           {answerText ? (
-            <RichMarkdown unverifiedNumericTokens={unverifiedTokens}>
+            <RichMarkdown
+              unverifiedNumericTokens={unverifiedTokens}
+              citeQuoteByUrl={citeQuoteByUrl}
+            >
               {answerText}
             </RichMarkdown>
           ) : (

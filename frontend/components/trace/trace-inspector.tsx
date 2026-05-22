@@ -10,6 +10,13 @@ import {
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { CodeBlock } from "./code-block";
 import { LatencyBar } from "./latency-bar";
+import { EvidenceLedger, type HopEvidence } from "./evidence-ledger";
+import { ReasoningChip } from "./reasoning-chip";
+import {
+  SourceContribution,
+  type SourceContributionItem,
+} from "./source-contribution";
+import { TerminatorChip } from "./terminator-chip";
 import { MetricBar } from "@/components/chat/metric-bar";
 import { ClaimsTable } from "@/components/eval/claims-table";
 import { ProbePanel } from "@/components/eval/probe-panel";
@@ -27,8 +34,12 @@ import type {
   ContextSnippetRow,
   ContradictionProbeRow,
   DocMap,
+  RunMetadata,
+  StreamEvent,
   Turn,
 } from "@/lib/types";
+
+type ReasoningEvent = Extract<StreamEvent, { type: "reasoning" }>;
 
 export interface TraceInspectorData {
   turn_id?: string;
@@ -86,6 +97,17 @@ export interface TraceInspectorData {
   criteria_coverage?: boolean[];
   terminator_fired?: string | null;
   evidence_gaps?: Array<{ query: string; intent: string; reason: string }>;
+  // Forensic-differentiation payloads (live-only for now; historic turns will
+  // populate these from `run_metadata_json` once the backend persists them).
+  hop_evidence?: HopEvidence[];
+  source_contributions?: SourceContributionItem[];
+  total_context_tokens?: number;
+  source_roles?: Record<string, { role: string; confidence: number }>;
+  terminator_reason?: string | null;
+  terminator_hop?: number | null;
+  terminator_detail?: string | null;
+  // B3: live retrieval-grounded reasoning events for the current run.
+  reasoning_events?: ReasoningEvent[];
 }
 
 interface TraceInspectorProps {
@@ -145,6 +167,9 @@ export function TraceInspector({
                 </TabsTrigger>
                 <TabsTrigger value="sources" className={TAB_TRIGGER}>
                   Sources ({data.urls?.length ?? 0})
+                </TabsTrigger>
+                <TabsTrigger value="evidence" className={TAB_TRIGGER}>
+                  Evidence ({data.hop_evidence?.length ?? 0})
                 </TabsTrigger>
                 <TabsTrigger value="context" className={TAB_TRIGGER}>
                   Context
@@ -369,6 +394,40 @@ export function TraceInspector({
                     No sources recorded.
                   </div>
                 )}
+              </TabsContent>
+
+              <TabsContent value="evidence" className="pt-6 space-y-6">
+                {data.terminator_reason && (
+                  <section className="pb-4 border-b border-border">
+                    <TerminatorChip
+                      reason={data.terminator_reason}
+                      hop={data.terminator_hop ?? undefined}
+                      detail={data.terminator_detail}
+                    />
+                  </section>
+                )}
+                <section>
+                  <SectionLabel>Per-hop ledger</SectionLabel>
+                  <EvidenceLedger hops={data.hop_evidence ?? []} />
+                </section>
+                {data.reasoning_events && data.reasoning_events.length > 0 && (
+                  <>
+                    <div className="border-t border-border" />
+                    <section>
+                      <SectionLabel>Reasoning</SectionLabel>
+                      <ReasoningChip events={data.reasoning_events} />
+                    </section>
+                  </>
+                )}
+                <div className="border-t border-border" />
+                <section>
+                  <SectionLabel>Source contribution</SectionLabel>
+                  <SourceContribution
+                    contributions={data.source_contributions ?? []}
+                    totalTokens={data.total_context_tokens ?? 0}
+                    roleByUrl={data.source_roles}
+                  />
+                </section>
               </TabsContent>
 
               <TabsContent value="context" className="pt-6 space-y-5">
@@ -696,28 +755,10 @@ export function turnToTraceData(t: {
   claim_audit?: ClaimAuditRow[];
   contradiction_probes?: ContradictionProbeRow | null;
   context_snippets?: ContextSnippetRow[];
-  run_metadata_json?: Record<string, unknown>;
+  run_metadata_json?: RunMetadata;
 }): TraceInspectorData {
   // V3.8: extract effective retrieval mode from run_metadata if present.
-  const meta = t.run_metadata_json as
-    | {
-        retrieval_mode?: { requested?: string; effective?: string; reason?: string | null };
-        uncertainty_kind?: "none" | "weak" | "missing" | "conflict" | null;
-        follow_up_queries?: string[];
-        evidence_gaps_reason?: string | null;
-        budget_distribution?: {
-          system?: number;
-          history?: number;
-          web_context?: number;
-          output_reserved?: number;
-        };
-        context_fallbacks?: string[];
-        numeric_grounding_ratio?: number | null;
-        criteria_coverage?: boolean[];
-        terminator_fired?: string | null;
-        evidence_gaps?: Array<{ query: string; intent: string; reason: string }>;
-      }
-    | undefined;
+  const meta: RunMetadata | undefined = t.run_metadata_json;
   const rm = meta?.retrieval_mode;
   return {
     turn_id: t.turn_id,
@@ -757,7 +798,35 @@ export function turnToTraceData(t: {
     criteria_coverage: meta?.criteria_coverage ?? [],
     terminator_fired: meta?.terminator_fired ?? null,
     evidence_gaps: meta?.evidence_gaps ?? [],
+    // Forensic-differentiation fields, sourced from run_metadata_json when the
+    // backend persists them. Safe empty defaults otherwise.
+    hop_evidence: (meta?.hop_evidence as HopEvidence[] | undefined) ?? [],
+    source_contributions:
+      (meta?.source_contributions as SourceContributionItem[] | undefined) ?? [],
+    total_context_tokens: meta?.total_context_tokens ?? 0,
+    source_roles: meta?.source_roles ?? {},
+    terminator_reason: meta?.terminator_fired ?? null,
+    terminator_hop: meta?.terminator_hop ?? null,
+    terminator_detail: meta?.terminator_detail ?? null,
   };
+}
+
+// Live forensic state captured from SSE events during the current turn.
+// Wired by `page.tsx` from the `useSseResearch` hook and merged into the
+// trace data when the user opens the inspector for a just-finished turn.
+export interface LiveForensicState {
+  hopEvidence?: HopEvidence[];
+  sourceContribution?: {
+    contributions: SourceContributionItem[];
+    total_tokens: number;
+  } | null;
+  sourceRoles?: Record<string, { role: string; confidence: number }>;
+  terminator?: {
+    reason: string;
+    hop?: number;
+    detail?: string | null;
+  } | null;
+  reasoningEvents?: ReasoningEvent[];
 }
 
 export function doneToTraceData(
@@ -781,25 +850,10 @@ export function doneToTraceData(
     select_ms: number;
     probe_ms: number;
     synthesize_ms: number;
-    run_metadata?: {
-      retrieval_mode?: { requested?: string; effective?: string; reason?: string | null };
-      uncertainty_kind?: "none" | "weak" | "missing" | "conflict" | null;
-      follow_up_queries?: string[];
-      evidence_gaps_reason?: string | null;
-      budget_distribution?: {
-        system?: number;
-        history?: number;
-        web_context?: number;
-        output_reserved?: number;
-      };
-      context_fallbacks?: string[];
-      numeric_grounding_ratio?: number | null;
-      criteria_coverage?: boolean[];
-      terminator_fired?: string | null;
-      evidence_gaps?: Array<{ query: string; intent: string; reason: string }>;
-    };
+    run_metadata?: RunMetadata;
   },
   sessionId?: string,
+  live?: LiveForensicState,
 ): TraceInspectorData {
   const rm = d.run_metadata?.retrieval_mode;
   const meta = d.run_metadata;
@@ -837,6 +891,18 @@ export function doneToTraceData(
     criteria_coverage: meta?.criteria_coverage ?? [],
     terminator_fired: meta?.terminator_fired ?? null,
     evidence_gaps: meta?.evidence_gaps ?? [],
+    // Forensic-differentiation: live state from SSE for the just-finished turn.
+    // Historic turns fall through to empty defaults until the backend persists
+    // these fields in run_metadata_json.
+    hop_evidence: live?.hopEvidence ?? [],
+    source_contributions: live?.sourceContribution?.contributions ?? [],
+    total_context_tokens: live?.sourceContribution?.total_tokens ?? 0,
+    source_roles: live?.sourceRoles ?? {},
+    terminator_reason:
+      live?.terminator?.reason ?? meta?.terminator_fired ?? null,
+    terminator_hop: live?.terminator?.hop ?? null,
+    terminator_detail: live?.terminator?.detail ?? null,
+    reasoning_events: live?.reasoningEvents ?? [],
   };
 }
 

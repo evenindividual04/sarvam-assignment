@@ -4,6 +4,7 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { cn } from "@/lib/utils";
 import React from "react";
+import { QuotePopover } from "@/components/trace/quote-popover";
 
 interface RichMarkdownProps {
   children: string;
@@ -15,6 +16,12 @@ interface RichMarkdownProps {
    * inline span. Pass `undefined` (or empty) to disable.
    */
   unverifiedNumericTokens?: ReadonlySet<string>;
+  /**
+   * B5: map of URL → verbatim quote extracted from the cited source.
+   * When present, each citation anchor renders a hover tooltip showing
+   * the quote so readers can verify the claim without opening the link.
+   */
+  citeQuoteByUrl?: Readonly<Record<string, string>>;
 }
 
 // Walks children, replacing literal "[UNVERIFIED]" tokens with an inline Badge.
@@ -33,6 +40,35 @@ function injectUnverified(nodes: React.ReactNode): React.ReactNode {
               className="inline-flex items-center font-mono text-[10px] uppercase tracking-[0.10em] px-1 py-px mx-0.5 align-middle rounded-[3px] border border-red-900/60 bg-red-950/40 text-red-300"
             >
               Unverified
+            </span>,
+          );
+        }
+      });
+      return out;
+    }
+    return node;
+  });
+}
+
+// Mirrors injectUnverified for `ambiguous_resolved` claims — claim_verifier's
+// LLM-tier resolved the claim as supported, but the deterministic check was
+// inconclusive. We want this visible to the reader without alarming them.
+function injectAmbiguous(nodes: React.ReactNode): React.ReactNode {
+  return React.Children.map(nodes, (node) => {
+    if (typeof node === "string") {
+      if (!node.includes("[AMBIGUOUS]")) return node;
+      const parts = node.split("[AMBIGUOUS]");
+      const out: React.ReactNode[] = [];
+      parts.forEach((part, i) => {
+        out.push(part);
+        if (i < parts.length - 1) {
+          out.push(
+            <span
+              key={`amb-${i}`}
+              title="Resolved by LLM-tier verifier; deterministic check inconclusive"
+              className="inline-flex items-center font-mono text-[10px] uppercase tracking-[0.10em] px-1 py-px mx-0.5 align-middle rounded-[3px] border border-border bg-muted text-subtle-foreground"
+            >
+              Ambiguous
             </span>,
           );
         }
@@ -86,20 +122,41 @@ export function RichMarkdown({
   children,
   className,
   unverifiedNumericTokens,
+  citeQuoteByUrl,
 }: RichMarkdownProps) {
   const tokens = unverifiedNumericTokens ?? new Set<string>();
+  const quoteByUrl = citeQuoteByUrl ?? {};
   const decorate = (n: React.ReactNode): React.ReactNode =>
-    injectUnverifiedNumeric(injectUnverified(n), tokens);
+    injectUnverifiedNumeric(injectAmbiguous(injectUnverified(n)), tokens);
   return (
     <div className={cn("rich-md", className)}>
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
         components={{
-          a: ({ href, children, ...rest }) => (
-            <a href={href} target="_blank" rel="noopener noreferrer" {...rest}>
-              {children}
-            </a>
-          ),
+          a: ({ href, children: anchorChildren }) => {
+            const quote = href ? quoteByUrl[href] : undefined;
+            if (!href) {
+              return <span>{anchorChildren}</span>;
+            }
+            if (!quote) {
+              return (
+                <a href={href} target="_blank" rel="noopener noreferrer">
+                  {anchorChildren}
+                </a>
+              );
+            }
+            let domain: string | undefined;
+            try {
+              domain = new URL(href).hostname.replace(/^www\./, "");
+            } catch {
+              domain = undefined;
+            }
+            return (
+              <QuotePopover href={href} quote={quote} domain={domain}>
+                {anchorChildren}
+              </QuotePopover>
+            );
+          },
           p: ({ children, ...rest }) => <p {...rest}>{decorate(children)}</p>,
           li: ({ children, ...rest }) => <li {...rest}>{decorate(children)}</li>,
         }}

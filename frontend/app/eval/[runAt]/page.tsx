@@ -125,6 +125,9 @@ export default function RunSummaryPage({ params }: PageProps) {
           {/* Tier A (Phase 1+): per-turn quality metrics promoted from run_metadata */}
           <PerTurnQualityCard summary={summary} />
 
+          {/* Cross-language consistency (en/hi) */}
+          <CrossLanguageCard summary={summary} />
+
           {/* Calibration — confidence vs faithfulness (V3.5) */}
           <CalibrationStrip summary={summary} />
 
@@ -469,6 +472,57 @@ function PerTurnQualityCard({ summary }: { summary: EvalSummary }) {
                   }%`,
                 }}
               />
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Cross-language consistency strip. Each row is an en/hi question pair on the
+ * same concept; Jaccard score measures key-claim overlap. Hidden when no
+ * cross-language pairs were evaluated (English-only runs).
+ */
+function CrossLanguageCard({ summary }: { summary: EvalSummary }) {
+  const cl = summary.cross_language;
+  if (!cl || !cl.rows || cl.rows.length === 0) return null;
+  const meanJaccard = cl.mean_jaccard ?? 0;
+  const flaggedCount = cl.rows.filter((r) => r.flagged_inconsistent).length;
+  return (
+    <div className="mb-12 border-t border-b border-border py-6">
+      <div className="flex items-baseline justify-between mb-4">
+        <div className="font-mono text-[10px] uppercase tracking-[0.18em] text-muted-foreground">
+          Cross-language consistency (en ↔ hi)
+        </div>
+        <div className="font-mono text-[10px] uppercase tracking-[0.18em] text-muted-foreground tabular-nums">
+          MEAN JACCARD: {meanJaccard.toFixed(2)} · FLAGGED: {flaggedCount}/{cl.rows.length}
+        </div>
+      </div>
+      <div className="border-t border-border">
+        <div className="grid grid-cols-[1fr_80px_80px_80px_60px] gap-4 py-2 border-b border-border font-mono text-[10px] uppercase tracking-[0.14em] text-muted-foreground">
+          <div>Concept</div>
+          <div className="text-right">EN qid</div>
+          <div className="text-right">HI qid</div>
+          <div className="text-right">Jaccard</div>
+          <div className="text-right">Flag</div>
+        </div>
+        {cl.rows.map((r) => (
+          <div
+            key={r.concept_id}
+            className="grid grid-cols-[1fr_80px_80px_80px_60px] gap-4 py-2 border-b border-border items-center font-mono text-[11px]"
+          >
+            <div className="text-foreground">{r.concept_id}</div>
+            <div className="text-right text-muted-foreground tabular-nums">{r.en_question_id}</div>
+            <div className="text-right text-muted-foreground tabular-nums">{r.hi_question_id}</div>
+            <div className="text-right text-foreground tabular-nums">{r.jaccard_score.toFixed(2)}</div>
+            <div className="text-right">
+              {r.flagged_inconsistent ? (
+                <span className="text-[#dc2626]">⚠</span>
+              ) : (
+                <span className="text-subtle-foreground">·</span>
+              )}
             </div>
           </div>
         ))}

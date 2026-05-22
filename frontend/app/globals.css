@@ -321,3 +321,11 @@
   border-color: var(--border-accent);
   background: var(--accent-dim);
 }
+
+/* B5: citations with a quote-anchored popover get a dotted underline cue
+   so readers know the title attribute exposes a verbatim source quote. */
+.rich-md a[data-cite-quote="1"] {
+  text-decoration: underline dotted;
+  text-underline-offset: 2px;
+  cursor: help;
+}

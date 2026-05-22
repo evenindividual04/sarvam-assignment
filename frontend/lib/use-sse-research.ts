@@ -9,9 +9,54 @@ import type {
   ExecutionEvent,
   PlanQueryPhase,
   PlannerOutput,
+  StreamEvent,
   TypedEventName,
   UncertaintyKind,
 } from "./types";
+
+export type ReasoningEvent = Extract<StreamEvent, { type: "reasoning" }>;
+
+// Forensic-differentiation event payloads (see docs/FORENSIC_DIFFERENTIATION.md).
+// These shapes mirror the backend constants emitted by the orchestrator.
+export interface HopEvidenceItem {
+  hop: number;
+  grounded: Array<{
+    token: string;
+    kind: "entity" | "number" | "criterion";
+    doc_id?: string;
+    url?: string;
+    quote?: string;
+  }>;
+  open: Array<{
+    criterion: string;
+    reason: "no_evidence" | "partial" | "conflicting";
+  }>;
+}
+
+export interface SourceContributionRow {
+  url: string;
+  domain: string;
+  title: string;
+  tokens: number;
+  share: number;
+  citations: number;
+}
+
+export interface SourceContributionBundle {
+  contributions: SourceContributionRow[];
+  total_tokens: number;
+}
+
+export type SourceRoleByUrl = Record<
+  string,
+  { role: string; confidence: number }
+>;
+
+export interface TerminatorPayload {
+  reason: string;
+  hop?: number;
+  detail?: string | null;
+}
 
 // Phase 2: plan-approval gate state surfaced to the chat UI. When non-null,
 // the orchestrator is paused awaiting POST /research/approve|cancel.
@@ -45,6 +90,12 @@ export interface UseSseResearchReturn {
   // Phase 2: when set, the chat UI must render <PlanApprovalPanel/> and pause
   // any further UI updates for the turn until approve/cancel resolves.
   approvalPending: PlanApprovalPending | null;
+  // Forensic-differentiation events (one per hop / once per run).
+  hopEvidence: HopEvidenceItem[];
+  sourceContribution: SourceContributionBundle | null;
+  sourceRoles: SourceRoleByUrl;
+  terminator: TerminatorPayload | null;
+  reasoningEvents: ReasoningEvent[];
   start: (
     query: string,
     sessionId: string,
@@ -71,6 +122,13 @@ export function useSseResearch(): UseSseResearchReturn {
   const [evidenceGaps, setEvidenceGaps] = useState<EvidenceGap[]>([]);
   const [approvalPending, setApprovalPending] =
     useState<PlanApprovalPending | null>(null);
+  // Forensic-differentiation state.
+  const [hopEvidence, setHopEvidence] = useState<HopEvidenceItem[]>([]);
+  const [sourceContribution, setSourceContribution] =
+    useState<SourceContributionBundle | null>(null);
+  const [sourceRoles, setSourceRoles] = useState<SourceRoleByUrl>({});
+  const [terminator, setTerminator] = useState<TerminatorPayload | null>(null);
+  const [reasoningEvents, setReasoningEvents] = useState<ReasoningEvent[]>([]);
 
   const abortRef = useRef<AbortController | null>(null);
   const turnIdRef = useRef<string | null>(null);
@@ -96,6 +154,11 @@ export function useSseResearch(): UseSseResearchReturn {
     setPhaseProgress({});
     setEvidenceGaps([]);
     setApprovalPending(null);
+    setHopEvidence([]);
+    setSourceContribution(null);
+    setSourceRoles({});
+    setTerminator(null);
+    setReasoningEvents([]);
     phaseProgressRef.current = {};
     urlToQueryRef.current = {};
     turnIdRef.current = null;
@@ -328,6 +391,111 @@ export function useSseResearch(): UseSseResearchReturn {
             }
           }
 
+          // Forensic-differentiation event capture.
+          // `hop_evidence` fires once per hop, after the hop's selecting phase.
+          if (
+            ev.type === "hop_evidence" &&
+            ev.data &&
+            typeof ev.data === "object"
+          ) {
+            const d = ev.data as Partial<HopEvidenceItem>;
+            if (typeof d.hop === "number") {
+              const row: HopEvidenceItem = {
+                hop: d.hop,
+                grounded: Array.isArray(d.grounded) ? d.grounded : [],
+                open: Array.isArray(d.open) ? d.open : [],
+              };
+              setHopEvidence((prev) => {
+                // Replace by hop number (idempotent on re-runs).
+                const next = prev.filter((h) => h.hop !== row.hop);
+                next.push(row);
+                next.sort((a, b) => a.hop - b.hop);
+                return next;
+              });
+            }
+          }
+          // `source_contribution` fires once per run after the hop loop.
+          if (
+            ev.type === "source_contribution" &&
+            ev.data &&
+            typeof ev.data === "object"
+          ) {
+            const d = ev.data as Partial<SourceContributionBundle>;
+            if (Array.isArray(d.contributions)) {
+              setSourceContribution({
+                contributions: d.contributions as SourceContributionRow[],
+                total_tokens:
+                  typeof d.total_tokens === "number" ? d.total_tokens : 0,
+              });
+            }
+          }
+          // `source_role` fires once per run after the hop loop.
+          if (
+            ev.type === "source_role" &&
+            ev.data &&
+            typeof ev.data === "object"
+          ) {
+            const d = ev.data as {
+              roles?: Array<{ url: string; role: string; confidence: number }>;
+            };
+            if (Array.isArray(d.roles)) {
+              const map: SourceRoleByUrl = {};
+              for (const r of d.roles) {
+                if (r && typeof r.url === "string" && typeof r.role === "string") {
+                  map[r.url] = {
+                    role: r.role,
+                    confidence:
+                      typeof r.confidence === "number" ? r.confidence : 0,
+                  };
+                }
+              }
+              setSourceRoles(map);
+            }
+          }
+          // `terminator` fires once per run when the hop loop exits.
+          if (
+            ev.type === "terminator" &&
+            ev.data &&
+            typeof ev.data === "object"
+          ) {
+            const d = ev.data as Partial<TerminatorPayload>;
+            if (typeof d.reason === "string") {
+              setTerminator({
+                reason: d.reason,
+                hop: typeof d.hop === "number" ? d.hop : undefined,
+                detail: typeof d.detail === "string" ? d.detail : null,
+              });
+            }
+          }
+
+          // B3: retrieval-grounded reasoning. Two emissions per hop
+          // (intent + observation). Captured for ReasoningChip rendering.
+          if (
+            ev.type === "reasoning" &&
+            ev.data &&
+            typeof ev.data === "object"
+          ) {
+            const d = ev.data as {
+              hop?: number;
+              phase?: "intent" | "observation";
+              queries?: ReasoningEvent["queries"];
+              observation?: ReasoningEvent["observation"];
+            };
+            if (
+              typeof d.hop === "number" &&
+              (d.phase === "intent" || d.phase === "observation")
+            ) {
+              const row: ReasoningEvent = {
+                type: "reasoning",
+                hop: d.hop,
+                phase: d.phase,
+                queries: d.queries,
+                observation: d.observation,
+              };
+              setReasoningEvents((prev) => [...prev, row]);
+            }
+          }
+
           if (ev.step === "done") {
             setFinalData(ev.data as DoneEventData);
             setStatus("done");
@@ -394,6 +562,11 @@ export function useSseResearch(): UseSseResearchReturn {
     phaseProgress,
     evidenceGaps,
     approvalPending,
+    hopEvidence,
+    sourceContribution,
+    sourceRoles,
+    terminator,
+    reasoningEvents,
     start,
     approvePlan,
     cancel,

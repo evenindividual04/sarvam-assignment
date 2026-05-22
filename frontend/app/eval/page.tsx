@@ -39,6 +39,40 @@ export default function EvalListPage() {
     load();
   }, [load]);
 
+  // Subscribe to `/eval/live` — backend pushes `runs_changed` whenever a new
+  // eval row lands. The dashboard re-fetches the list without a page reload.
+  // EventSource auto-reconnects on transient disconnects; on unmount we close
+  // the connection.
+  useEffect(() => {
+    const es = new EventSource(`${BACKEND}/eval/live`);
+    let retryCount = 0;
+    const MAX_RETRIES = 5;
+    es.onopen = () => {
+      // Successful (re)connect — reset failure budget.
+      retryCount = 0;
+    };
+    es.onmessage = (ev) => {
+      try {
+        const parsed = JSON.parse(ev.data) as { step?: string };
+        if (parsed.step === "runs_changed") load();
+      } catch {
+        // ignore non-JSON (keepalive comments don't fire onmessage anyway)
+      }
+    };
+    es.onerror = () => {
+      // EventSource auto-retries on transient drops (CONNECTING state). On a
+      // permanent failure (CLOSED) we cap retries so a 404/401 doesn't flood
+      // the network tab indefinitely.
+      if (es.readyState === EventSource.CLOSED) {
+        retryCount += 1;
+        if (retryCount > MAX_RETRIES) {
+          es.close();
+        }
+      }
+    };
+    return () => es.close();
+  }, [load]);
+
   const runSmoke = useCallback(async () => {
     if (smoke.status === "running") return;
     setSmoke({ status: "running", elapsed: 0, completed: 0, total: 8 });
@@ -165,6 +199,7 @@ export default function EvalListPage() {
           </div>
         )}
 
+        {runs.length >= 2 && <LastRunDelta runs={runs} />}
         {runs.length > 0 && (
           <div className="border-t border-border">
             <div className="grid grid-cols-[1.6fr_60px_80px_1fr_1fr_1fr_1fr_1fr_24px] gap-4 py-3 border-b border-border font-mono text-[10px] uppercase tracking-[0.14em] text-muted-foreground items-end">
@@ -379,6 +414,90 @@ function SmokeStatusInline({
       >
         Retry
       </Button>
+    </div>
+  );
+}
+
+/**
+ * Headline delta strip — shows how the most-recent run moved relative to the
+ * previous one across the 5 headline metrics. Surfacing this on the list page
+ * (rather than per-run) makes regression detection a glance, not a hunt.
+ *
+ * Runs are returned by the backend in reverse-chronological order, so
+ * `runs[0]` is the latest and `runs[1]` is the previous baseline.
+ */
+function LastRunDelta({ runs }: { runs: EvalRun[] }) {
+  const latest = runs[0];
+  const prev = runs[1];
+  const norm = (v: number | undefined): number => {
+    if (v === undefined || Number.isNaN(v)) return 0;
+    return v <= 1 ? v : v / 100;
+  };
+  const items: { label: string; latest: number; prev: number }[] = [
+    {
+      label: "Pass",
+      latest: norm(latest.pass_rate),
+      prev: norm(prev.pass_rate),
+    },
+    {
+      label: "Faith",
+      latest: norm(latest.avg_faithfulness),
+      prev: norm(prev.avg_faithfulness),
+    },
+    {
+      label: "Relv",
+      latest: norm(latest.avg_relevance),
+      prev: norm(prev.avg_relevance),
+    },
+    {
+      label: "CtxP",
+      latest: norm(latest.avg_context_precision),
+      prev: norm(prev.avg_context_precision),
+    },
+    {
+      label: "Cite",
+      latest: norm(latest.avg_citation_integrity),
+      prev: norm(prev.avg_citation_integrity),
+    },
+  ];
+  return (
+    <div className="mb-6 border border-border rounded-[6px] bg-surface px-5 py-4">
+      <div className="flex items-baseline justify-between mb-3">
+        <div className="font-mono text-[10px] uppercase tracking-[0.18em] text-muted-foreground">
+          Latest run vs previous
+        </div>
+        <div className="font-mono text-[10px] uppercase tracking-[0.14em] text-subtle-foreground">
+          {formatDateTime(prev.run_at)} → {formatDateTime(latest.run_at)}
+        </div>
+      </div>
+      <div className="grid grid-cols-5 gap-6">
+        {items.map((it) => {
+          const delta = it.latest - it.prev;
+          const sign = delta > 0 ? "+" : "";
+          const color =
+            Math.abs(delta) < 0.005
+              ? "text-muted-foreground"
+              : delta > 0
+                ? "text-accent"
+                : "text-[#dc2626]";
+          return (
+            <div key={it.label}>
+              <div className="font-mono text-[10px] uppercase tracking-[0.14em] text-muted-foreground mb-1.5">
+                {it.label}
+              </div>
+              <div className="font-mono tabular-nums text-[18px] text-foreground leading-none">
+                {it.latest.toFixed(2)}
+              </div>
+              <div
+                className={`mt-1 font-mono tabular-nums text-[10px] ${color}`}
+              >
+                {sign}
+                {delta.toFixed(2)}
+              </div>
+            </div>
+          );
+        })}
+      </div>
     </div>
   );
 }

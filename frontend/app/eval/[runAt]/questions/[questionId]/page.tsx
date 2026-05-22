@@ -132,6 +132,12 @@ export default function QuestionDetailPage({ params }: PageProps) {
           {/* Tier A (Phase 1+): routing decisions surfaced from run_metadata */}
           <RoutingDecisions detail={detail} />
 
+          {/* Refactor #3: terminator-policy trace — shows the ordered list of
+              hop-level gate decisions plus the per-hop STOP-RAG log. Hidden
+              when no terminator history was recorded (older runs / one-hop
+              terminations that never wrote the history list). */}
+          <TerminatorTrace detail={detail} />
+
           {/* Tabs — text-based underline */}
           <Tabs defaultValue="answer">
             <TabsList className="bg-transparent p-0 h-auto border-b border-border w-full justify-start gap-8 rounded-none">
@@ -175,6 +181,16 @@ export default function QuestionDetailPage({ params }: PageProps) {
             </TabsContent>
 
             <TabsContent value="context" className="pt-8 pb-12">
+              <div className="mb-6 border-l-2 border-accent pl-4">
+                <div className="font-mono text-[10px] uppercase tracking-[0.18em] text-accent">
+                  What the LLM actually saw
+                </div>
+                <p className="mt-1.5 font-sans text-[13px] leading-normal text-muted-foreground max-w-prose">
+                  Verbatim XML context handed to the synthesizer for this turn.
+                  Persisting and exposing this is what makes faithfulness
+                  evaluation reproducible — most agents only show the answer.
+                </p>
+              </div>
               {detail.context_xml_sent ? (
                 <CodeBlock
                   code={detail.context_xml_sent}
@@ -327,6 +343,125 @@ function RoutingDecisions({ detail }: { detail: EvalQuestionDetail }) {
           </div>
         ))}
       </div>
+    </div>
+  );
+}
+
+/**
+ * Refactor #3: visual trace of the unified TerminationPolicy decisions.
+ *
+ * Two stacked subsections:
+ *   1. Terminator history — the ordered list of (source, reason, hop) tuples
+ *      the policy emitted across the hop loop. Each row labels which gate
+ *      fired (stop-rag LLM vs deterministic) and the reason code.
+ *   2. STOP-RAG decision log — per-hop output of the LLM gate, including
+ *      degraded entries that defaulted to "continue" because the call
+ *      failed. Surfaces the LLM `reason` string that is intentionally NOT
+ *      streamed to the UI during a run (assignment compliance — no hidden
+ *      CoT on the wire) but is safe to show in the post-hoc eval inspector.
+ *
+ * Hidden entirely when neither field is present (older runs, single-hop
+ * questions that exited via STOP_RAG_GATE before history was appended).
+ */
+function TerminatorTrace({ detail }: { detail: EvalQuestionDetail }) {
+  const history = detail.terminator_history ?? [];
+  const stopRag = detail.stop_rag_decisions ?? [];
+  if (history.length === 0 && stopRag.length === 0) return null;
+
+  const sourceBadge: Record<string, string> = {
+    stop_rag: "bg-blue-950/40 text-blue-300 border-blue-900/40",
+    deterministic: "bg-surface text-muted-foreground border-border",
+  };
+
+  return (
+    <div className="mb-10 border border-border rounded-[6px] bg-surface p-5 space-y-6">
+      <div className="flex items-baseline justify-between">
+        <div className="font-mono text-[10px] uppercase tracking-[0.18em] text-muted-foreground">
+          Terminator trace
+        </div>
+        {detail.terminator_source && (
+          <span
+            className={`font-mono text-[10px] uppercase tracking-[0.10em] px-1.5 py-0.5 rounded-[3px] border ${
+              sourceBadge[detail.terminator_source] ?? sourceBadge.deterministic
+            }`}
+          >
+            primary · {detail.terminator_source.replace("_", "-")}
+          </span>
+        )}
+      </div>
+
+      {history.length > 0 && (
+        <div>
+          <div className="font-mono text-[10px] uppercase tracking-[0.14em] text-subtle-foreground mb-3">
+            Hop decisions
+          </div>
+          <ol className="space-y-1.5">
+            {history.map((h, i) => (
+              <li
+                key={`${h.hop}-${i}`}
+                className="grid grid-cols-[40px_120px_1fr] gap-3 items-center font-mono text-[11px]"
+              >
+                <span className="text-subtle-foreground tabular-nums">
+                  hop {h.hop}
+                </span>
+                <span
+                  className={`inline-block text-[10px] uppercase tracking-[0.10em] px-1.5 py-0.5 rounded-[3px] border ${
+                    sourceBadge[h.source] ?? sourceBadge.deterministic
+                  }`}
+                >
+                  {h.source.replace("_", "-")}
+                </span>
+                <span className="text-foreground">{h.reason}</span>
+              </li>
+            ))}
+          </ol>
+        </div>
+      )}
+
+      {stopRag.length > 0 && (
+        <div className="border-t border-border pt-4">
+          <div className="font-mono text-[10px] uppercase tracking-[0.14em] text-subtle-foreground mb-3">
+            STOP-RAG gate log (LLM)
+          </div>
+          <div className="border-t border-border">
+            <div className="grid grid-cols-[40px_60px_80px_1fr] gap-3 py-2 border-b border-border font-mono text-[10px] uppercase tracking-[0.14em] text-muted-foreground">
+              <div>Hop</div>
+              <div className="text-right">Useful</div>
+              <div className="text-right">Conf</div>
+              <div>Reason</div>
+            </div>
+            {stopRag.map((d, i) => (
+              <div
+                key={`${d.hop}-${i}`}
+                className="grid grid-cols-[40px_60px_80px_1fr] gap-3 py-2 border-b border-border items-baseline font-mono text-[11px]"
+              >
+                <div className="text-subtle-foreground tabular-nums">
+                  {d.hop}
+                </div>
+                <div className="text-right text-foreground">
+                  {d.useful === null
+                    ? "—"
+                    : d.useful
+                      ? "yes"
+                      : "no"}
+                </div>
+                <div className="text-right text-foreground tabular-nums">
+                  {d.confidence === null ? "—" : d.confidence.toFixed(2)}
+                </div>
+                <div className="text-muted-foreground leading-snug">
+                  {d.degraded_reason ? (
+                    <span className="text-amber-400">
+                      degraded · {d.degraded_reason}
+                    </span>
+                  ) : (
+                    d.reason || "—"
+                  )}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
