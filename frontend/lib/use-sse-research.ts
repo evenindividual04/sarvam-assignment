@@ -58,6 +58,16 @@ export interface TerminatorPayload {
   detail?: string | null;
 }
 
+// Vagueness-gated clarifier payload (one per turn, fires post-planning).
+// Non-blocking: the turn continues; the panel is purely informational and
+// offers click-to-resubmit shortcuts to one of the suggested interpretations.
+export interface ClarificationPayload {
+  kind?: string;
+  original_query: string;
+  possible_interpretations: string[];
+  clarifying_question?: string;
+}
+
 // Phase 2: plan-approval gate state surfaced to the chat UI. When non-null,
 // the orchestrator is paused awaiting POST /research/approve|cancel.
 export interface PlanApprovalPending {
@@ -95,6 +105,8 @@ export interface UseSseResearchReturn {
   sourceContribution: SourceContributionBundle | null;
   sourceRoles: SourceRoleByUrl;
   terminator: TerminatorPayload | null;
+  // Vagueness-gated clarifier (non-blocking; informational only).
+  clarification: ClarificationPayload | null;
   reasoningEvents: ReasoningEvent[];
   start: (
     query: string,
@@ -128,6 +140,9 @@ export function useSseResearch(): UseSseResearchReturn {
     useState<SourceContributionBundle | null>(null);
   const [sourceRoles, setSourceRoles] = useState<SourceRoleByUrl>({});
   const [terminator, setTerminator] = useState<TerminatorPayload | null>(null);
+  const [clarification, setClarification] = useState<ClarificationPayload | null>(
+    null,
+  );
   const [reasoningEvents, setReasoningEvents] = useState<ReasoningEvent[]>([]);
 
   const abortRef = useRef<AbortController | null>(null);
@@ -158,6 +173,7 @@ export function useSseResearch(): UseSseResearchReturn {
     setSourceContribution(null);
     setSourceRoles({});
     setTerminator(null);
+    setClarification(null);
     setReasoningEvents([]);
     phaseProgressRef.current = {};
     urlToQueryRef.current = {};
@@ -467,6 +483,32 @@ export function useSseResearch(): UseSseResearchReturn {
               });
             }
           }
+          // `clarification_offered` fires at most once per turn, gated by
+          // the vagueness score + ambiguity heuristic. Non-blocking — the
+          // turn continues; the panel is informational.
+          if (
+            ev.type === "clarification_offered" &&
+            ev.data &&
+            typeof ev.data === "object"
+          ) {
+            const d = ev.data as Partial<ClarificationPayload>;
+            if (
+              typeof d.original_query === "string" &&
+              Array.isArray(d.possible_interpretations)
+            ) {
+              setClarification({
+                kind: typeof d.kind === "string" ? d.kind : undefined,
+                original_query: d.original_query,
+                possible_interpretations: d.possible_interpretations.filter(
+                  (s): s is string => typeof s === "string",
+                ),
+                clarifying_question:
+                  typeof d.clarifying_question === "string"
+                    ? d.clarifying_question
+                    : undefined,
+              });
+            }
+          }
 
           // B3: retrieval-grounded reasoning. Two emissions per hop
           // (intent + observation). Captured for ReasoningChip rendering.
@@ -566,6 +608,7 @@ export function useSseResearch(): UseSseResearchReturn {
     sourceContribution,
     sourceRoles,
     terminator,
+    clarification,
     reasoningEvents,
     start,
     approvePlan,

@@ -146,6 +146,9 @@ export type StreamEvent =
       kind?: "ambiguity";
       original_query: string;
       possible_interpretations: string[];
+      /** Vagueness-gated clarifier: one user-facing question. May be absent
+       *  on legacy events that pre-date the vagueness module. */
+      clarifying_question?: string;
     }
   | {
       type: "evidence_gap";

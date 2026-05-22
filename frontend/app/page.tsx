@@ -7,9 +7,13 @@ import { StreamProgress } from "@/components/chat/stream-progress";
 import { MetricBar } from "@/components/chat/metric-bar";
 import { UncertaintyBadge } from "@/components/chat/uncertainty-badge";
 import { PlanCard } from "@/components/chat/plan-card";
+import { PlanApprovalPanel } from "@/components/chat/plan-approval-panel";
+import { ClarificationPanel } from "@/components/chat/clarification-panel";
 import { RichMarkdown } from "@/lib/markdown";
 import {
   useSseResearch,
+  type ClarificationPayload,
+  type PlanApprovalPending,
   type UncertaintySignal,
 } from "@/lib/use-sse-research";
 import {
@@ -59,6 +63,10 @@ interface ChatRow {
   sourceRoles?: SourceRoleByUrl;
   terminator?: TerminatorPayload | null;
   reasoningEvents?: ReasoningEvent[];
+  /** Plan-approval gate, when `approval_required=true` was set on the request. */
+  approvalPending?: PlanApprovalPending | null;
+  /** Vagueness-gated clarifier, non-blocking, at most once per turn. */
+  clarification?: ClarificationPayload | null;
   /** Set when row was rehydrated from /sessions history (not from a live SSE stream). */
   historyTurn?: Turn;
 }
@@ -152,6 +160,8 @@ export default function ChatPage() {
         sourceRoles: sse.sourceRoles,
         terminator: sse.terminator,
         reasoningEvents: sse.reasoningEvents,
+        approvalPending: sse.approvalPending,
+        clarification: sse.clarification,
       };
       return [...prev.slice(0, -1), updated];
     });
@@ -170,6 +180,8 @@ export default function ChatPage() {
     sse.sourceRoles,
     sse.terminator,
     sse.reasoningEvents,
+    sse.approvalPending,
+    sse.clarification,
   ]);
 
   // Auto-stick to bottom while streaming, but only when the user hasn't
@@ -401,6 +413,16 @@ export default function ChatPage() {
                         }
                       : undefined
                   }
+                  onApprovePlan={
+                    i === rows.length - 1 ? sse.approvePlan : undefined
+                  }
+                  onApprovalCancel={
+                    i === rows.length - 1 ? sse.cancel : undefined
+                  }
+                  onPickInterpretation={(q) => {
+                    sse.cancel();
+                    handleSubmit(q);
+                  }}
                 />
               ))}
             </div>
@@ -494,12 +516,18 @@ function ChatTurn({
   onOpenTrace,
   onRegenerate,
   onFollowUpClick,
+  onApprovePlan,
+  onApprovalCancel,
+  onPickInterpretation,
 }: {
   row: ChatRow;
   onCancel?: () => void;
   onOpenTrace?: () => void;
   onRegenerate?: () => void;
   onFollowUpClick?: (q: string) => void;
+  onApprovePlan?: (editedSubQueries: string[] | null) => Promise<void>;
+  onApprovalCancel?: () => void;
+  onPickInterpretation?: (refinedQuery: string) => void;
 }) {
   const answerText =
     row.final?.answer ??
@@ -575,6 +603,26 @@ function ChatTurn({
           Agent
         </div>
         <div className="flex-1 min-w-0">
+          {row.approvalPending && onApprovePlan && onApprovalCancel && (
+            <PlanApprovalPanel
+              turnId={row.approvalPending.turnId}
+              plannerOutput={row.approvalPending.plannerOutput}
+              subQueries={row.approvalPending.subQueries}
+              onApprove={onApprovePlan}
+              onCancel={onApprovalCancel}
+            />
+          )}
+          {row.clarification && onPickInterpretation && (
+            <ClarificationPanel
+              question={row.clarification.clarifying_question}
+              originalQuery={row.clarification.original_query}
+              interpretations={row.clarification.possible_interpretations}
+              onPickInterpretation={onPickInterpretation}
+              onDismiss={() => {
+                /* dismissal is local-only — the turn continues; no backend signal needed */
+              }}
+            />
+          )}
           {row.plan && (
             <PlanCard plan={row.plan} phaseProgress={row.phaseProgress} />
           )}
