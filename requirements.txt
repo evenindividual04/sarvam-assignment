@@ -15,6 +15,11 @@ starlette>=0.40.0
 # Search
 tavily-python>=0.5.0
 
+# Language detection — Tier 3 of utils/lang_detect.py.
+# langid is pure-Python (no compile, no numpy coupling). We tried
+# fasttext-langdetect first; it installs but breaks under numpy>=2.0.
+langid>=1.1.6
+
 # LLM — google-genai NOT google-generativeai (deprecated)
 google-genai>=1.0.0
 groq>=0.9.0
@@ -23,3 +28,9 @@ openai>=1.35.0
 # V3.1 — Hybrid RRF retrieval (opt-in via HYBRID_RETRIEVAL=1)
 sqlite-vec>=0.1.6
 fastembed>=0.4.0
+
+# Test + ablation tooling
+pytest>=8.0.0
+pytest-cov>=5.0.0
+pytest-asyncio>=0.23.0
+matplotlib>=3.7.0  # used by scripts/plot_ablation.py

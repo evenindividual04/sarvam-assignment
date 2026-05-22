@@ -54,8 +54,13 @@ def test_research_emits_sse_events(app_client, monkeypatch):
     with client.stream("POST", "/research", json={"query": "q", "session_id": "s"}) as r:
         assert r.status_code == 200
         body = b"".join(r.iter_bytes()).decode()
-    parts = [p for p in body.split("\n\n") if p.startswith("data: ")]
-    payloads = [json.loads(p[len("data: "):]) for p in parts]
+    # Phase 1.25: SSE frames may include `id:` and `event:` lines before `data:`.
+    payloads = []
+    for part in body.split("\n\n"):
+        data_line = next((l for l in part.split("\n") if l.startswith("data: ")), None)
+        if data_line is None:
+            continue
+        payloads.append(json.loads(data_line[len("data: "):]))
     steps = [p["step"] for p in payloads]
     assert steps == ["planning", "searching", "done"]
     assert all("label" in p for p in payloads)
@@ -71,7 +76,14 @@ def test_research_includes_turn_id_in_first_event(app_client, monkeypatch):
     monkeypatch.setattr(main_mod.ResearchOrchestrator, "run", fake_run)
     with client.stream("POST", "/research", json={"query": "q", "session_id": "s"}) as r:
         body = b"".join(r.iter_bytes()).decode()
-    first = json.loads(body.split("\n\n")[0][len("data: "):])
+    # Find first frame containing a `data:` line.
+    first = None
+    for part in body.split("\n\n"):
+        data_line = next((l for l in part.split("\n") if l.startswith("data: ")), None)
+        if data_line:
+            first = json.loads(data_line[len("data: "):])
+            break
+    assert first is not None
     assert first["step"] == "planning"
     assert "turn_id" in first["data"]
 
@@ -303,3 +315,176 @@ def test_sessions_turn_detail_joins_claim_audit_and_probes(app_client):
     data = r.json()
     assert data["turn_id"] == turn_id
     assert data["claim_audit"][0]["cited_doc_ids"] == ["doc_1"]
+
+
+# ── Phase 1.25: typed event taxonomy + SSE robustness ──────────────────────
+
+
+def _parse_sse_frames(body: str) -> list[dict]:
+    """Parse SSE frames into {id, event, data, comment} dicts."""
+    frames = []
+    for part in body.split("\n\n"):
+        if not part.strip():
+            continue
+        frame: dict = {"id": None, "event": None, "data": None, "comment": False}
+        for line in part.split("\n"):
+            if line.startswith(":"):
+                frame["comment"] = True
+            elif line.startswith("id: "):
+                try:
+                    frame["id"] = int(line[len("id: "):].strip())
+                except ValueError:
+                    pass
+            elif line.startswith("event: "):
+                frame["event"] = line[len("event: "):].strip()
+            elif line.startswith("data: "):
+                try:
+                    frame["data"] = json.loads(line[len("data: "):])
+                except json.JSONDecodeError:
+                    frame["data"] = line[len("data: "):]
+            elif line.startswith("retry: "):
+                frame["retry"] = int(line[len("retry: "):].strip())
+        frames.append(frame)
+    return frames
+
+
+def test_sse_event_has_id_field(app_client, monkeypatch):
+    """Phase 1.25: every data frame carries a monotonically increasing `id:`."""
+    client, _, main_mod = app_client
+    from agent.models import ExecutionEvent
+
+    async def fake_run(self, query, session_id, cancel_token=None, turn_id=None, config=None):
+        yield ExecutionEvent("planning", "Planning", data={"strategy": "x"})
+        yield ExecutionEvent("searching", "Searching the web")
+        yield ExecutionEvent("done", "done", data={"turn_id": turn_id})
+
+    monkeypatch.setattr(main_mod.ResearchOrchestrator, "run", fake_run)
+    with client.stream("POST", "/research", json={"query": "q", "session_id": "s"}) as r:
+        body = b"".join(r.iter_bytes()).decode()
+    frames = [f for f in _parse_sse_frames(body) if f["data"] is not None]
+    ids = [f["id"] for f in frames]
+    assert all(i is not None for i in ids), f"missing id field: {ids}"
+    assert ids == sorted(ids), f"ids not monotonic: {ids}"
+    assert len(set(ids)) == len(ids), f"duplicate ids: {ids}"
+
+
+def test_sse_event_carries_type_discriminator(app_client, monkeypatch):
+    """Phase 1.25: events with `event_type` are emitted with SSE `event:` line."""
+    client, _, main_mod = app_client
+    from agent.models import ExecutionEvent, EVT_PHASE_STARTED
+
+    async def fake_run(self, query, session_id, cancel_token=None, turn_id=None, config=None):
+        yield ExecutionEvent(
+            "planning", "Planning",
+            data={"name": "planning", "label": "Planning", "idx": 1, "total": 7},
+            event_type=EVT_PHASE_STARTED,
+        )
+
+    monkeypatch.setattr(main_mod.ResearchOrchestrator, "run", fake_run)
+    with client.stream("POST", "/research", json={"query": "q", "session_id": "s"}) as r:
+        body = b"".join(r.iter_bytes()).decode()
+    frames = _parse_sse_frames(body)
+    typed = [f for f in frames if f["event"] == EVT_PHASE_STARTED]
+    assert len(typed) >= 1, f"no phase_started event: {[f['event'] for f in frames]}"
+
+
+def test_cot_preemit_filter_strips_thinking(app_client, monkeypatch, caplog):
+    """Phase 1.25: payloads containing `<thinking>` or `thought_summary` are dropped."""
+    client, _, main_mod = app_client
+    from agent.models import ExecutionEvent
+
+    async def fake_run(self, query, session_id, cancel_token=None, turn_id=None, config=None):
+        # First event: normal, should pass through.
+        yield ExecutionEvent("planning", "Planning", data={"turn_id": turn_id})
+        # Second event: contains CoT, must be dropped.
+        yield ExecutionEvent("generating", "Generating answer with citations",
+                             data={"text": "<thinking>internal reasoning</thinking>"})
+        # Third event: also CoT — keyword form.
+        yield ExecutionEvent("generating", "Generating answer with citations",
+                             data={"thought_summary": "hidden"})
+        # Fourth event: clean.
+        yield ExecutionEvent("done", "done", data={"turn_id": turn_id})
+
+    monkeypatch.setattr(main_mod.ResearchOrchestrator, "run", fake_run)
+    with client.stream("POST", "/research", json={"query": "q", "session_id": "s"}) as r:
+        body = b"".join(r.iter_bytes()).decode()
+    frames = [f for f in _parse_sse_frames(body) if f["data"] is not None]
+    serialized = json.dumps([f["data"] for f in frames])
+    assert "<thinking>" not in serialized
+    assert "thought_summary" not in serialized
+    # Original event count was 4; we expect 2 to survive.
+    assert len(frames) == 2, f"expected 2 frames, got {len(frames)}: {frames}"
+
+
+def test_last_event_id_replay(app_client, monkeypatch):
+    """Phase 1.25: a second stream call with ?turn_id=X&last_event_id=N replays
+    frames with id > N from the per-turn ring buffer."""
+    client, _, main_mod = app_client
+    from agent.models import ExecutionEvent
+
+    async def fake_run(self, query, session_id, cancel_token=None, turn_id=None, config=None):
+        yield ExecutionEvent("planning", "Planning", data={"strategy": "x"})
+        yield ExecutionEvent("searching", "Searching the web", data={"query": "q1"})
+        yield ExecutionEvent("done", "done", data={"turn_id": turn_id})
+
+    monkeypatch.setattr(main_mod.ResearchOrchestrator, "run", fake_run)
+
+    # First run: consume the stream and capture turn_id + ids.
+    fixed_turn = "phase-1-25-replay-test"
+    with client.stream(
+        "POST", f"/research?turn_id={fixed_turn}",
+        json={"query": "q", "session_id": "s"},
+    ) as r:
+        body1 = b"".join(r.iter_bytes()).decode()
+    # NB: the per-turn replay buffer is dropped in `finally`. Confirm the test
+    # exercises the replay machinery itself (in-memory) by checking the
+    # function directly — request-level replay only fires when the consumer
+    # *interrupts* mid-stream, which TestClient can't easily simulate.
+    from main import _replay_remember, _replay_since
+    _replay_remember("replay-direct", 1, "phase_started", {"step": "planning"})
+    _replay_remember("replay-direct", 2, "answer_delta", {"step": "generating"})
+    _replay_remember("replay-direct", 3, "phase_finished", {"step": "planning"})
+    out = _replay_since("replay-direct", last_event_id=1)
+    ids_replayed = [eid for (eid, _et, _pl) in out]
+    assert ids_replayed == [2, 3]
+
+
+def test_heartbeat_keeps_stream_alive(app_client, monkeypatch):
+    """Phase 1.25: idle SSE streams emit `: ping` comment frames periodically.
+
+    Drives the heartbeat at a very short interval (0.1s) by patching the
+    module constant so the test runs in milliseconds rather than 30s.
+    """
+    client, _, main_mod = app_client
+    from agent.models import ExecutionEvent
+    import asyncio as _aio
+
+    async def fake_run(self, query, session_id, cancel_token=None, turn_id=None, config=None):
+        yield ExecutionEvent("planning", "Planning", data={"strategy": "x"})
+        # Stall for long enough to see ≥2 heartbeats at 0.1s interval.
+        await _aio.sleep(0.35)
+        yield ExecutionEvent("done", "done", data={"turn_id": turn_id})
+
+    monkeypatch.setattr(main_mod.ResearchOrchestrator, "run", fake_run)
+    monkeypatch.setattr(main_mod, "_HEARTBEAT_INTERVAL_S", 0.1)
+
+    with client.stream("POST", "/research", json={"query": "q", "session_id": "s"}) as r:
+        body = b"".join(r.iter_bytes()).decode()
+    pings = body.count(": ping")
+    assert pings >= 2, f"expected ≥2 heartbeats, got {pings}; body={body!r}"
+
+
+def test_stream_labels_endpoint(app_client):
+    """Phase 1.25: GET /stream/labels returns the canonical STREAM_LABELS dict."""
+    client, _, _ = app_client
+    r = client.get("/stream/labels")
+    assert r.status_code == 200
+    body = r.json()
+    assert "labels" in body
+    assert "order" in body
+    # The 5 required user-facing labels must be present and exact.
+    assert body["labels"]["planning"] == "Planning"
+    assert body["labels"]["searching"] == "Searching the web"
+    assert body["labels"]["fetching"] == "Fetching sources"
+    assert body["labels"]["selecting"] == "Selecting relevant context"
+    assert body["labels"]["generating"] == "Generating answer with citations"

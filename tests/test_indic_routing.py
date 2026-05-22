@@ -251,7 +251,124 @@ def test_synthesizer_prompt_covers_all_indic_scripts():
     assert "devanagari" in sys_prompt
 
 
+# ── Sarvam-primary auto-routing for Indic queries (Goal 1) ────────────────
+
+
+def _collect_first_provider(monkeypatch, query: str) -> tuple[str, list[str]]:
+    """Run provider_router.synthesize and report (first provider yielded, full chain).
+
+    Each provider stub yields a marker chunk so the runner records its name on
+    invocation. The first one to receive a call wins (everything else short-
+    circuits since the chain returns after a successful yield).
+    """
+    from utils import provider_router
+
+    invoked: list[str] = []
+
+    def _make_stub(name: str):
+        async def _stub(prompt):
+            invoked.append(name)
+            yield (f"answer-from-{name}", 0, 0)
+            yield ("", 0, 0)
+        return _stub
+
+    monkeypatch.setattr(provider_router, "_synthesize_gemini",     _make_stub("gemini"))
+    monkeypatch.setattr(provider_router, "_synthesize_sarvam",     _make_stub("sarvam"))
+    monkeypatch.setattr(provider_router, "_synthesize_openrouter", _make_stub("openrouter"))
+    monkeypatch.setattr(provider_router, "_synthesize_cerebras",   _make_stub("cerebras"))
+    monkeypatch.setattr(provider_router, "_synthesize_ollama",     _make_stub("ollama"))
+
+    async def go():
+        async for _ in provider_router.synthesize(
+            query=query, context_xml="<context/>", doc_map={},
+        ):
+            pass
+        return provider_router.get_last_synth_chain() or []
+
+    chain = asyncio.run(go())
+    return invoked[0] if invoked else "", chain
+
+
+def test_synthesize_routes_sarvam_first_for_devanagari(monkeypatch):
+    monkeypatch.setenv("SARVAM_API_KEY", "sk_test")
+    monkeypatch.setenv("GEMINI_API_KEY", "g_test")
+    first, chain = _collect_first_provider(monkeypatch, "भारत में रिज़र्व बैंक की रेपो दर क्या है?")
+    assert first == "sarvam"
+    assert chain[0] == "sarvam"
+
+
+def test_synthesize_routes_sarvam_first_for_tamil(monkeypatch):
+    monkeypatch.setenv("SARVAM_API_KEY", "sk_test")
+    monkeypatch.setenv("GEMINI_API_KEY", "g_test")
+    first, chain = _collect_first_provider(monkeypatch, "தமிழ்நாட்டின் தலைநகர் எது?")
+    assert first == "sarvam"
+    assert chain[0] == "sarvam"
+
+
+def test_synthesize_routes_sarvam_first_for_bengali(monkeypatch):
+    monkeypatch.setenv("SARVAM_API_KEY", "sk_test")
+    monkeypatch.setenv("GEMINI_API_KEY", "g_test")
+    first, chain = _collect_first_provider(monkeypatch, "ভারতের রাজধানী কী?")
+    assert first == "sarvam"
+    assert chain[0] == "sarvam"
+
+
+def test_synthesize_routes_gemini_first_for_english(monkeypatch):
+    monkeypatch.setenv("SARVAM_API_KEY", "sk_test")
+    monkeypatch.setenv("GEMINI_API_KEY", "g_test")
+    first, chain = _collect_first_provider(monkeypatch, "What is the RBI repo rate?")
+    assert first == "gemini"
+    # Default English chain still starts with gemini.
+    assert chain[0] == "gemini"
+
+
+def test_synthesize_skips_sarvam_auto_when_no_api_key(monkeypatch):
+    # No SARVAM_API_KEY → Indic-auto must NOT promote Sarvam. The default chain
+    # is gemini-first; the sarvam stub never runs because its key is missing
+    # (pre-flight skip in synthesize()).
+    monkeypatch.delenv("SARVAM_API_KEY", raising=False)
+    monkeypatch.setenv("GEMINI_API_KEY", "g_test")
+    first, chain = _collect_first_provider(monkeypatch, "भारत की राजधानी क्या है?")
+    assert first == "gemini"
+    assert chain[0] == "gemini"
+
+
+def test_synthesize_skips_sarvam_auto_when_disabled(monkeypatch):
+    monkeypatch.setenv("SARVAM_API_KEY", "sk_test")
+    monkeypatch.setenv("GEMINI_API_KEY", "g_test")
+    monkeypatch.setenv("SARVAM_INDIC_AUTO", "0")
+    first, chain = _collect_first_provider(monkeypatch, "भारत की राजधानी क्या है?")
+    assert first == "gemini"
+    assert chain[0] == "gemini"
+
+
+def test_synthesize_routes_sarvam_first_for_hinglish(monkeypatch):
+    """3-tier detector add-on: romanized Hinglish must now route Sarvam-first.
+    Before this, the Unicode-script-only detector returned 'en' for Hinglish
+    and Sarvam-primary routing missed all code-mixed queries."""
+    monkeypatch.setenv("SARVAM_API_KEY", "sk_test")
+    monkeypatch.setenv("GEMINI_API_KEY", "g_test")
+    first, chain = _collect_first_provider(monkeypatch, "kya haal hai bhai")
+    assert first == "sarvam"
+    assert chain[0] == "sarvam"
+
+
+def test_synthesize_does_not_route_sarvam_for_pure_english(monkeypatch):
+    """Sanity: pure English without any Hinglish triggers stays Gemini-first."""
+    monkeypatch.setenv("SARVAM_API_KEY", "sk_test")
+    monkeypatch.setenv("GEMINI_API_KEY", "g_test")
+    first, chain = _collect_first_provider(monkeypatch, "how to bake sourdough bread")
+    assert first == "gemini"
+    assert chain[0] == "gemini"
+
+
 def test_synthesizer_prompt_id_bumped_to_v5_indic():
+    """Phase 1 bumped the active synthesizer prompt to v6 (quote-first).
+    The legacy v5 indic prompt is preserved at PROMPT_REGISTRY['synth_v5_indic_legacy']
+    for audit and rollback. Both ids are accepted to keep this regression test
+    meaningful across prompt upgrades."""
     from utils.prompt_registry import PROMPT_REGISTRY
 
-    assert PROMPT_REGISTRY["synthesizer"]["id"] == "synth_v5_indic"
+    assert PROMPT_REGISTRY["synthesizer"]["id"] in {"synth_v5_indic", "synth_v6_quote_first"}
+    # Legacy v5 indic prompt must still exist for rollback/audit.
+    assert PROMPT_REGISTRY["synth_v5_indic_legacy"]["id"] == "synth_v5_indic"

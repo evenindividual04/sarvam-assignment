@@ -79,8 +79,14 @@ def _mk_snippet(doc_id: str, text: str, domain: str = "example.com") -> ContextS
     )
 
 
-def test_hybrid_retrieval_disabled_uses_bm25_only(monkeypatch):
+def test_lexical_mode_skips_embedder(monkeypatch):
+    """V3.8: explicit `RETRIEVAL_MODE=lexical` must not call the embedder
+    regardless of capability — this is the ablation / forced-baseline path.
+    (Note: the old test asserted the *default* was off; under V3.8 the default
+    is `auto`, which uses hybrid when sqlite-vec is available. To assert "no
+    embedding" you now have to opt out explicitly.)"""
     monkeypatch.delenv("HYBRID_RETRIEVAL", raising=False)
+    monkeypatch.setenv("RETRIEVAL_MODE", "lexical")
     assert hybrid_retrieval_enabled() is False
     chunks = [
         _mk_snippet("d1", "the quick brown fox jumps over the lazy dog"),
@@ -95,7 +101,7 @@ def test_hybrid_retrieval_disabled_uses_bm25_only(monkeypatch):
     with patch("agent.embedder._embed_sync", side_effect=_spy):
         out = rank_and_select("brown fox", chunks, max_tokens=4000)
 
-    assert called["n"] == 0, "embedder must NOT be called when HYBRID_RETRIEVAL is unset"
+    assert called["n"] == 0, "embedder must NOT be called in RETRIEVAL_MODE=lexical"
     assert out, "BM25 path should still return chunks"
 
 
@@ -173,3 +179,90 @@ def test_real_embed_returns_384_dim():
     out = asyncio.run(embed_batch(["hello world"]))
     assert out and len(out) == 1
     assert len(out[0]) == EMBEDDING_DIM == 384
+
+
+# ── P0-5: async entry point ───────────────────────────────────────────────
+# Regression coverage for the asyncio.run-inside-to_thread bug. The orchestrator
+# now drives hybrid retrieval through `rank_and_select_async`, which keeps the
+# async DB I/O in the caller's event loop. The sync `rank_and_select` retains
+# back-compat for legacy callers but safely skips hybrid when a loop is active.
+
+
+@pytest.mark.asyncio
+async def test_rank_and_select_async_runs_inside_event_loop(tmp_path, monkeypatch):
+    """Async entry point completes cleanly when invoked from a running loop —
+    proving the hybrid path no longer trips `RuntimeError: This event loop is
+    already running`."""
+    monkeypatch.setenv("HYBRID_RETRIEVAL", "1")
+    monkeypatch.setattr(memory, "DB_PATH", str(tmp_path / "async.db"))
+    from agent.context_engine import rank_and_select_async
+
+    await memory.init_db()
+    chunks = [
+        _mk_snippet("d1", "the quick brown fox jumps over the lazy dog"),
+        _mk_snippet("d2", "machine learning embeds text into dense vectors"),
+        _mk_snippet("d3", "a brown fox sprints through the meadow"),
+    ]
+
+    def _fake_embed(texts):
+        return [[1.0 if "fox" in t else 0.0] + [0.0] * 383 for t in texts]
+
+    with patch("agent.embedder._embed_sync", side_effect=_fake_embed):
+        out = await rank_and_select_async("brown fox", chunks, max_tokens=4000)
+    assert out, "Async hybrid path must return selected chunks"
+
+
+@pytest.mark.asyncio
+async def test_rank_and_select_async_does_not_call_asyncio_run(tmp_path, monkeypatch):
+    """If `asyncio.run` is invoked anywhere on the hybrid path, it would raise
+    inside the test's running loop. Patching it to raise unconditionally proves
+    the async path never reaches it."""
+    monkeypatch.setenv("HYBRID_RETRIEVAL", "1")
+    monkeypatch.setattr(memory, "DB_PATH", str(tmp_path / "noasyncrun.db"))
+    from agent import context_engine
+    from agent.context_engine import rank_and_select_async
+
+    await memory.init_db()
+    chunks = [
+        _mk_snippet("d1", "alpha beta gamma delta"),
+        _mk_snippet("d2", "epsilon zeta eta theta"),
+    ]
+
+    def _fake_embed(texts):
+        return [[float(len(t) % 7)] + [0.0] * 383 for t in texts]
+
+    def _boom(*_a, **_kw):
+        raise AssertionError("asyncio.run must not be called on async hybrid path")
+
+    with patch("agent.embedder._embed_sync", side_effect=_fake_embed), \
+         patch.object(context_engine.asyncio, "run", side_effect=_boom):
+        out = await rank_and_select_async("alpha beta", chunks, max_tokens=4000)
+    assert out is not None
+
+
+def test_sync_rank_and_select_skips_hybrid_when_loop_running(monkeypatch):
+    """Legacy sync `rank_and_select` must NOT trigger the hybrid path when a
+    loop is already running on the current thread — instead it should fall
+    back to BM25-only retrieval silently. This prevents the original
+    RuntimeError surface area for any straggler call site."""
+    monkeypatch.setenv("HYBRID_RETRIEVAL", "1")
+    chunks = [
+        _mk_snippet("d1", "the quick brown fox"),
+        _mk_snippet("d2", "lorem ipsum dolor"),
+    ]
+
+    embed_calls = {"n": 0}
+
+    def _spy(texts):
+        embed_calls["n"] += 1
+        return [[0.0] * 384 for _ in texts]
+
+    async def _run_inside_loop():
+        with patch("agent.embedder._embed_sync", side_effect=_spy):
+            return rank_and_select("brown fox", chunks, max_tokens=4000)
+
+    out = asyncio.run(_run_inside_loop())
+    assert out, "BM25 fallback must still return chunks"
+    assert embed_calls["n"] == 0, (
+        "Hybrid path must be skipped when called from a running event loop"
+    )

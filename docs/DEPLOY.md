@@ -15,7 +15,8 @@ frontend. Common drivers:
   a Gemini private endpoint — and want this agent to use those credits
   rather than a third-party.
 
-If none of those apply, the public demo (Vercel + HF Spaces) is fine.
+If none of those apply, the public demo (Vercel + HF Spaces) is fine — see
+[HF_SPACES.md](./HF_SPACES.md) for the public-demo deployment guide.
 
 ## 30-minute deployment
 

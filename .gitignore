@@ -9,6 +9,7 @@ __pycache__/
 *.pyd
 eval/results/*
 !eval/results/.gitkeep
+!eval/results/SAMPLE_REPORT.md
 .streamlit/secrets.toml
 .DS_Store
 *.egg-info/
