@@ -54,6 +54,52 @@ TRUST_TIERS: tuple[TrustTier, ...] = (
 DEFAULT_TRUST: float = 0.70
 DEFAULT_TIER: str = "unknown"
 
+# Phase 5b: default social-media domain blocklist.
+# These domains tend to produce low-signal, conversation-style results that
+# dilute deep-research synthesis. Listed lowercase; subdomain matching is
+# inherited via `is_blocked` (e.g. `old.reddit.com` matches `reddit.com`).
+#
+# CHANGELOG NOTE: introducing this is a behavior change — queries that
+# previously surfaced reddit/twitter/x/tiktok/quora/instagram/facebook/pinterest
+# results will now silently drop them at search-result and chunk-selection
+# stages. Users can extend or fully disable via RETRIEVAL_DOMAIN_BLOCKLIST
+# (env or per-request override): comma-separated extra domains, or the
+# literal "none" to disable the default blocklist entirely.
+BLOCKLIST: frozenset[str] = frozenset({
+    "reddit.com", "twitter.com", "x.com", "tiktok.com",
+    "quora.com", "instagram.com", "facebook.com", "pinterest.com",
+})
+
+
+def is_blocked(
+    domain: str,
+    custom_blocklist: frozenset[str] = frozenset(),
+) -> bool:
+    """Return True if `domain` (or any parent) is in BLOCKLIST ∪ custom_blocklist.
+
+    Matching mirrors `trust_for` — exact match OR suffix match on a dotted
+    boundary, so `reddit.com` blocks `old.reddit.com` but not `notreddit.com`.
+
+    Note: the orchestrator passes `RuntimeConfig.domain_blocklist` (which
+    already represents the effective set — BLOCKLIST ∪ env extras, or empty
+    when the user passed `RETRIEVAL_DOMAIN_BLOCKLIST=none`). To honor the
+    "none" disable path, callers should skip this function entirely when
+    `RuntimeConfig.domain_blocklist` is empty.
+    """
+    if not domain:
+        return False
+    effective = BLOCKLIST | custom_blocklist
+    if not effective:
+        return False
+    d = domain.lower().lstrip(".")
+    for target in effective:
+        t = target.lower().lstrip(".")
+        if not t:
+            continue
+        if d == t or d.endswith("." + t):
+            return True
+    return False
+
 
 def trust_for(domain: str) -> tuple[float, str]:
     """Return (score, tier_name) for a domain. Unknown → (0.70, 'unknown')."""

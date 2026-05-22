@@ -8,15 +8,71 @@ Async URL content extractor.
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import logging
+import os
 from typing import Optional
+from urllib.parse import quote, urlparse
 
 import httpx
 import trafilatura
+from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
 from agent.models import SearchResult
 
 logger = logging.getLogger(__name__)
+
+# Minimum useful extraction length. Below this we assume Trafilatura got a
+# JS-shell / paywall / blocked page and try the fallback chain.
+_MIN_USEFUL_CHARS = 200
+_TAVILY_EXTRACT_URL = "https://api.tavily.com/extract"
+_JINA_READER_BASE = "https://r.jina.ai/"
+
+
+# S2 fix: SSRF guard. Search results come from third-party APIs and could
+# contain file://, ftp://, cloud metadata IPs (169.254.169.254), or
+# RFC-1918 private-range addresses pointing at internal services. We block
+# all of these before httpx ever opens a connection.
+#
+# DNS-rebinding-style attacks (resolving a public hostname to a private IP)
+# are NOT mitigated here — that requires a custom socket resolver, which is
+# out of scope for a 2-day project. Document this in the audit.
+_METADATA_HOSTS = {"metadata", "metadata.google.internal", "169.254.169.254"}
+
+
+def _is_safe_url(url: str) -> bool:
+    """Return True iff `url` is safe to fetch from a user-supplied source.
+    Blocks non-http(s) schemes, private/loopback/link-local IP literals, and
+    well-known cloud metadata endpoints."""
+    try:
+        parsed = urlparse(url)
+    except Exception:
+        return False
+    if parsed.scheme not in ("http", "https"):
+        return False
+    host = parsed.hostname
+    if not host:
+        return False
+    # IP-literal check: ipaddress.ip_address rejects hostnames with ValueError.
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        # Hostname is not an IP literal; we allow it. See module docstring re:
+        # DNS-resolution-based SSRF.
+        pass
+    else:
+        if (
+            ip.is_private
+            or ip.is_loopback
+            or ip.is_link_local
+            or ip.is_reserved
+            or ip.is_multicast
+            or ip.is_unspecified
+        ):
+            return False
+    if host.lower() in _METADATA_HOSTS:
+        return False
+    return True
 
 
 _TIMEOUT = httpx.Timeout(15.0, connect=5.0)
@@ -37,6 +93,10 @@ class Extractor:
             follow_redirects=True,
         )
         self._semaphore = asyncio.Semaphore(3)
+        # V3.9: fallback telemetry. Persisted into
+        # ``run_metadata["extraction_fallbacks"]`` by the orchestrator so eval
+        # runs can quantify how often Trafilatura was insufficient.
+        self.fallback_counts: dict[str, int] = {"tavily": 0, "jina": 0}
 
     async def aclose(self) -> None:
         await self._client.aclose()
@@ -49,9 +109,133 @@ class Extractor:
         async with self._semaphore:
             return await self._fetch_and_extract(result.url)
 
-    from tenacity import retry, wait_exponential, stop_after_attempt, retry_if_exception_type
-    @retry(wait=wait_exponential(multiplier=1, min=2, max=10), stop=stop_after_attempt(3), retry=retry_if_exception_type((httpx.TimeoutException, httpx.ConnectError)), reraise=True)
+    async def _tavily_extract(self, url: str, timeout_s: float = 10.0) -> Optional[str]:
+        """POST to Tavily Extract API. Returns text or None on any error.
+
+        Defense-in-depth: re-check ``_is_safe_url`` here even though the
+        caller has already gated. Tavily fetches the URL on their backend,
+        so a redirect-based SSRF would otherwise bypass our local guard.
+        """
+        if not _is_safe_url(url):
+            logger.debug("Tavily extract: refusing unsafe URL %s", url,
+                         extra={"component": "extractor"})
+            return None
+        api_key = os.getenv("TAVILY_API_KEY", "").strip()
+        if not api_key:
+            return None
+        payload = {
+            "api_key": api_key,
+            "urls": [url],
+            "include_raw_content": True,
+        }
+        try:
+            resp = await self._client.post(
+                _TAVILY_EXTRACT_URL,
+                json=payload,
+                timeout=timeout_s,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+        except Exception as exc:
+            logger.debug("Tavily extract failed for %s: %s", url, exc,
+                         extra={"component": "extractor"})
+            return None
+        results = data.get("results") if isinstance(data, dict) else None
+        if not isinstance(results, list) or not results:
+            return None
+        first = results[0] if isinstance(results[0], dict) else {}
+        text = first.get("raw_content") or first.get("content")
+        if isinstance(text, str) and text.strip():
+            return text
+        return None
+
+    async def _jina_read(self, url: str, timeout_s: float = 10.0) -> Optional[str]:
+        """GET https://r.jina.ai/{url}. Free tier, no API key. Returns markdown.
+
+        Two guards apply here:
+          1. ``JINA_READER_DISABLED=1`` env opt-out — for operators who don't
+             want any URLs disclosed to Jina's infrastructure.
+          2. ``_is_safe_url`` defense-in-depth. Jina's backend re-resolves
+             the URL on its own infrastructure, so our local check is the
+             user-facing trust boundary against private-IP-literal SSRF.
+             (DNS rebinding / open-redirect into a metadata IP is still
+             out of scope — see ``_is_safe_url`` docstring.)
+        """
+        if os.getenv("JINA_READER_DISABLED", "").strip() in {"1", "true", "True", "yes"}:
+            return None
+        if not _is_safe_url(url):
+            logger.debug("Jina read: refusing unsafe URL %s", url,
+                         extra={"component": "extractor"})
+            return None
+        try:
+            target = _JINA_READER_BASE + quote(url, safe=":/?&=%#")
+            resp = await self._client.get(
+                target,
+                timeout=timeout_s,
+                headers={"User-Agent": _HEADERS["User-Agent"]},
+            )
+            resp.raise_for_status()
+            text = resp.text
+        except Exception as exc:
+            logger.debug("Jina read failed for %s: %s", url, exc,
+                         extra={"component": "extractor"})
+            return None
+        if isinstance(text, str) and text.strip():
+            return text
+        return None
+
+    async def _extract_with_fallbacks(
+        self,
+        url: str,
+        html_text: str,
+    ) -> Optional[str]:
+        """Three-tier extraction: Trafilatura → Tavily Extract → Jina Reader.
+
+        Always returns the best-effort result. Never raises.
+        """
+        primary = trafilatura.extract(
+            html_text,
+            favor_precision=True,
+            output_format="txt",
+            include_comments=False,
+        )
+        if primary and len(primary) >= _MIN_USEFUL_CHARS:
+            return primary
+
+        # Tier 2: Tavily Extract (uses existing TAVILY_API_KEY)
+        if os.getenv("TAVILY_API_KEY", "").strip():
+            tavily_text = await self._tavily_extract(url)
+            if tavily_text and len(tavily_text) >= _MIN_USEFUL_CHARS:
+                logger.info("Extraction fallback: tavily for %s", url,
+                            extra={"component": "extractor"})
+                self.fallback_counts["tavily"] += 1
+                return tavily_text
+
+        # Tier 3: Jina AI Reader (no key, ~1M tokens/mo free)
+        jina_text = await self._jina_read(url)
+        if jina_text:
+            logger.info("Extraction fallback: jina for %s", url,
+                        extra={"component": "extractor"})
+            self.fallback_counts["jina"] += 1
+            return jina_text
+
+        # All fallbacks failed — surface whatever (possibly short) text we got.
+        return primary or None
+
+    @retry(
+        wait=wait_exponential(multiplier=1, min=2, max=10),
+        stop=stop_after_attempt(3),
+        retry=retry_if_exception_type((httpx.TimeoutException, httpx.ConnectError)),
+        reraise=True,
+    )
     async def _fetch_and_extract(self, url: str) -> Optional[str]:
+        # S2 fix: SSRF guard — refuse non-http(s) schemes and private/metadata IPs.
+        if not _is_safe_url(url):
+            logger.warning(
+                "Refusing unsafe URL (SSRF guard) %s", url,
+                extra={"component": "extractor"},
+            )
+            return None
         try:
             resp = await self._client.get(url)
             resp.raise_for_status()
@@ -69,12 +253,7 @@ class Extractor:
             logger.warning("Fetch failed %s: %s", url, e, extra={"component": "extractor"})
             return None
 
-        text = trafilatura.extract(
-            html,
-            favor_precision=True,
-            output_format="txt",
-            include_comments=False,
-        )
+        text = await self._extract_with_fallbacks(url, html)
         return text or None
 
     async def extract_all(self, results: list[SearchResult], cancel_token=None) -> dict[str, Optional[str]]:
