@@ -16,7 +16,7 @@ import type {
 
 export type ReasoningEvent = Extract<StreamEvent, { type: "reasoning" }>;
 
-// Forensic-differentiation event payloads (see docs/FORENSIC_DIFFERENTIATION.md).
+// Per-turn forensic event payloads.
 // These shapes mirror the backend constants emitted by the orchestrator.
 export interface HopEvidenceItem {
   hop: number;

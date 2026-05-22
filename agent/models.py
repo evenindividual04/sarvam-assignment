@@ -158,7 +158,7 @@ EVT_PLAN_APPROVAL = "plan_approval"
 # This is the *anti-CoT* counterpart to scripted "Thought: …" / "Action: …"
 # ReAct labels: nothing here is invented at stream time.
 EVT_REASONING = "reasoning"
-# Forensic-differentiation events (see docs/FORENSIC_DIFFERENTIATION.md).
+# Per-turn forensic events.
 # Mechanical, not LLM-narrated: `hop_evidence` and `source_contribution` are
 # computed deterministically from selected chunks + planner success_criteria
 # (+ tiktoken counts). `source_role` is the ONLY one that calls an LLM, and

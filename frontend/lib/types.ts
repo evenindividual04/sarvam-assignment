@@ -48,7 +48,7 @@ export type TypedEventName =
   //   - "evidence_gap"          — a planner sub-query yielded no usable evidence
   | "clarification_offered"
   | "evidence_gap"
-  // Forensic-differentiation events (see docs/FORENSIC_DIFFERENTIATION.md).
+  // Per-turn forensic events.
   //   - "hop_evidence"        — newly-grounded tokens + still-open criteria per hop
   //   - "source_contribution" — per-URL token-share of final context + citation count
   //   - "source_role"         — LLM-classified role per URL (primary / analysis / …)
@@ -270,9 +270,8 @@ export interface EvidenceGap {
   reason: "no_results" | "all_filtered";
 }
 
-// Forensic-differentiation payload shapes used by `run_metadata`.
-// Mirror the backend constants emitted by the orchestrator (see
-// docs/FORENSIC_DIFFERENTIATION.md).
+// Forensic payload shapes used by `run_metadata`.
+// Mirror the backend constants emitted by the orchestrator.
 export interface RunMetadataHopEvidence {
   hop: number;
   grounded: Array<{
