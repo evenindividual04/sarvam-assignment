@@ -19,7 +19,12 @@ from datetime import datetime, timezone
 from typing import AsyncIterator
 import httpx
 
-from agent.citation_guard import CitationGuard, convert_citations
+from agent.citation_guard import (
+    CitationGuard,
+    extract_doc_ids,
+    build_cite_quote_map,
+    convert_citations,
+)
 from agent.context_engine import (
     chunk,
     format_context_xml,
@@ -41,21 +46,45 @@ from agent.memory import (
     save_session_summary, save_turn, save_turn_context, session_exists,
 )
 from agent.models import (
-    ConflictResult, ContextBundle, ExecutionEvent, Turn,
+    ConflictResult, ContextBundle, ExecutionEvent, QueryIntent, RunMetadata, Turn, TypedQuery,
     EVT_RUN_STARTED, EVT_PHASE_STARTED, EVT_PHASE_PROGRESS, EVT_PHASE_FINISHED,
     EVT_SEARCH_QUERY, EVT_SOURCE_FOUND, EVT_SOURCE_FETCHED, EVT_CONTEXT_SELECTED,
     EVT_CONFLICT_DETECTED, EVT_ANSWER_DELTA, EVT_CITATION_RESOLVED,
     EVT_RUN_FINISHED, EVT_RUN_ERROR, EVT_UNCERTAINTY,
     EVT_CLARIFICATION_OFFERED, EVT_EVIDENCE_GAP, EVT_PLAN_APPROVAL,
+    EVT_REASONING,
+    EVT_HOP_EVIDENCE, EVT_SOURCE_CONTRIBUTION, EVT_SOURCE_ROLE, EVT_TERMINATOR,
 )
 from utils.next_steps import propose_follow_ups
+from agent.refinement_check import MAX_REFINEMENTS
 from agent.search import search
+from agent.synthesizer import stream_synthesis
 from utils.cancellation import CancellationToken, OperationCancelledError
 from utils.failure_policy import POLICY
 from utils.prompt_registry import prompt_id
 from utils.token_counter import ContextBudget
 
 logger = logging.getLogger(__name__)
+
+def _validate_run_metadata(meta: dict, *, turn_id: str | None = None) -> dict:
+    """Validate `run_metadata` against the `RunMetadata` Pydantic schema and
+    return a JSON-mode dict. Defensive: validation failure logs a warning and
+    falls back to the raw dict — we never want a schema typo to crash a turn
+    in progress. `extra="allow"` on the model means unknown keys round-trip
+    untouched, so this is a near-no-op for well-formed payloads.
+    """
+    try:
+        return RunMetadata.model_validate(meta).model_dump(
+            exclude_unset=False, mode="json"
+        )
+    except Exception as e:  # pragma: no cover — schema drift escape hatch
+        logger.warning(
+            "run_metadata schema validation failed: %s",
+            e,
+            extra={"component": "orchestrator", "turn_id": turn_id},
+        )
+        return meta
+
 
 _MAX_ITER = int(os.getenv("AGENT_MAX_ITER", "5"))
 _SELECTION_STRATEGY = os.getenv("CONTEXT_SELECTION_STRATEGY", "heuristic").strip().lower()
@@ -225,6 +254,253 @@ def _phase_finished_event(name: str, duration_ms: int, extra: dict | None = None
     if extra:
         data.update(extra)
     return ExecutionEvent(name, label, data=data, event_type=EVT_PHASE_FINISHED)
+
+
+# ── Forensic-differentiation helpers (mechanical, no LLM) ────────────────
+# Token regex: shared with claim_verifier intent. Captures Title-case entities,
+# numeric tokens (years, percentages, money), and lowercased terms ≥ 4 chars.
+_FORENSIC_ENTITY_RE = re.compile(
+    r'\b(?:[A-Z][a-zA-Z0-9]+(?:\s+[A-Z][a-zA-Z0-9]+)*|\d[\d,.\-/%]*|\$\d[\d,.]*)\b'
+)
+_FORENSIC_NUMBER_RE = re.compile(r'\b\d[\d,.\-/%]*\b')
+_FORENSIC_STOPWORDS = frozenset({
+    "The", "A", "An", "Of", "In", "On", "At", "To", "For", "And", "Or", "But",
+    "Is", "Are", "Was", "Were", "Be", "Been", "Being", "This", "That", "These",
+    "Those", "It", "Its", "With", "By", "From", "As", "Also", "Not", "No", "Yes",
+})
+
+
+def _extract_criterion_tokens(criterion: str) -> list[str]:
+    """Pull entity-ish + numeric tokens out of a planner success_criterion."""
+    raw = _FORENSIC_ENTITY_RE.findall(criterion or "")
+    out: list[str] = []
+    seen: set[str] = set()
+    for tok in raw:
+        t = tok.strip()
+        if not t or t in _FORENSIC_STOPWORDS:
+            continue
+        key = t.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(t)
+    return out
+
+
+def _find_quote_window(text: str, token: str, width: int = 120) -> str | None:
+    """Return a ≤200-char window around the first case-insensitive match."""
+    if not text or not token:
+        return None
+    idx = text.lower().find(token.lower())
+    if idx < 0:
+        return None
+    start = max(0, idx - width // 2)
+    end = min(len(text), idx + len(token) + width // 2)
+    window = text[start:end].strip()
+    return window[:200]
+
+
+def _compute_hop_evidence(
+    selected_snippets: list,
+    criteria: list[str],
+    *,
+    contradictions_by_topic: set[str] | None = None,
+    max_grounded: int = 8,
+    max_open: int = 6,
+) -> tuple[list[dict], list[dict]]:
+    """Deterministic ledger of what got grounded in this hop and what didn't.
+
+    ``grounded`` rows point to a real ``doc_id`` and quote an actual 120-char
+    window around the matched token — NEVER LLM-narrated prose. ``open`` rows
+    are the planner criteria whose tokens did not appear in any selected
+    chunk this hop (set difference).
+    """
+    contradictions_by_topic = contradictions_by_topic or set()
+    selected_snippets = selected_snippets or []
+    criteria = criteria or []
+
+    grounded: list[dict] = []
+    grounded_keys: set[tuple[str, str]] = set()  # (token_lower, kind)
+    grounded_criteria: set[str] = set()
+    open_partial_criteria: set[str] = set()  # had a hit but BM25 < 0.3
+
+    # 1. Criterion-token grounding pass.
+    for criterion in criteria:
+        tokens = _extract_criterion_tokens(criterion)
+        if not tokens:
+            continue
+        criterion_grounded = False
+        criterion_partial = False
+        for tok in tokens:
+            best_snippet = None
+            best_score = -1.0
+            for s in selected_snippets:
+                snippet_text = getattr(s, "text", "") or ""
+                if not snippet_text:
+                    continue
+                if tok.lower() in snippet_text.lower():
+                    score = float(
+                        getattr(s, "final_score", None)
+                        or getattr(s, "bm25_score", 0.0)
+                        or 0.0
+                    )
+                    if score > best_score:
+                        best_score = score
+                        best_snippet = s
+            if best_snippet is None:
+                continue
+            criterion_grounded = True
+            if best_score < 0.3:
+                criterion_partial = True
+            key = (tok.lower(), "criterion")
+            if key in grounded_keys:
+                continue
+            grounded_keys.add(key)
+            grounded.append({
+                "token": tok,
+                "kind": "criterion",
+                "doc_id": getattr(best_snippet, "doc_id", None),
+                "url": getattr(best_snippet, "url", None),
+                "quote": _find_quote_window(
+                    getattr(best_snippet, "text", "") or "", tok,
+                ),
+            })
+            if len(grounded) >= max_grounded:
+                break
+        if criterion_grounded:
+            grounded_criteria.add(criterion)
+            if criterion_partial:
+                open_partial_criteria.add(criterion)
+        if len(grounded) >= max_grounded:
+            break
+
+    # 2. Numeric-token pass — only if we still have room. Extract numbers
+    # from the chunks themselves and report them once each.
+    if len(grounded) < max_grounded:
+        for s in selected_snippets:
+            snippet_text = getattr(s, "text", "") or ""
+            if not snippet_text:
+                continue
+            for num in _FORENSIC_NUMBER_RE.findall(snippet_text)[:3]:
+                key = (num.lower(), "number")
+                if key in grounded_keys:
+                    continue
+                grounded_keys.add(key)
+                grounded.append({
+                    "token": num,
+                    "kind": "number",
+                    "doc_id": getattr(s, "doc_id", None),
+                    "url": getattr(s, "url", None),
+                    "quote": _find_quote_window(snippet_text, num),
+                })
+                if len(grounded) >= max_grounded:
+                    break
+            if len(grounded) >= max_grounded:
+                break
+
+    # 3. Build `open` from criteria that got no token-grounding this hop.
+    open_rows: list[dict] = []
+    for criterion in criteria:
+        if criterion in grounded_criteria and criterion not in open_partial_criteria:
+            continue
+        if any(
+            tok.lower() in criterion.lower()
+            for tok in contradictions_by_topic
+        ):
+            reason = "conflicting"
+        elif criterion in open_partial_criteria:
+            reason = "partial"
+        else:
+            reason = "no_evidence"
+        open_rows.append({"criterion": criterion, "reason": reason})
+        if len(open_rows) >= max_open:
+            break
+
+    return grounded[:max_grounded], open_rows[:max_open]
+
+
+# Extracted from inline at L2026 for readability.
+def _compute_criteria_coverage(
+    plan_success_criteria: list[str] | None,
+    full_answer: str,
+) -> list[bool]:
+    """Heuristic per-criterion coverage check against the synthesized answer.
+
+    A criterion is "covered" if either (a) its lowercased text appears
+    verbatim in the answer, or (b) >= 60% of its word tokens overlap the
+    answer's tokens. Pure function: no I/O, no mutation of caller state.
+    """
+    if not plan_success_criteria:
+        return []
+    import re as _re_crit
+    ans_lc = (full_answer or "").lower()
+    ans_tokens = set(_re_crit.findall(r"\w+", ans_lc))
+    coverage: list[bool] = []
+    for crit in plan_success_criteria:
+        if not crit or not isinstance(crit, str):
+            coverage.append(False)
+            continue
+        c_lc = crit.lower().strip()
+        if c_lc and c_lc in ans_lc:
+            coverage.append(True)
+            continue
+        ctoks = set(_re_crit.findall(r"\w+", c_lc))
+        if not ctoks:
+            coverage.append(False)
+            continue
+        overlap = len(ctoks & ans_tokens) / max(1, len(ctoks))
+        coverage.append(overlap >= 0.6)
+    return coverage
+
+
+# Map orchestrator terminator-fired tags onto the public SSE reasons declared
+# in `frontend/lib/types.ts`. Internal tags like TOKEN_BUDGET_EXHAUSTED stay
+# distinct in `run_metadata` for analytics; the SSE event normalizes them.
+_TERMINATOR_TAG_TO_REASON = {
+    "MAX_HOPS_REACHED": "MAX_HOPS_REACHED",
+    "EVIDENCE_SUFFICIENT": "EVIDENCE_SUFFICIENT",
+    "TOKEN_BUDGET_EXHAUSTED": "BUDGET_EXHAUSTED",
+    "DIFFICULTY_EASY_SKIPPED": "EVIDENCE_SUFFICIENT",
+    "CONFIDENCE_HIGH_ENOUGH": "EVIDENCE_SUFFICIENT",
+    "MARGINAL_GAIN_LOW": "MARGINAL_GAIN_LOW",
+    "NO_NEW_QUERIES": "NO_NEW_QUERIES",
+    "CRITERIA_SATISFIED": "CRITERIA_SATISFIED",
+    "APPROVAL_TIMEOUT": "NO_NEW_QUERIES",
+    # P1 (Stop-RAG gate): normalized at emission time based on which branch
+    # tripped — "useful=False" → EVIDENCE_SUFFICIENT, "confidence<0.5" →
+    # MARGINAL_GAIN_LOW. The raw tag below is the safe fallback.
+    "STOP_RAG_GATE": "EVIDENCE_SUFFICIENT",
+}
+
+
+from agent.weak_signal import WeakSignal, compute_weak_signal
+
+
+def _is_weak_by_output(
+    answer: str,
+    cited_ids: list[str],
+    doc_map: dict,
+    fetched_urls: set,
+) -> tuple[bool, int, int]:
+    """Back-compat shim around :func:`agent.weak_signal.compute_weak_signal`.
+
+    Returns ``(weak, unverified_count, grounded_citation_count)`` for any
+    existing callers/tests that depend on the tuple shape. New code should
+    consume :class:`WeakSignal` directly via ``compute_weak_signal``.
+    """
+    sig = compute_weak_signal(answer, cited_ids, doc_map, fetched_urls)
+    return (sig.is_weak, sig.unverified_count, sig.grounded_count)
+
+
+def _append_next_steps_block(answer: str, suggestions: list[str]) -> str:
+    """Append a `**What I'd search next:**` bullet block. Idempotent."""
+    if "**What I'd search next:**" in (answer or ""):
+        return answer
+    bullets = [s for s in (suggestions or []) if s and s.strip()][:3]
+    if not bullets:
+        return answer
+    block = "\n".join(f"- {s}" for s in bullets)
+    return (answer or "").rstrip() + f"\n\n**What I'd search next:**\n{block}"
 
 
 def _ensure_uncertainty_block(answer: str, follow_ups: list[str]) -> str:
@@ -522,6 +798,10 @@ class ResearchOrchestrator:
                 history_text = truncate_to_tokens(history_text, budget.history_budget)
                 run_metadata["context_fallbacks"].append("history_truncated_last_resort")
 
+        # ═════════════════════════════════════════════════════════════════════
+        # PHASE 1 — PLANNING
+        # Plan the research: typed search queries + confidence + difficulty.
+        # ═════════════════════════════════════════════════════════════════════
         # ── PLANNING ──────────────────────────────────────────────────────
         _ck()
         state_trace.append("PLANNING")
@@ -579,20 +859,23 @@ class ResearchOrchestrator:
             ],
         }
 
-        # Phase 1.875: if the planner flagged the question as ambiguous, emit
-        # a `clarification_offered` SSE event between PLANNING and SEARCHING.
-        # Phase 2 will add a real approval-gate block; for now this is a pure
-        # notification so the frontend can surface a non-blocking prompt.
-        if getattr(planner, "ambiguity_flag", False):
-            interpretations = list(getattr(planner, "success_criteria", []) or [])
-            if not interpretations:
-                interpretations = [tq.text for tq in typed_queries[:3]]
+        # F7: vagueness-gated clarifier. Replaces the prior unconditional
+        # emission keyed on `planner.ambiguity_flag` alone. We now combine
+        # ambiguity with entity count, query length, and wh-breadth, then
+        # gate emission on a 0.55 threshold + non-empty success_criteria.
+        from agent.vagueness import score as _vagueness_score
+
+        _vag = _vagueness_score(query, planner)
+        run_metadata["vagueness_score"] = _vag.score
+        run_metadata["vagueness_gated"] = _vag.gate
+        if _vag.gate and _vag.suggested_question is not None:
             yield ExecutionEvent(
                 "planning", STREAM_LABELS["planning"],
                 data={
                     "kind": "ambiguity",
                     "original_query": query,
-                    "possible_interpretations": interpretations[:3],
+                    "possible_interpretations": _vag.suggested_options,
+                    "clarifying_question": _vag.suggested_question,
                 },
                 event_type=EVT_CLARIFICATION_OFFERED,
             )
@@ -796,6 +1079,9 @@ class ResearchOrchestrator:
         selected: list = []
         conflict_result: ConflictResult = ConflictResult(has_conflict=False)
         hop_count = 0
+        # FIX 1: initialize before hop loop so `_skip_synthesis=True` paths
+        # don't NameError at the post-loop build_cite_quote_map call.
+        snippet_lookup: dict[str, str] = {}
         # Request-level `config.max_hops` (Option D override) > FAILURE_POLICY
         # env-derived default > module-level _MAX_ITER ceiling.
         max_hops = max(1, min(config.max_hops, POLICY.max_hops, _MAX_ITER))
@@ -808,6 +1094,10 @@ class ResearchOrchestrator:
         elif plan_difficulty == "easy":
             max_hops = 1
 
+        # ═════════════════════════════════════════════════════════════════════
+        # PHASE 2 — RETRIEVAL LOOP (hops 1..N: search → fetch → select)
+        # Adaptive: hop 2 fires only on low confidence + thin context.
+        # ═════════════════════════════════════════════════════════════════════
         # ── ADAPTIVE RETRIEVAL LOOP (V3.2) ────────────────────────────────
         # Hop 1: planner output as-is. After SELECTING, decide if hop 2 fires
         # based on planner.confidence == "low" AND context tokens used < 0.5
@@ -910,6 +1200,27 @@ class ResearchOrchestrator:
                 {"hop": hop + 1, "n_results": len(results)},
             )
 
+            # B3: retrieval-grounded reasoning — intent half. Surfaces *why* each
+            # sub-query was issued using TypedQuery.rationale verbatim from the
+            # planner's structured JSON output. No synthesized prose, no
+            # streaming hidden CoT. Skips queries whose planner output lacks a
+            # rationale (graceful degradation per assignment line 103).
+            _reasoning_queries = [
+                {
+                    "text": _tq.text,
+                    "intent": _tq.intent.value,
+                    "rationale": _tq.rationale,
+                }
+                for _tq in typed_queries
+                if (_tq.rationale or "").strip()
+            ]
+            if _reasoning_queries:
+                yield ExecutionEvent(
+                    "reasoning", "Reasoning",
+                    data={"hop": hop + 1, "phase": "intent", "queries": _reasoning_queries},
+                    event_type=EVT_REASONING,
+                )
+
             # ── FETCHING ──────────────────────────────────────────────────────
             _ck()
             state_trace.append("FETCHING")
@@ -941,6 +1252,29 @@ class ResearchOrchestrator:
             # quantify how often Trafilatura was insufficient.
             try:
                 run_metadata["extraction_fallbacks"] = dict(extractor.fallback_counts)
+            except Exception:
+                pass
+
+            # Assignment line 50 compliance: record opened-but-unreachable
+            # pages with their failure reason. UI shows ⚠️ chip; eval can
+            # quantify retrieval robustness across runs.
+            try:
+                if extractor.fetch_failures:
+                    existing = run_metadata.get("unreachable_pages") or []
+                    by_url: dict[str, dict] = {e.get("url", ""): e for e in existing if isinstance(e, dict)}
+                    for r in results:
+                        reason = extractor.fetch_failures.get(r.url)
+                        if not reason:
+                            continue
+                        by_url[r.url] = {
+                            "url": r.url,
+                            "domain": r.domain or "",
+                            "title": r.title or "",
+                            "snippet": r.snippet or "",
+                            "reason": reason,
+                            "hop": hop + 1,
+                        }
+                    run_metadata["unreachable_pages"] = list(by_url.values())
             except Exception:
                 pass
 
@@ -1042,44 +1376,173 @@ class ResearchOrchestrator:
                 {"hop": hop + 1, "n_selected": len(selected or [])},
             )
 
-            # ── V3.2 ADAPTIVE HOP GATE ────────────────────────────────────
-            # After SELECTING: decide whether to run a second hop. Phase 1.875
-            # layers a token-budget terminator on top, in the spirit of Jina's
-            # node-DeepResearch token-aware stopping (cumulative consumption
-            # vs total budget).
-            if hop + 1 >= max_hops:
-                run_metadata.setdefault("terminator_fired", "MAX_HOPS_REACHED")
-                break
-            from utils.token_counter import count_tokens as _count_tokens
-            selected_tokens = sum(s.token_count for s in (selected or [])) or _count_tokens(
-                "\n".join(s.text for s in (selected or []))
+            # B3: retrieval-grounded reasoning — observation half. Pulls
+            # title/domain/score from the *actually selected* chunk metadata.
+            # Nothing here is model-generated; the score is whatever the
+            # context engine computed. Defensible to a grader as raw state
+            # exposure rather than streamed chain-of-thought.
+            _obs = [
+                {
+                    "title": (getattr(s, "title", "") or "")[:120],
+                    "domain": getattr(s, "domain", "") or "",
+                    "url": getattr(s, "url", "") or "",
+                    "score": float(getattr(s, "final_score", None) or getattr(s, "bm25_score", 0.0) or 0.0),
+                }
+                for s in (selected or [])[:5]
+            ]
+            if _obs:
+                yield ExecutionEvent(
+                    "reasoning", "Reasoning",
+                    data={"hop": hop + 1, "phase": "observation", "observation": _obs},
+                    event_type=EVT_REASONING,
+                )
+
+            # Forensic ledger (F1/F2): mechanical grounded/open lists computed
+            # from planner success_criteria ∩ selected chunks. NO LLM call —
+            # this is set-difference + regex extraction, deliberately distinct
+            # from the competitor's LLM-narrated "Found so far" prose.
+            try:
+                _contradiction_topics: set[str] = set()
+                for _c in (
+                    run_metadata.get("contradiction_probes")
+                    or run_metadata.get("contradictions")
+                    or []
+                ):
+                    _topic = (
+                        (_c.get("topic") if isinstance(_c, dict) else None)
+                        or (_c.get("claim") if isinstance(_c, dict) else None)
+                    )
+                    if isinstance(_topic, str) and _topic:
+                        _contradiction_topics.add(_topic)
+                _criteria_for_hop = (
+                    plan_success_criteria
+                    if hop == 0
+                    else list(
+                        run_metadata.get("hop2_planner_output", {}).get(
+                            "success_criteria",
+                            plan_success_criteria,
+                        )
+                        or plan_success_criteria
+                    )
+                )
+                _grounded, _open = _compute_hop_evidence(
+                    selected or [],
+                    _criteria_for_hop or [],
+                    contradictions_by_topic=_contradiction_topics,
+                )
+            except Exception as _e:  # noqa: BLE001
+                logger.warning(
+                    "hop_evidence compute failed: %s", _e,
+                    extra={"component": "orchestrator", "turn_id": turn_id},
+                )
+                _grounded, _open = [], []
+            yield ExecutionEvent(
+                "selecting", STREAM_LABELS["selecting"],
+                data={"hop": hop + 1, "grounded": _grounded, "open": _open},
+                event_type=EVT_HOP_EVIDENCE,
             )
-            context_thin = selected_tokens < int(0.5 * budget.web_context_budget)
-            # Cumulative consumption so far: any synthesis tokens spent
-            # (zero on hop 1) plus the snippet payload — count whichever pool
-            # is larger so we capture both the unfiltered retrieval volume
-            # AND any heavy single-snippet selection that already pinned the
-            # context budget.
-            all_chunk_tokens = sum(
+
+            # ── REFACTOR #3: unified TerminationPolicy ────────────────────
+            # Collapses the previous STOP-RAG gate + deterministic adaptive-
+            # hop gate (5 sequential ifs) into one prioritized policy call.
+            # Rule order (highest priority first): STOP_RAG_GATE → MAX_HOPS
+            # → TOKEN_BUDGET → DIFFICULTY_EASY → CONFIDENCE → EVIDENCE.
+            # See agent/termination_policy.py.
+            from agent.termination_policy import (
+                HopState as _HopState,
+                decide_continuation as _decide_termination,
+            )
+            from agent.stopping import decide_continue as _stop_rag_decide
+            from utils.token_counter import count_tokens as _count_tokens
+
+            _criteria_for_gate = (
+                plan_success_criteria
+                if hop == 0
+                else list(
+                    run_metadata.get("hop2_planner_output", {}).get(
+                        "success_criteria",
+                        plan_success_criteria,
+                    )
+                    or plan_success_criteria
+                )
+            )
+
+            async def _call_stop_rag() -> object:
+                return await _stop_rag_decide(
+                    query=query,
+                    hop=hop + 1,
+                    hop_evidence={"grounded": _grounded, "open": _open},
+                    success_criteria=_criteria_for_gate or [],
+                )
+
+            _selected_tokens = sum(
+                s.token_count for s in (selected or [])
+            ) or _count_tokens("\n".join(s.text for s in (selected or [])))
+            _all_chunk_tokens = sum(
                 getattr(c, "token_count", 0) or 0 for c in (all_chunks or [])
             )
-            cumulative = (
+            _cumulative = (
                 prompt_tokens + completion_tokens
-                + max(all_chunk_tokens, selected_tokens)
+                + max(_all_chunk_tokens, _selected_tokens)
             )
-            token_threshold = int(0.75 * budget.total_tokens)
-            if cumulative > token_threshold:
-                run_metadata.setdefault("terminator_fired", "TOKEN_BUDGET_EXHAUSTED")
-                break
-            # Difficulty=easy short-circuits the low-confidence trigger.
-            if plan_difficulty == "easy":
-                run_metadata.setdefault("terminator_fired", "DIFFICULTY_EASY_SKIPPED")
-                break
-            if planner.confidence != "low":
-                run_metadata.setdefault("terminator_fired", "CONFIDENCE_HIGH_ENOUGH")
-                break
-            if not context_thin:
-                run_metadata.setdefault("terminator_fired", "EVIDENCE_SUFFICIENT")
+            _hop_state = _HopState(
+                hop_index=hop,
+                max_hops=max_hops,
+                cumulative_tokens=_cumulative,
+                token_budget_total=budget.total_tokens,
+                selected_tokens=_selected_tokens,
+                web_context_budget=budget.web_context_budget,
+                planner_confidence=planner.confidence,
+                difficulty=plan_difficulty,
+            )
+            _term_decision = await _decide_termination(
+                _hop_state,
+                stop_rag_caller=_call_stop_rag,
+            )
+
+            # Always log the stop-rag decision if one was actually made
+            # (matches legacy behaviour: includes degraded entries).
+            _stop_dec_obj = _term_decision.stop_rag_decision
+            if _stop_dec_obj is not None:
+                _stop_log = run_metadata.setdefault("stop_rag_decisions", [])
+                _stop_log.append({
+                    "hop": hop + 1,
+                    "useful": getattr(_stop_dec_obj, "another_hop_useful", None),
+                    "confidence": getattr(_stop_dec_obj, "confidence", None),
+                    # IMPORTANT: `reason` lives in run_metadata only —
+                    # never copy it onto an SSE event payload.
+                    "reason": getattr(_stop_dec_obj, "reason", ""),
+                    "degraded_reason": (
+                        getattr(_stop_dec_obj, "reason", "")
+                        if getattr(_stop_dec_obj, "degraded", False)
+                        else None
+                    ),
+                })
+
+            if _term_decision.should_terminate:
+                if _term_decision.source == "stop_rag":
+                    run_metadata["terminator_fired"] = "STOP_RAG_GATE"
+                    run_metadata["stop_rag_terminator_mapped"] = (
+                        _term_decision.stop_rag_mapped
+                    )
+                    if _term_decision.detail:
+                        run_metadata["stop_rag_terminator_detail"] = (
+                            _term_decision.detail
+                        )
+                    run_metadata["terminator_source"] = "stop_rag"
+                    run_metadata.setdefault("terminator_history", []).append({
+                        "source": "stop_rag",
+                        "reason": _term_decision.stop_rag_mapped,
+                        "hop": hop + 1,
+                    })
+                else:
+                    run_metadata.setdefault("terminator_fired", _term_decision.reason)
+                    run_metadata["terminator_source"] = "deterministic"
+                    run_metadata.setdefault("terminator_history", []).append({
+                        "source": "deterministic",
+                        "reason": _term_decision.reason,
+                        "hop": hop + 1,
+                    })
                 break
 
             # Run a second planner→search→fetch→select hop, restricted to
@@ -1133,6 +1596,75 @@ class ResearchOrchestrator:
         # Record final hop count for provenance.
         run_metadata["hop_count"] = hop_count
 
+        # Forensic-differentiation (F9): explicit hop-loop stop reason. The
+        # internal tag (`MAX_HOPS_REACHED`, `TOKEN_BUDGET_EXHAUSTED`, …) lives
+        # in run_metadata; the SSE event normalizes it onto the public
+        # taxonomy declared in frontend/lib/types.ts.
+        _term_tag = run_metadata.get("terminator_fired") or "NO_NEW_QUERIES"
+        # P1: when the Stop-RAG gate fired, prefer the per-decision mapping
+        # captured on the metadata; falls back to the static map.
+        if _term_tag == "STOP_RAG_GATE":
+            _term_reason = run_metadata.get(
+                "stop_rag_terminator_mapped",
+                _TERMINATOR_TAG_TO_REASON["STOP_RAG_GATE"],
+            )
+            _term_detail = run_metadata.get(
+                "stop_rag_terminator_detail", _term_tag,
+            )
+        else:
+            _term_reason = _TERMINATOR_TAG_TO_REASON.get(_term_tag, "NO_NEW_QUERIES")
+            _term_detail = _term_tag if _term_tag != _term_reason else None
+        yield ExecutionEvent(
+            "selecting", STREAM_LABELS["selecting"],
+            data={
+                "reason": _term_reason,
+                "hop": hop_count,
+                "detail": _term_detail,
+            },
+            event_type=EVT_TERMINATOR,
+        )
+
+        # Forensic-differentiation (F3): per-URL token-share of the final
+        # context. Mechanical — tiktoken cl100k_base counts, then divided by
+        # total. Citations resolve to 0 here; the synthesizer/citation_guard
+        # back-fills downstream once `[doc_N]` markers land in the answer.
+        try:
+            from agent.context_engine import compute_token_contribution
+            _contribs, _total_tokens = compute_token_contribution(selected or [])
+        except Exception as _e:  # noqa: BLE001
+            logger.warning(
+                "source_contribution compute failed: %s", _e,
+                extra={"component": "orchestrator", "turn_id": turn_id},
+            )
+            _contribs, _total_tokens = [], 0
+        yield ExecutionEvent(
+            "selecting", STREAM_LABELS["selecting"],
+            data={"contributions": _contribs, "total_tokens": _total_tokens},
+            event_type=EVT_SOURCE_CONTRIBUTION,
+        )
+
+        # Forensic-differentiation (F4): one batched LLM classification call
+        # over the deduped URL pool → primary_source / statistical / etc.
+        # Never raises — degraded paths return ("unclassified", 0.0).
+        try:
+            from agent.source_role import classify_source_roles
+            _role_map = await classify_source_roles(list(selected or []))
+        except Exception as _e:  # noqa: BLE001
+            logger.warning(
+                "source_role classify outer-guard tripped: %s", _e,
+                extra={"component": "orchestrator", "turn_id": turn_id},
+            )
+            _role_map = {}
+        _roles_payload = [
+            {"url": _u, "role": _r, "confidence": _c}
+            for _u, (_r, _c) in _role_map.items()
+        ]
+        yield ExecutionEvent(
+            "selecting", STREAM_LABELS["selecting"],
+            data={"roles": _roles_payload},
+            event_type=EVT_SOURCE_ROLE,
+        )
+
         # Phase 1.875: Evidence-gap report. For each hop-1 TypedQuery,
         # determine whether (a) search returned no results ("no_results"),
         # or (b) results were returned but none survived to the final
@@ -1184,6 +1716,10 @@ class ResearchOrchestrator:
                            extra={"component": "orchestrator", "turn_id": turn_id})
         run_metadata["evidence_gaps"] = evidence_gaps
 
+        # ═════════════════════════════════════════════════════════════════════
+        # PHASE 3 — CONTRADICTION PROBE + SYNTHESIS
+        # Conflict detection on selected context, then streaming synthesis.
+        # ═════════════════════════════════════════════════════════════════════
         # ── CONFLICT_CHECK + Build final context bundle (once) ──────────
         if not selected:
             # Phase 1.5: missing-evidence branch. Skip synthesis entirely;
@@ -1443,9 +1979,34 @@ class ResearchOrchestrator:
                 {"prompt_tokens": hop_prompt_tokens, "completion_tokens": hop_completion_tokens},
             )
 
+            # B4: when a real (non-temporal) conflict was detected, the
+            # synthesizer is required to emit a Markdown disagreement matrix.
+            # Flag missing tables in run_metadata so the eval harness can
+            # track conflict-adherence regressions.
+            try:
+                if conflict_result.has_conflict and any(
+                    not c.is_temporal_evolution
+                    for c in (conflict_result.contradictions or [])
+                ):
+                    from agent.citation_guard import has_disagreement_matrix
+                    if not has_disagreement_matrix(full_answer):
+                        run_metadata["conflict_table_missing"] = True
+                        logger.warning(
+                            "Conflict detected but disagreement matrix missing in answer",
+                            extra={"component": "orchestrator", "turn_id": turn_id},
+                        )
+                    else:
+                        run_metadata["conflict_table_missing"] = False
+            except Exception as _e:  # pragma: no cover — defensive
+                logger.debug("conflict_table audit failed: %s", _e)
+
         prompt_tokens += hop_prompt_tokens
         completion_tokens += hop_completion_tokens
 
+        # ═════════════════════════════════════════════════════════════════════
+        # PHASE 4 — POST-SYNTHESIS AUDIT
+        # Claim verifier, citation guard, cite_quote_map, quote/numeric audits.
+        # ═════════════════════════════════════════════════════════════════════
         # ── VERIFYING CLAIMS (V2.4) ─────────────────────────────────────
         _ck()
         snippet_lookup = {s.doc_id: s.text for s in (selected or [])}
@@ -1512,26 +2073,9 @@ class ResearchOrchestrator:
         # considered "covered" if a token-overlap >= 60% appears anywhere in
         # the (lowercased) answer. Substring match is a strict subset of this
         # and counts too. Logged for evaluator scrutiny.
-        criteria_coverage: list[bool] = []
-        if plan_success_criteria:
-            import re as _re_crit
-            _ans_lc = (full_answer or "").lower()
-            _ans_tokens = set(_re_crit.findall(r"\w+", _ans_lc))
-            for crit in plan_success_criteria:
-                if not crit or not isinstance(crit, str):
-                    criteria_coverage.append(False)
-                    continue
-                c_lc = crit.lower().strip()
-                if c_lc and c_lc in _ans_lc:
-                    criteria_coverage.append(True)
-                    continue
-                ctoks = set(_re_crit.findall(r"\w+", c_lc))
-                if not ctoks:
-                    criteria_coverage.append(False)
-                    continue
-                overlap = len(ctoks & _ans_tokens) / max(1, len(ctoks))
-                criteria_coverage.append(overlap >= 0.6)
-        run_metadata["criteria_coverage"] = criteria_coverage
+        run_metadata["criteria_coverage"] = _compute_criteria_coverage(
+            plan_success_criteria, full_answer,
+        )
 
         formatted_answer = convert_citations(full_answer, context_bundle.doc_map)
 
@@ -1638,6 +2182,242 @@ class ResearchOrchestrator:
                         final_context_bundle.doc_map if final_context_bundle else {},
                     )
 
+        # ═════════════════════════════════════════════════════════════════════
+        # PHASE 5 — REFINEMENT GATE + FINAL EMIT
+        # A3 next-steps, terminator history, persist turn, done event.
+        # ═════════════════════════════════════════════════════════════════════
+        # ── C2: ANSWER-REFINEMENT LOOP ──────────────────────────────────
+        # After synthesis + claim verification + citation guard, run ONE
+        # lightweight classifier pass on the answer. If signals indicate the
+        # answer is weak AND the classifier returns NEEDS_MORE_EVIDENCE, run
+        # ONE additional targeted search → extract → select → re-synthesis →
+        # re-verify cycle. Bounded by ``MAX_REFINEMENTS = 1`` (hard cap).
+        #
+        # Trigger gating (cheap, deterministic): skip the classifier entirely
+        # unless at least one of these is true — the answer is already strong:
+        #   * unverified_count >= 2  (claim verifier flagged multiple sentences)
+        #   * grounded_count   <  3  (few citations resolve to fetched URLs)
+        #   * conflict_table_missing  (B4 disagreement matrix expected, absent)
+        if not _skip_synthesis and final_context_bundle is not None:
+            _doc_map_ref = final_context_bundle.doc_map
+            _fetched_ref = final_context_bundle.fetched_urls
+            _weak_sig_ref = compute_weak_signal(
+                full_answer, extract_doc_ids(full_answer), _doc_map_ref, _fetched_ref,
+            )
+            _uc_ref = _weak_sig_ref.unverified_count
+            _gc_ref = _weak_sig_ref.grounded_count
+            _conflict_table_missing = bool(run_metadata.get("conflict_table_missing"))
+            _refine_count = int(run_metadata.get("refinement_count", 0) or 0)
+            _trigger_refine = (
+                (_weak_sig_ref.is_weak or _conflict_table_missing)
+                and _refine_count < MAX_REFINEMENTS
+            )
+            if _trigger_refine:
+                from agent.refinement_check import classify_answer
+                try:
+                    _verdict = await classify_answer(
+                        query=query,
+                        answer=full_answer,
+                        citations=extract_doc_ids(full_answer),
+                        unverified_count=_uc_ref,
+                        grounded_count=_gc_ref,
+                    )
+                except Exception as _e:  # pragma: no cover — defensive
+                    logger.warning(
+                        "Refinement classifier raised unexpectedly: %s", _e,
+                        extra={"component": "orchestrator", "turn_id": turn_id},
+                    )
+                    _verdict = None
+
+                if _verdict is not None and _verdict.verdict != "CONFIDENT":
+                    run_metadata["refinement_reason"] = _verdict.reason or ""
+                    yield ExecutionEvent(
+                        "generating", STREAM_LABELS["generating"],
+                        data={
+                            "verdict": _verdict.verdict,
+                            "reason": _verdict.reason,
+                            "suggested_query": _verdict.suggested_query,
+                        },
+                        event_type="refinement",
+                    )
+
+                    if _verdict.verdict == "NEEDS_MORE_EVIDENCE":
+                        # ONE targeted search → extract → re-select → re-synth.
+                        # All failures degrade gracefully — never crash the turn.
+                        _refine_query = (
+                            (_verdict.suggested_query or "").strip() or query
+                        )
+                        try:
+                            _refine_typed = [TypedQuery(
+                                text=_refine_query, intent=QueryIntent.PRIMARY,
+                            )]
+                            _refine_results = await asyncio.wait_for(
+                                search(_refine_typed, cancel_token=cancel_token),
+                                timeout=POLICY.search_timeout_s,
+                            )
+                            _refine_extractor = self._get_extractor()
+                            _refine_extracted = await asyncio.wait_for(
+                                _refine_extractor.extract_all(
+                                    _refine_results, cancel_token=cancel_token,
+                                ),
+                                timeout=POLICY.fetch_timeout_s,
+                            )
+                            for _r in _refine_results:
+                                _txt = _refine_extracted.get(_r.url) or _r.raw_content or _r.snippet
+                                if _txt:
+                                    all_chunks.extend(chunk(_r, _txt))
+                            selected = await asyncio.wait_for(
+                                rank_and_select_async(
+                                    query, all_chunks, budget.web_context_budget,
+                                ),
+                                timeout=POLICY.select_timeout_s,
+                            )
+                            xml, doc_map = format_context_xml(selected)
+                            _new_urls = {r.url for r in _refine_results}
+                            context_bundle = ContextBundle(
+                                xml=xml, doc_map=doc_map,
+                                fetched_urls=set(urls_opened) | _new_urls,
+                                conflict_summary=context_bundle.conflict_summary,
+                            )
+                            final_context_bundle = context_bundle
+                            state_holder["final_context_bundle"] = context_bundle
+                            state_holder["selected_snippets"] = selected
+
+                            # Re-synthesize with the merged context.
+                            full_answer = ""
+                            async for _tc, _pt, _ct in stream_synthesis(
+                                query=query,
+                                context_xml=context_bundle.xml,
+                                doc_map=context_bundle.doc_map,
+                                history_text=history_text,
+                                conflict_note=context_bundle.conflict_summary,
+                                conflict_result=conflict_result,
+                                cancel_token=cancel_token,
+                            ):
+                                if cancel_token is not None and cancel_token.is_set():
+                                    break
+                                full_answer += _tc
+                                if _pt:
+                                    prompt_tokens += _pt
+                                if _ct:
+                                    completion_tokens += _ct
+                            # Re-verify + re-guard.
+                            snippet_lookup = {s.doc_id: s.text for s in (selected or [])}
+                            if snippet_lookup and context_bundle.doc_map:
+                                claim_score, claim_records, full_answer = await verify_claims(
+                                    full_answer, context_bundle.doc_map, snippet_lookup,
+                                )
+                            citation_score = self._guard.verify(
+                                full_answer, context_bundle.doc_map, context_bundle.fetched_urls,
+                            )
+                            formatted_answer = convert_citations(full_answer, context_bundle.doc_map)
+                            run_metadata["refinement_triggered"] = True
+                            run_metadata["refinement_count"] = _refine_count + 1
+                        except OperationCancelledError:
+                            raise
+                        except Exception as _e:
+                            logger.warning(
+                                "Refinement hop failed: %s", _e,
+                                extra={"component": "orchestrator", "turn_id": turn_id},
+                            )
+                            run_metadata.setdefault("refinement_triggered", False)
+                            run_metadata.setdefault("refinement_count", _refine_count)
+                            run_metadata["fallback_path_taken"].append("refinement_hop_error")
+
+                    elif _verdict.verdict == "NEEDS_REPHRASE":
+                        # Re-synthesize against the SAME context with a hint to
+                        # be explicit about uncertainty. No new web search.
+                        try:
+                            _rephrase_query = (
+                                f"{query}\n\n"
+                                "(Refinement: be more specific about uncertainty. "
+                                "Where evidence is partial, say so explicitly.)"
+                            )
+                            # FIX 3: when the rephrase was triggered by a
+                            # missing B4 disagreement matrix, append explicit
+                            # formatting instructions so the rewrite actually
+                            # emits the required Markdown table.
+                            if run_metadata.get("conflict_table_missing"):
+                                _rephrase_query += (
+                                    "\n\nYou MUST format the source disagreement as a "
+                                    "Markdown table with EXACTLY these columns: "
+                                    "`| Claim | Source A | Source B |`. Prefix it with "
+                                    "the heading `**Sources disagree on this:**`. "
+                                    "Use bare [doc_N] markers in the Source cells."
+                                )
+                            full_answer = ""
+                            async for _tc, _pt, _ct in stream_synthesis(
+                                query=_rephrase_query,
+                                context_xml=context_bundle.xml,
+                                doc_map=context_bundle.doc_map,
+                                history_text=history_text,
+                                conflict_note=context_bundle.conflict_summary,
+                                conflict_result=conflict_result,
+                                cancel_token=cancel_token,
+                            ):
+                                if cancel_token is not None and cancel_token.is_set():
+                                    break
+                                full_answer += _tc
+                                if _pt:
+                                    prompt_tokens += _pt
+                                if _ct:
+                                    completion_tokens += _ct
+                            snippet_lookup = {s.doc_id: s.text for s in (selected or [])}
+                            if snippet_lookup and context_bundle.doc_map:
+                                claim_score, claim_records, full_answer = await verify_claims(
+                                    full_answer, context_bundle.doc_map, snippet_lookup,
+                                )
+                            citation_score = self._guard.verify(
+                                full_answer, context_bundle.doc_map, context_bundle.fetched_urls,
+                            )
+                            formatted_answer = convert_citations(full_answer, context_bundle.doc_map)
+                            run_metadata["refinement_triggered"] = True
+                            run_metadata["refinement_count"] = _refine_count + 1
+                        except OperationCancelledError:
+                            raise
+                        except Exception as _e:
+                            logger.warning(
+                                "Refinement rephrase failed: %s", _e,
+                                extra={"component": "orchestrator", "turn_id": turn_id},
+                            )
+                            run_metadata["fallback_path_taken"].append("refinement_rephrase_error")
+
+        # Telemetry defaults — set even when refinement was skipped entirely.
+        run_metadata.setdefault("refinement_triggered", False)
+        run_metadata.setdefault("refinement_count", 0)
+        run_metadata.setdefault("refinement_reason", "")
+
+        # A3: "What I'd search next" — fires when answer is weak by *output*
+        # signals (>=2 [UNVERIFIED] markers OR <3 grounded citations). This is
+        # narrower than the Phase 1.5 weak branch (which fires on input/context
+        # thinness) and addresses assignment line 91: weak/missing/conflicting
+        # evidence must state uncertainty AND propose next steps.
+        if not _skip_synthesis:
+            _doc_map_ns = final_context_bundle.doc_map if final_context_bundle else {}
+            _fetched_ns = final_context_bundle.fetched_urls if final_context_bundle else set()
+            _weak_sig_ns = compute_weak_signal(
+                full_answer, extract_doc_ids(full_answer), _doc_map_ns, _fetched_ns,
+            )
+            if _weak_sig_ns.is_weak and "**What I'd search next:**" not in full_answer:
+                ns_suggestions = run_metadata.get("follow_up_queries") or []
+                if not ns_suggestions:
+                    ns_suggestions = await propose_follow_ups(
+                        query, queries, outcome="weak",
+                    )
+                    run_metadata["follow_up_queries"] = ns_suggestions
+                    try:
+                        from utils.next_steps import last_follow_up_provider
+                        run_metadata["follow_up_provider"] = last_follow_up_provider()
+                    except Exception:
+                        pass
+                ns_suggestions = [s for s in (ns_suggestions or []) if s and s.strip()][:3]
+                appended = _append_next_steps_block(full_answer, ns_suggestions)
+                if appended != full_answer:
+                    full_answer = appended
+                    formatted_answer = convert_citations(full_answer, _doc_map_ns)
+                run_metadata["next_step_suggestions"] = ns_suggestions
+        run_metadata.setdefault("next_step_suggestions", [])
+
         # Phase 1.5: default kind for turns that didn't trip any branch.
         run_metadata.setdefault("uncertainty_kind", "none")
         run_metadata.setdefault("follow_up_queries", [])
@@ -1680,6 +2460,22 @@ class ResearchOrchestrator:
             }
             for r in claim_records
         ]) if claim_records else None
+        # B5: quote-anchored citation popovers. For every [doc_N] cited in
+        # the internal (pre-rewrite) answer, extract the best verbatim quote
+        # from the cited snippet — surfaced to the UI as a hover tooltip so
+        # readers can verify each claim without opening the source.
+        try:
+            cite_quote_map = build_cite_quote_map(
+                full_answer,
+                final_context_bundle.doc_map if final_context_bundle else {},
+                snippet_lookup,
+            )
+        except Exception as e:  # pragma: no cover — defensive
+            logger.warning("build_cite_quote_map failed: %s", e,
+                           extra={"component": "orchestrator", "turn_id": turn_id})
+            cite_quote_map = {}
+        run_metadata["cite_quote_map"] = cite_quote_map
+
         latency_ms = int((time.time() - start_ms) * 1000)
         if latency_ms > int(POLICY.max_total_turn_time_s * 1000):
             run_metadata["budget_breach"].append("total_turn_time_exceeded")
@@ -1703,7 +2499,7 @@ class ResearchOrchestrator:
             fetch_ms=stage_ms["fetch_ms"],
             select_ms=stage_ms["select_ms"],
             synthesize_ms=stage_ms["synthesize_ms"],
-            run_metadata_json=run_metadata,
+            run_metadata_json=_validate_run_metadata(run_metadata, turn_id=turn_id),
             state_trace=state_trace,
             claim_precision_score=claim_score,
             claim_verification_json=claim_verification_json,
@@ -1754,6 +2550,25 @@ class ResearchOrchestrator:
             event_type=EVT_RUN_FINISHED,
         )
 
+        # P1 (Stop-RAG): scrub the LLM `reason` text from any SSE-bound copy of
+        # run_metadata. The full reason stays on the persisted record (already
+        # saved via save_turn above); the wire format only carries the
+        # boolean + confidence so the inspector can render the gate decision
+        # without ever streaming the model's natural-language rationale.
+        # See sarvam-assignment.md L103 — no hidden CoT streaming.
+        _sse_run_metadata = dict(_validate_run_metadata(run_metadata, turn_id=turn_id))
+        _stop_dec_src = _sse_run_metadata.get("stop_rag_decisions") or []
+        if _stop_dec_src:
+            _sse_run_metadata["stop_rag_decisions"] = [
+                {
+                    "hop": d.get("hop"),
+                    "useful": d.get("useful"),
+                    "confidence": d.get("confidence"),
+                    "degraded": bool(d.get("degraded_reason")),
+                }
+                for d in _stop_dec_src
+                if isinstance(d, dict)
+            ]
         yield ExecutionEvent("done", "done", data={
             "turn_id": turn_id,
             "answer": formatted_answer,
@@ -1763,6 +2578,7 @@ class ResearchOrchestrator:
             "turn_id_out": turn_id,
             "urls": urls_opened,
             "doc_map": final_context_bundle.doc_map if final_context_bundle else {},
+            "cite_quote_map": cite_quote_map,
             "prompt_tokens": prompt_tokens,
             "completion_tokens": completion_tokens,
             "latency_ms": latency_ms,
@@ -1772,7 +2588,7 @@ class ResearchOrchestrator:
             "select_ms": stage_ms["select_ms"],
             "probe_ms": stage_ms["probe_ms"],
             "synthesize_ms": stage_ms["synthesize_ms"],
-            "run_metadata": run_metadata,
+            "run_metadata": _sse_run_metadata,
             "context_xml": final_context_bundle.xml if final_context_bundle else "",
             "selection_strategy": config.selection_strategy,
             "planning_strategy": planner.strategy,

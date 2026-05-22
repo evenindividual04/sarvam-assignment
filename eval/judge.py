@@ -52,6 +52,7 @@ async def _judge_with_provider(prompt: str, provider: str) -> str:
     """
     from openai import AsyncOpenAI
     from utils.provider_router import (
+        _CEREBRAS_ROTATOR,
         _GROQ_ROTATOR,
         _JUDGE_PROVIDERS,
         _extract_retry_after_s,
@@ -62,11 +63,18 @@ async def _judge_with_provider(prompt: str, provider: str) -> str:
         raise ValueError(f"unknown judge provider: {provider}")
     key_env = cfg["api_key_env"]
     is_groq = provider == "groq"
+    is_cerebras = provider == "cerebras"
     api_key: Optional[str] = None
     if is_groq:
         api_key = _GROQ_ROTATOR.next_key()
         if not api_key:
             raise RuntimeError("No GROQ_API_KEY / GROQ_API_KEYS configured")
+    elif is_cerebras:
+        api_key = _CEREBRAS_ROTATOR.next_key()
+        if not api_key:
+            raise RuntimeError(
+                "No CEREBRAS_API_KEY / CEREBRAS_API_KEYS configured"
+            )
     else:
         if not os.environ.get(key_env):
             raise RuntimeError(f"{key_env} not set")
@@ -84,17 +92,25 @@ async def _judge_with_provider(prompt: str, provider: str) -> str:
             temperature=0.0,
         )
     except Exception as e:
-        if is_groq and api_key:
+        if api_key:
             status = getattr(e, "status_code", None) or getattr(
                 getattr(e, "response", None), "status_code", None
             )
             if status == 429:
-                _GROQ_ROTATOR.mark_throttled(
-                    api_key, retry_after_s=_extract_retry_after_s(e)
-                )
+                if is_groq:
+                    _GROQ_ROTATOR.mark_throttled(
+                        api_key, retry_after_s=_extract_retry_after_s(e)
+                    )
+                elif is_cerebras:
+                    _CEREBRAS_ROTATOR.mark_throttled(
+                        api_key, retry_after_s=_extract_retry_after_s(e)
+                    )
         raise
-    if is_groq and api_key:
-        _GROQ_ROTATOR.mark_success(api_key)
+    if api_key:
+        if is_groq:
+            _GROQ_ROTATOR.mark_success(api_key)
+        elif is_cerebras:
+            _CEREBRAS_ROTATOR.mark_success(api_key)
     return (resp.choices[0].message.content or "").strip()
 
 
@@ -121,7 +137,13 @@ async def judge_with_dual_family(prompt: str, metric_name: str) -> dict:
 
     score_key = f"{metric_name}_score"
     primary_provider = os.environ.get("JUDGE_PROVIDER", "groq").lower()
-    secondary_provider = "github" if primary_provider == "groq" else "groq"
+    # Cross-family rotation: pair the primary with a judge from an unrelated
+    # family. github (gpt-4o-mini, OpenAI) is the default secondary for both
+    # groq (Llama) and cerebras (Qwen) primaries. When primary IS github, fall
+    # back to groq for the secondary leg.
+    secondary_provider = (
+        "groq" if primary_provider == "github" else "github"
+    )
 
     primary_score: Optional[float] = None
     secondary_score: Optional[float] = None
@@ -382,6 +404,20 @@ JSON only: {{"answer_relevance_score": float, "reasoning": str}}"""
 
 @retry(wait=wait_exponential(multiplier=1, min=2, max=10), stop=stop_after_attempt(3), reraise=True)
 async def judge_conflict_adherence(query: str, context_xml: str, answer: str) -> ConflictAdherenceResult:
+    """Score Conflict Adherence using the DRAGged-into-Conflict taxonomy.
+
+    Rubric (Cattan et al., arXiv:2506.08500):
+      - 0.0 — Answer missed the conflict entirely (silently picked one side
+              or failed to acknowledge disagreement).
+      - 0.5 — Answer surfaced the conflict but mislabeled its KIND
+              (self / pair / conditional) or omitted the temporal /
+              sub-domain qualifier when one was required.
+      - 1.0 — Answer correctly surfaced AND correctly identified the kind
+              (with qualifier when kind=conditional).
+
+    The score remains a single float in [0, 1] to preserve the existing
+    `JudgeScore.conflict_adherence_score` schema.
+    """
     from utils.provider_router import judge as call_judge
 
     prompt = f"""The user query and/or agent answer may be in Hindi. Evaluate based on
@@ -395,12 +431,26 @@ CONTEXT:
 ANSWER:
 {answer}
 
-This question has known conflicting sources. Score yes/no:
-1. Identified the conflict explicitly?
-2. Presented both sides with citations?
-3. Expressed appropriate uncertainty?
-4. Avoided silently choosing one side?
-score = yes_count / 4
+This question has known conflicting sources. Use the DRAGged-into-Conflict
+taxonomy (Cattan et al. 2025) with three conflict kinds:
+  - \"self\"        : a single source contradicts itself
+  - \"pair\"        : two sources disagree on a fact in the same time window
+  - \"conditional\" : sources appear to disagree but reconcile under a
+                    temporal or sub-domain qualifier (e.g. \"Indian PM\"
+                    answered differently by sources from 2014 vs 2024)
+
+Score with this exact rubric (return ONE float in [0, 1]):
+  - 0.0 : missed the conflict entirely (silently picked a side or didn't notice)
+  - 0.5 : surfaced the conflict but mislabeled the kind, OR omitted the
+          qualifier when the conflict was \"conditional\"
+  - 1.0 : correctly surfaced the conflict AND correctly identified the kind
+          (with qualifier present when kind=\"conditional\")
+
+Also report:
+  - identified_conflict: did the answer surface the conflict at all?
+  - presented_both_sides: are both positions cited?
+  - expressed_uncertainty: is hedging language present?
+  - avoided_silent_choice: did the answer avoid picking a winner?
 
 JSON only: {{"conflict_adherence_score": float, "identified_conflict": bool, "presented_both_sides": bool, "expressed_uncertainty": bool, "avoided_silent_choice": bool, "reasoning": str}}"""
 
@@ -469,8 +519,8 @@ JSON only: {{"context_precision_score": float, "reasoning": str}}"""
 
 def judge_citation_integrity(answer: str, doc_map: dict, fetched_urls: set) -> CitationIntegrityResult:
     """Deterministic — no LLM. Fraction of [doc_N] citations that map to real fetched URLs."""
-    from agent.citation_guard import _extract_doc_ids
-    cited_ids = _extract_doc_ids(answer)
+    from agent.citation_guard import extract_doc_ids
+    cited_ids = extract_doc_ids(answer)
     total = len(cited_ids)
     if total == 0:
         return CitationIntegrityResult(citation_integrity_score=1.0, total_cited=0, valid_cited=0)
@@ -543,6 +593,206 @@ def score_uncertainty_handling(
     if len(fu) >= 3:
         score += 0.2
     return min(1.0, score)
+
+
+# ── C3 calibration: model self-confidence vs judge confidence ───────────────
+#
+# Novel metric. Unlike Pearson(planner_confidence, faithfulness) — which only
+# tells you whether the planner's a-priori confidence tracks downstream
+# faithfulness — C3 asks a sharper question: does the *answer's own hedging*
+# match the *actual evidence quality* the judge observed?
+#
+# Both competitors check for hedge phrases ("could not verify", "unclear")
+# but neither checks whether the hedging is *accurate*. C3 does.
+#
+#   model_self_confidence ∈ [0,1]  — derived from hedge vs assertion phrases
+#   judge_confidence      ∈ [0,1]  — derived from faithfulness + context_precision
+#   per_case_error        = |model_self_confidence - judge_confidence|
+#   calibration_score     = 1 - mean(per_case_error)              # MAE-based
+#   brier_score           = 1 - mean((self - judge)^2)            # Brier-style
+#
+# Scoped to evidence-stressed categories (insufficient_evidence, conflicting)
+# where calibration actually matters.
+
+_HEDGE_PHRASES: tuple[str, ...] = (
+    "unclear",
+    "uncertain",
+    "could not",
+    "no reliable",
+    "limited evidence",
+    "cannot determine",
+    "[unverified]",
+    "[uncertainty]",
+    "not publicly available",
+    "no definitive",
+    "sources differ",
+    "evidence is mixed",
+    "unable to confirm",
+)
+
+# Assertion markers. We deliberately exclude bare copulas ("is", "are", ...)
+# — they're too noisy: a hedging sentence "it is unclear" contains "is" too.
+# We rely on stronger assertion markers that are rarely present in genuine
+# hedging language.
+_ASSERTION_PHRASES: tuple[str, ...] = (
+    "established",
+    "confirmed",
+    "definitively",
+    "according to",
+    "verified",
+    "reported that",
+    "states that",
+    "shows that",
+    "demonstrates",
+    "the answer is",
+    "the result is",
+)
+
+
+def _count_hedge_phrases(answer: str) -> int:
+    if not answer:
+        return 0
+    low = answer.lower()
+    return sum(low.count(h) for h in _HEDGE_PHRASES)
+
+
+def _count_assertion_phrases(answer: str) -> int:
+    if not answer:
+        return 0
+    low = answer.lower()
+    return sum(low.count(p) for p in _ASSERTION_PHRASES)
+
+
+def _compute_model_self_confidence(answer: str) -> float:
+    """[0,1] confidence inferred from the answer's hedge ↔ assertion balance.
+
+    Hedge-heavy → low; assertion-heavy → high. Symmetric and well-defined for
+    the empty/no-signal case (returns 0.5).
+    """
+    hedges = _count_hedge_phrases(answer)
+    asserts = _count_assertion_phrases(answer)
+    denom = hedges + asserts
+    if denom == 0:
+        return 0.5  # no signal — middle prior
+    # (assert - hedge) / (assert + hedge) ∈ [-1, 1]  →  rescaled to [0, 1]
+    raw = (asserts - hedges) / denom
+    return (raw + 1.0) / 2.0
+
+
+def _rescale_judge_score(score: Optional[float]) -> Optional[float]:
+    """Judges in this codebase emit scores in [0,1] already. We accept either
+    the [0,1] convention or the legacy [1,5] convention via clamping. Returns
+    None when the input is None."""
+    if score is None:
+        return None
+    if score <= 1.0:
+        return max(0.0, float(score))
+    # Treat as a 1–5 Likert and rescale to [0,1].
+    return max(0.0, min(1.0, (float(score) - 1.0) / 4.0))
+
+
+def _compute_judge_confidence(
+    faithfulness: Optional[float],
+    context_precision: Optional[float],
+) -> Optional[float]:
+    """Mean of rescaled faithfulness + context_precision. None when both
+    components are missing (no judge signal at all)."""
+    f01 = _rescale_judge_score(faithfulness)
+    c01 = _rescale_judge_score(context_precision)
+    parts = [v for v in (f01, c01) if v is not None]
+    if not parts:
+        return None
+    return sum(parts) / len(parts)
+
+
+_DEFAULT_C3_CATEGORIES: tuple[str, ...] = (
+    "insufficient_evidence",
+    "conflicting",
+    "conflicting_sources",  # accept both spellings
+)
+
+
+def compute_calibration_score(
+    rows: list[dict],
+    categories: tuple[str, ...] = _DEFAULT_C3_CATEGORIES,
+) -> dict:
+    """C3 calibration aggregate. Pure-Python, no LLM.
+
+    Returns:
+      {
+        "calibration_score": 1 - mean|self - judge|,   # higher is better
+        "brier_score":       1 - mean((self - judge)^2),
+        "mean_abs_error":    mean|self - judge|,
+        "n_cases":           int,
+        "per_category":      {cat: {"calibration_score", "n_cases", ...}},
+        "per_case":          [{"question_id", "category",
+                               "model_self_confidence", "judge_confidence",
+                               "abs_error"}],
+      }
+    Empty selection → calibration_score = 1.0, brier_score = 1.0, n_cases = 0
+    (no error is possible without cases — neutral default).
+    """
+    cats = {c.lower() for c in categories}
+    pairs: list[tuple[str, str, float, float, float]] = []  # (qid, cat, self, judge, err)
+    for r in rows:
+        cat = (r.get("category") or "").lower()
+        if cat not in cats:
+            continue
+        answer = r.get("agent_answer") or ""
+        m_conf = _compute_model_self_confidence(answer)
+        j_conf = _compute_judge_confidence(
+            r.get("faithfulness_score"),
+            r.get("context_precision_score"),
+        )
+        if j_conf is None:
+            continue
+        err = abs(m_conf - j_conf)
+        pairs.append((r.get("question_id", ""), cat, m_conf, j_conf, err))
+
+    per_case = [
+        {
+            "question_id": qid,
+            "category": cat,
+            "model_self_confidence": round(m, 4),
+            "judge_confidence": round(j, 4),
+            "abs_error": round(err, 4),
+        }
+        for (qid, cat, m, j, err) in pairs
+    ]
+
+    if not pairs:
+        return {
+            "calibration_score": 1.0,
+            "brier_score": 1.0,
+            "mean_abs_error": 0.0,
+            "n_cases": 0,
+            "per_category": {},
+            "per_case": [],
+        }
+
+    mae = sum(p[4] for p in pairs) / len(pairs)
+    brier = sum((p[2] - p[3]) ** 2 for p in pairs) / len(pairs)
+
+    per_category: dict[str, dict] = {}
+    for cat in sorted({p[1] for p in pairs}):
+        cat_pairs = [p for p in pairs if p[1] == cat]
+        cat_mae = sum(p[4] for p in cat_pairs) / len(cat_pairs)
+        cat_brier = sum((p[2] - p[3]) ** 2 for p in cat_pairs) / len(cat_pairs)
+        per_category[cat] = {
+            "n_cases": len(cat_pairs),
+            "calibration_score": 1.0 - cat_mae,
+            "brier_score": 1.0 - cat_brier,
+            "mean_abs_error": cat_mae,
+        }
+
+    return {
+        "calibration_score": 1.0 - mae,
+        "brier_score": 1.0 - brier,
+        "mean_abs_error": mae,
+        "n_cases": len(pairs),
+        "per_category": per_category,
+        "per_case": per_case,
+    }
 
 
 def classify_failure(r: dict) -> str:
@@ -746,3 +996,164 @@ async def judge_cross_language_consistency(run_at: str) -> list[dict]:
             "reasoning": reason,
         })
     return results
+
+
+# ── C4: Cross-script consistency ────────────────────────────────────────────
+#
+# Same factual question, posed in different scripts (e.g. English vs Hindi),
+# must yield answers that cite the *same set of facts*. This is a pair-level
+# aggregator over already-completed eval runs — pure Python, no LLM call.
+#
+# Topics are linked by `concept_id` (existing dataset field). For each topic
+# with ≥2 languages, we compute pairwise Jaccard over:
+#   1. Cited URLs (domain-normalized) — citation_overlap
+#   2. Extracted entities (or gold_entities when present) — entity_overlap
+#
+# Distinct from `judge_cross_language_consistency` above, which is an
+# English-anchored single-language entity check. C4 is multi-pair and adds
+# the URL-overlap signal.
+
+from urllib.parse import urlparse
+
+_MD_LINK_URL_RE = re.compile(r"\[[^\]]+\]\((https?://[^)\s]+)\)")
+
+
+def _normalize_url(url: str) -> str:
+    """Normalize a URL for set-membership comparison.
+
+    - Lowercase scheme + netloc (strip ``www.`` prefix).
+    - Keep path verbatim (case-sensitive — many CMSes are).
+    - Drop query string and fragment (often tracking noise).
+    """
+    if not url:
+        return ""
+    try:
+        parsed = urlparse(url.strip())
+    except (ValueError, AttributeError):
+        return url.strip().lower()
+    netloc = (parsed.netloc or "").lower()
+    if netloc.startswith("www."):
+        netloc = netloc[4:]
+    scheme = (parsed.scheme or "https").lower()
+    path = parsed.path or ""
+    if path.endswith("/") and len(path) > 1:
+        path = path.rstrip("/")
+    return f"{scheme}://{netloc}{path}"
+
+
+def _extract_urls_from_row(row: dict) -> set[str]:
+    """Pull a row's cited URLs from explicit fields, falling back to the
+    markdown links embedded in ``agent_answer``."""
+    explicit = row.get("cited_urls") or row.get("urls_opened")
+    if explicit:
+        return {_normalize_url(u) for u in explicit if u}
+    answer = row.get("agent_answer") or ""
+    return {_normalize_url(u) for u in _MD_LINK_URL_RE.findall(answer)}
+
+
+def _extract_entities_from_row(row: dict) -> set[str]:
+    """Prefer explicit ``entities`` / ``gold_entities`` (lowercased) when
+    present; otherwise extract from the answer text using the language-aware
+    helper used by the single-language consistency judge."""
+    explicit = row.get("entities") or row.get("gold_entities")
+    if explicit:
+        return {str(e).strip().lower() for e in explicit if str(e).strip()}
+    return _extract_entities_for_consistency(row.get("agent_answer") or "")
+
+
+def compute_cross_script_consistency(rows: list[dict]) -> dict:
+    """Compute pair-level cross-script citation + entity overlap.
+
+    Groups rows by ``concept_id`` (the dataset's topic identifier). For each
+    topic with ≥2 *distinct* languages, emits one record per language pair
+    with Jaccard over cited URLs and extracted entities.
+
+    Args:
+        rows: result rows from the eval run. Each must carry at minimum
+            ``question_id``, ``language``, and one of ``agent_answer`` /
+            ``cited_urls`` (URLs are best, but the function degrades to
+            extracting markdown links from the answer text).
+            The topic key is read from ``concept_id`` (preferred) or
+            ``topic_id``.
+
+    Returns:
+        ``{"mean_citation_overlap", "mean_entity_overlap", "n_pairs",
+           "n_topics", "per_topic", "pairs"}``. When no qualifying topic has
+        ≥2 languages, all aggregates are ``None`` and lists are empty.
+    """
+    # 1. Bucket rows by topic.
+    by_topic: dict[str, dict[str, dict]] = {}
+    for row in rows:
+        topic = row.get("concept_id") or row.get("topic_id")
+        lang = row.get("language") or "en"
+        if not topic:
+            continue
+        # First row wins per (topic, lang) — defensive against dupes.
+        by_topic.setdefault(topic, {}).setdefault(lang, row)
+
+    pairs_out: list[dict] = []
+    per_topic: dict[str, dict] = {}
+
+    for topic, lang_map in by_topic.items():
+        if len(lang_map) < 2:
+            # Single-language group — metric is N/A per spec.
+            continue
+        langs = sorted(lang_map.keys())
+        topic_citation: list[float] = []
+        topic_entity: list[float] = []
+        for i in range(len(langs)):
+            for j in range(i + 1, len(langs)):
+                la, lb = langs[i], langs[j]
+                row_a, row_b = lang_map[la], lang_map[lb]
+                urls_a = _extract_urls_from_row(row_a)
+                urls_b = _extract_urls_from_row(row_b)
+                ents_a = _extract_entities_from_row(row_a)
+                ents_b = _extract_entities_from_row(row_b)
+                citation_overlap = jaccard(urls_a, urls_b)
+                entity_overlap = jaccard(ents_a, ents_b)
+                pairs_out.append({
+                    "concept_id": topic,
+                    "lang_a": la,
+                    "lang_b": lb,
+                    "question_id_a": row_a.get("question_id"),
+                    "question_id_b": row_b.get("question_id"),
+                    "n_urls_a": len(urls_a),
+                    "n_urls_b": len(urls_b),
+                    "n_entities_a": len(ents_a),
+                    "n_entities_b": len(ents_b),
+                    "citation_overlap": citation_overlap,
+                    "entity_overlap": entity_overlap,
+                })
+                topic_citation.append(citation_overlap)
+                topic_entity.append(entity_overlap)
+        per_topic[topic] = {
+            "languages": langs,
+            "n_pairs": len(topic_citation),
+            "mean_citation_overlap": (
+                sum(topic_citation) / len(topic_citation) if topic_citation else None
+            ),
+            "mean_entity_overlap": (
+                sum(topic_entity) / len(topic_entity) if topic_entity else None
+            ),
+        }
+
+    if not pairs_out:
+        return {
+            "mean_citation_overlap": None,
+            "mean_entity_overlap": None,
+            "n_pairs": 0,
+            "n_topics": 0,
+            "per_topic": {},
+            "pairs": [],
+        }
+
+    mean_cit = sum(p["citation_overlap"] for p in pairs_out) / len(pairs_out)
+    mean_ent = sum(p["entity_overlap"] for p in pairs_out) / len(pairs_out)
+    return {
+        "mean_citation_overlap": mean_cit,
+        "mean_entity_overlap": mean_ent,
+        "n_pairs": len(pairs_out),
+        "n_topics": len(per_topic),
+        "per_topic": per_topic,
+        "pairs": pairs_out,
+    }

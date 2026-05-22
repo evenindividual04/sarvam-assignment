@@ -10,6 +10,7 @@ __pycache__/
 eval/results/*
 !eval/results/.gitkeep
 !eval/results/SAMPLE_REPORT.md
+!eval/results/JUDGE_FAMILY_COMPARISON.md
 .streamlit/secrets.toml
 .DS_Store
 *.egg-info/
@@ -17,6 +18,7 @@ dist/
 build/
 .venv/
 venv/
+.dev-logs/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/

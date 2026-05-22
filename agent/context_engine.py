@@ -930,17 +930,112 @@ async def probe_contradictions(chunks: list[ContextSnippet], query: str) -> Conf
         return ConflictResult(has_conflict=False, probe_skipped_reason="parse_fail")
     try:
         data = json.loads(raw[start:end])
+        contradictions = [
+            ClaimContradiction(**c) for c in (data.get("contradictions") or [])
+        ]
+        # Derive dominant_kind: trust the model's top-level verdict if it
+        # matches a known label; otherwise fall back to severity-ranked
+        # aggregation over per-contradiction kinds.
+        dominant_raw = data.get("dominant_kind")
+        valid_kinds = {"self", "pair", "conditional", "none"}
+        if dominant_raw in valid_kinds:
+            dominant_kind = dominant_raw
+        else:
+            # severity: self > pair > conditional > none
+            kinds = {c.kind for c in contradictions}
+            if "self" in kinds:
+                dominant_kind = "self"
+            elif "pair" in kinds:
+                dominant_kind = "pair"
+            elif "conditional" in kinds:
+                dominant_kind = "conditional"
+            else:
+                dominant_kind = "none"
         result = ConflictResult(
             has_conflict=bool(data.get("has_conflict", False)),
             conflict_summary=data.get("conflict_summary"),
-            contradictions=[ClaimContradiction(**c) for c in (data.get("contradictions") or [])],
+            contradictions=contradictions,
+            dominant_kind=dominant_kind,
         )
         return result
     except (json.JSONDecodeError, pydantic.ValidationError, TypeError, ValueError) as e:
         logger.warning("Probe parse failed: %s", e, extra={"component": "context_engine"})
-        return ConflictResult(has_conflict=False, probe_skipped_reason="parse_fail")
+        return ConflictResult(has_conflict=False, probe_skipped_reason="parse_fail", dominant_kind="none")
 
 
 async def detect_conflicts(chunks: list[ContextSnippet], query: str) -> ConflictResult:
     """Backward-compat shim. Prefer probe_contradictions for new code."""
     return await probe_contradictions(chunks, query)
+
+
+# ── Forensic-differentiation helper ───────────────────────────────────────
+# Mechanical token-share attribution per URL over a final selected chunk set.
+# Replaces the chunk-count ratio used by the competitor's UI. Pure stdlib +
+# tiktoken (via utils.token_counter); never calls an LLM.
+def compute_token_contribution(
+    selected_chunks: list[ContextSnippet],
+    answer: str | None = None,
+) -> tuple[list[dict], int]:
+    """Return ``(contributions, total_tokens)``.
+
+    ``contributions`` is a list of ``{url, domain, title, tokens, share,
+    citations}`` rows — one per unique URL, ordered by ``tokens`` desc.
+
+    ``tokens`` is the sum of tiktoken cl100k_base token counts of each chunk
+    whose ``url`` matches (prefer ``ContextSnippet.token_count`` when set,
+    else compute from ``text``).
+
+    ``share`` is ``tokens / total_tokens`` (0.0 when ``total_tokens == 0``).
+
+    ``citations`` counts how many distinct ``doc_id`` markers from this URL's
+    chunks appear as ``[doc_N]`` in ``answer``. When ``answer`` is None or
+    citations cannot be resolved yet, every row reports ``0`` — the
+    synthesizer / citation_guard back-fills downstream.
+    """
+    if not selected_chunks:
+        return [], 0
+
+    from utils.token_counter import count_tokens as _count_tokens
+
+    # Group chunks by URL while preserving order of first appearance.
+    by_url: dict[str, dict] = {}
+    for s in selected_chunks:
+        url = getattr(s, "url", "") or ""
+        if not url:
+            continue
+        bucket = by_url.setdefault(url, {
+            "url": url,
+            "domain": getattr(s, "domain", "") or "",
+            "title": getattr(s, "title", "") or "",
+            "tokens": 0,
+            "doc_ids": set(),
+        })
+        toks = int(getattr(s, "token_count", 0) or 0)
+        if toks <= 0:
+            toks = _count_tokens(getattr(s, "text", "") or "")
+        bucket["tokens"] += toks
+        did = getattr(s, "doc_id", None)
+        if did:
+            bucket["doc_ids"].add(did)
+
+    total_tokens = sum(b["tokens"] for b in by_url.values())
+
+    contributions: list[dict] = []
+    for url, b in by_url.items():
+        citations = 0
+        if answer:
+            for did in b["doc_ids"]:
+                if f"[{did}]" in answer:
+                    citations += 1
+        share = (b["tokens"] / total_tokens) if total_tokens > 0 else 0.0
+        contributions.append({
+            "url": b["url"],
+            "domain": b["domain"],
+            "title": b["title"],
+            "tokens": int(b["tokens"]),
+            "share": float(share),
+            "citations": int(citations),
+        })
+
+    contributions.sort(key=lambda r: r["tokens"], reverse=True)
+    return contributions, int(total_tokens)

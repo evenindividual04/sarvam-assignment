@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Literal, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 # ── Plain dataclasses ──────────────────────────────────────────────────────
@@ -149,6 +149,25 @@ EVT_EVIDENCE_GAP = "evidence_gap"
 # Phase 2: human-in-the-loop plan approval gate. Emitted between PLANNING and
 # SEARCHING when the request opts in via `approval_required=True`.
 EVT_PLAN_APPROVAL = "plan_approval"
+# B3: retrieval-grounded reasoning events. Two emissions per hop carrying
+# structured fields only (no model-generated prose):
+#   1. After SEARCHING: `{"hop", "intent", "queries"}` — intent comes verbatim
+#      from TypedQuery.rationale (planner JSON, not a free-form CoT stream).
+#   2. After SELECTING: `{"hop", "observation": [{title, domain, score}, ...]}`
+#      — pulled from retrieved chunk metadata, never from synthesizer output.
+# This is the *anti-CoT* counterpart to scripted "Thought: …" / "Action: …"
+# ReAct labels: nothing here is invented at stream time.
+EVT_REASONING = "reasoning"
+# Forensic-differentiation events (see docs/FORENSIC_DIFFERENTIATION.md).
+# Mechanical, not LLM-narrated: `hop_evidence` and `source_contribution` are
+# computed deterministically from selected chunks + planner success_criteria
+# (+ tiktoken counts). `source_role` is the ONLY one that calls an LLM, and
+# only once per run over the deduped URL pool. `terminator` surfaces the
+# explicit hop-loop stop reason already tracked in `run_metadata`.
+EVT_HOP_EVIDENCE = "hop_evidence"
+EVT_SOURCE_CONTRIBUTION = "source_contribution"
+EVT_SOURCE_ROLE = "source_role"
+EVT_TERMINATOR = "terminator"
 
 
 @dataclass
@@ -190,6 +209,15 @@ class PlannerOutput(BaseModel):
     success_criteria: list[str] = Field(default_factory=list)  # 1-3 short bullets
 
 
+# P3: DRAGged-into-Conflict taxonomy (Cattan et al., arXiv:2506.08500).
+# Three kinds of source conflict + a "none" sentinel:
+#   - self        : a single source contradicts itself
+#   - pair        : two sources disagree on a fact (canonical RAG case)
+#   - conditional : sources only disagree once a qualifier (temporal /
+#                   sub-domain) is dropped; with the qualifier they agree
+ConflictKind = Literal["self", "pair", "conditional", "none"]
+
+
 class ClaimContradiction(BaseModel):
     claim: str
     doc_ids_a: list[str]
@@ -198,6 +226,10 @@ class ClaimContradiction(BaseModel):
     position_b: str
     is_temporal_evolution: bool
     confidence: float
+    # P3: DRAGged taxonomy. Default "pair" so older serialized rows that
+    # lack the field still parse as the canonical RAG conflict case.
+    kind: ConflictKind = "pair"
+    qualifier: Optional[str] = None  # populated when kind == "conditional"
 
 
 class ConflictResult(BaseModel):
@@ -205,11 +237,165 @@ class ConflictResult(BaseModel):
     conflict_summary: Optional[str] = None
     contradictions: list[ClaimContradiction] = []
     probe_skipped_reason: Optional[str] = None
+    # P3: overall verdict across all contradictions. "none" when has_conflict
+    # is False or when the probe was skipped.
+    dominant_kind: ConflictKind = "none"
 
 
 class ClaimVerification(BaseModel):
     supported: bool
     reasoning: str = ""
+
+
+## ── RunMetadata typed schema ──────────────────────────────────────────────
+#
+# `run_metadata` is a per-turn forensic bag that's mutated in ~60 sites across
+# `agent/orchestrator.py` and consumed by frontend SSE, `/api/turns/{id}`, eval,
+# and SQLite (`turns.run_metadata_json`). This Pydantic model is a SCHEMA +
+# VALIDATION boundary, not a runtime replacement for the mutable dict — the
+# orchestrator still does `run_metadata["foo"] = bar` in hot paths. We validate
+# on emit/persist to catch typos and surface drift.
+#
+# extra="allow" is intentional: orchestrator writes many small, evolving keys
+# and frontend already declares `[k: string]: unknown` on the TS side.
+
+
+class RunMetadataHopEvidence(BaseModel):
+    """Forensic per-hop evidence ledger. Shape mirrors
+    `frontend/lib/types.ts::RunMetadataHopEvidence`."""
+
+    hop: int
+    grounded: list[dict[str, Any]] = Field(default_factory=list)
+    open: list[dict[str, Any]] = Field(default_factory=list)
+
+    model_config = ConfigDict(extra="allow")
+
+
+class UnreachablePageEntry(BaseModel):
+    """A URL that failed to fetch — surfaced to the user as a degraded source.
+    All fields optional because orchestrator builds entries incrementally and
+    different failure modes populate different fields."""
+
+    url: str
+    domain: Optional[str] = None
+    title: Optional[str] = None
+    snippet: Optional[str] = None
+    reason: Optional[str] = None
+    status: Optional[str] = None
+    hop: Optional[int] = None
+
+    model_config = ConfigDict(extra="allow")
+
+
+class RunMetadata(BaseModel):
+    """Typed schema for one turn's `run_metadata`.
+
+    All fields optional — different turns exercise different code paths
+    (e.g. only hop2 turns set ``hop2_planner_output``). ``extra="allow"``
+    preserves forward compatibility while we incrementally tighten the
+    contract.
+
+    Field groups (inventoried from grep over agent/orchestrator.py):
+
+    1. Config / provenance — selection_strategy, retrieval_mode, prompt IDs
+    2. Multi-hop / termination — hop_count, terminator_*, hop_evidence
+    3. Refinement (C2) — refinement_triggered/count/reason
+    4. Citation / verification — cite_quote_map, quote_audit, numeric_audit,
+       criteria_coverage, conflict_table_missing, next_step_suggestions
+    5. Uncertainty — uncertainty_kind, evidence_gaps*, follow_up_*
+    6. Provenance / failure — unreachable_pages, extraction_fallbacks,
+       domain_blocklist_drops, context_fallbacks, fallback_path_taken,
+       timeout_hits, budget_breach, retry_counts
+    7. Routing / provider — *_provider, synth_provider_chain, reranker_used
+    8. Planner — planner_output, hop2_planner_output, plan_approval,
+       vagueness_*, language_detection
+    9. Budgets / timing — budget_distribution, probe_ms, verification_ms
+    10. Stop-RAG — stop_rag_decisions, stop_rag_terminator_*
+    """
+
+    # 1. Config / provenance
+    selection_strategy: Optional[str] = None
+    effective_config: Optional[dict[str, Any]] = None
+    retrieval_mode: Optional[dict[str, Any]] = None
+    planner_prompt_id: Optional[str] = None
+    synth_prompt_id: Optional[str] = None
+    conflict_prompt_id: Optional[str] = None
+    judge_prompt_id: Optional[str] = None
+    configured_models: Optional[dict[str, Any]] = None
+    failure_policy: Optional[dict[str, Any]] = None
+
+    # 2. Multi-hop / termination
+    hop_count: Optional[int] = None
+    terminator_fired: Optional[str] = None
+    terminator_source: Optional[str] = None
+    terminator_hop: Optional[int] = None
+    terminator_detail: Optional[str] = None
+    hop_evidence: list[RunMetadataHopEvidence] = Field(default_factory=list)
+    source_contributions: list[dict[str, Any]] = Field(default_factory=list)
+    source_roles: Optional[dict[str, Any]] = None
+
+    # 3. Refinement
+    refinement_triggered: bool = False
+    refinement_count: int = 0
+    refinement_reason: Optional[str] = None
+
+    # 4. Citation / verification
+    cite_quote_map: dict[str, str] = Field(default_factory=dict)
+    quote_audit: Optional[dict[str, Any]] = None
+    quote_grounding_ratio: Optional[float] = None
+    numeric_audit: Optional[dict[str, Any]] = None
+    numeric_grounding_ratio: Optional[float] = None
+    criteria_coverage: list[bool] = Field(default_factory=list)
+    conflict_table_missing: bool = False
+    next_step_suggestions: list[str] = Field(default_factory=list)
+
+    # 5. Uncertainty
+    uncertainty_kind: Optional[str] = None  # "none" | "weak" | "missing" | "conflict"
+    evidence_gaps: list[dict[str, Any]] = Field(default_factory=list)
+    evidence_gaps_reason: Optional[str] = None
+    follow_up_queries: list[str] = Field(default_factory=list)
+    follow_up_provider: Optional[str] = None
+    conflict_probe_provider: Optional[str] = None
+    contradiction_probes: Optional[list[dict[str, Any]]] = None
+    contradictions: Optional[list[dict[str, Any]]] = None
+
+    # 6. Provenance / failure
+    unreachable_pages: list[UnreachablePageEntry] = Field(default_factory=list)
+    extraction_fallbacks: dict[str, int] = Field(default_factory=dict)
+    domain_blocklist_drops: list[str] = Field(default_factory=list)
+    context_fallbacks: list[str] = Field(default_factory=list)
+    fallback_path_taken: list[str] = Field(default_factory=list)
+    timeout_hits: list[str] = Field(default_factory=list)
+    budget_breach: list[str] = Field(default_factory=list)
+    retry_counts: dict[str, int] = Field(default_factory=dict)
+
+    # 7. Routing / provider
+    planner_provider: Optional[str] = None
+    last_planner_provider: Optional[str] = None
+    synth_provider_chain: Optional[list[str]] = None
+    reranker_used: Optional[str] = None
+
+    # 8. Planner
+    planner_output: Optional[dict[str, Any]] = None
+    hop2_planner_output: Optional[dict[str, Any]] = None
+    plan_approval: Optional[dict[str, Any]] = None
+    vagueness_score: Optional[float] = None
+    vagueness_gated: Optional[bool] = None
+    budget_expanded_for_hard: Optional[bool] = None
+    language_detection: Optional[dict[str, Any]] = None
+
+    # 9. Budgets / timing
+    budget_distribution: Optional[dict[str, Any]] = None
+    probe_ms: Optional[int] = None
+    verification_ms: Optional[int] = None
+
+    # 10. Stop-RAG
+    stop_rag_decisions: Optional[list[dict[str, Any]]] = None
+    stop_rag_terminator_mapped: Optional[str] = None
+    stop_rag_terminator_detail: Optional[str] = None
+
+    # Forward-compat: anything not yet typed survives a round-trip.
+    model_config = ConfigDict(extra="allow")
 
 
 class JudgeScore(BaseModel):

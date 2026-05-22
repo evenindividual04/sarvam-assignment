@@ -106,6 +106,10 @@ CREATE TABLE IF NOT EXISTS contradiction_probes (
     probe_skipped_reason  TEXT,
     probe_ms              INTEGER,
     prompt_id             TEXT,
+    -- P3: DRAGged-into-Conflict taxonomy. Values: 'self' | 'pair' |
+    -- 'conditional' | 'none'. Older rows pre-migration are NULL and the
+    -- Python read path defaults them to 'none'.
+    dominant_kind         TEXT DEFAULT 'none',
     created_at            TEXT NOT NULL
 );
 """
@@ -337,6 +341,9 @@ async def init_db() -> None:
             ("eval_planner_provider", "ALTER TABLE eval_runs ADD COLUMN planner_provider TEXT"),
             ("eval_reranker_used", "ALTER TABLE eval_runs ADD COLUMN reranker_used TEXT"),
             ("eval_language_method", "ALTER TABLE eval_runs ADD COLUMN language_method TEXT"),
+            # P3: DRAGged conflict taxonomy. Idempotent — ALTER TABLE will
+            # raise OperationalError on already-migrated DBs and be swallowed.
+            ("probe_dominant_kind", "ALTER TABLE contradiction_probes ADD COLUMN dominant_kind TEXT DEFAULT 'none'"),
         ]:
             try:
                 await db.execute(ddl)
@@ -459,8 +466,8 @@ async def save_contradiction_probe(
             """
             INSERT INTO contradiction_probes
             (turn_id, has_conflict, conflict_summary, contradictions_json,
-             probe_skipped_reason, probe_ms, prompt_id, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+             probe_skipped_reason, probe_ms, prompt_id, dominant_kind, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 turn_id,
@@ -470,6 +477,7 @@ async def save_contradiction_probe(
                 result.probe_skipped_reason,
                 probe_ms,
                 prompt_id,
+                result.dominant_kind,
                 now,
             ),
         )

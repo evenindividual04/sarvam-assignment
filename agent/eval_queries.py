@@ -197,7 +197,7 @@ async def get_question_detail(run_at: str, question_id: str) -> Optional[dict]:
         if turn_id:
             t = await db.execute_fetchall(
                 "SELECT context_xml_sent, doc_map, claim_verification_json, state_trace, "
-                "prompt_tokens, completion_tokens "
+                "prompt_tokens, completion_tokens, run_metadata_json "
                 "FROM turns WHERE turn_id = ? LIMIT 1",
                 (turn_id,),
             )
@@ -213,6 +213,18 @@ async def get_question_detail(run_at: str, question_id: str) -> Optional[dict]:
                         turn_row["state_trace"] = json.loads(turn_row["state_trace"])
                     except (TypeError, ValueError):
                         pass
+                # Surface run_metadata as a parsed dict so callers can pull
+                # the terminator trace (refactor #3) and other routing
+                # signals without re-reading the column. Renamed to
+                # `run_metadata` (no `_json` suffix) since it's now a dict.
+                if turn_row.get("run_metadata_json"):
+                    try:
+                        turn_row["run_metadata"] = json.loads(
+                            turn_row["run_metadata_json"]
+                        )
+                    except (TypeError, ValueError):
+                        turn_row["run_metadata"] = None
+                turn_row.pop("run_metadata_json", None)
 
             ca = await db.execute_fetchall(
                 "SELECT * FROM claim_audit WHERE turn_id = ? ORDER BY claim_idx ASC", (turn_id,)
@@ -235,6 +247,10 @@ async def get_question_detail(run_at: str, question_id: str) -> Optional[dict]:
                         probe["contradictions_json"] = json.loads(probe["contradictions_json"])
                     except (TypeError, ValueError):
                         pass
+                # P3: surface dominant_kind, defaulting NULL/missing rows
+                # (pre-migration data) to "none" rather than raising.
+                if not probe.get("dominant_kind"):
+                    probe["dominant_kind"] = "none"
 
         return {
             "eval_row": rec,

@@ -3,17 +3,34 @@ Evaluation runner — sequential execution to respect rate limits.
 Writes JSONL incrementally. Prints summary table at end.
 
 Flags:
-  --ablate    Run twice (BM25 then Hybrid) tagged with a shared ablation_id,
-              then emit eval/results/ablation_<id>.json.
+  --ablate          Run twice (BM25 then Hybrid) tagged with a shared
+                    ablation_id, then emit eval/results/ablation_<id>.json.
+  --no-judge        Skip all LLM-judge calls; emit only deterministic metrics
+                    (citation integrity, factual accuracy alias match,
+                    quote/numeric grounding, script preservation, latencies).
+                    Fast and offline-safe. Tags rows with mode="deterministic".
+  --judge-only      Cache replay — re-run only the LLM judge passes against
+                    answers/context/doc_map persisted by a prior run.
+                    Requires --run-id <iso-timestamp>. Skips search/extract/
+                    synthesize entirely so no network is needed for those
+                    stages. Tags rows with mode="judge_only".
+
+  --no-judge and --judge-only are mutually exclusive.
 """
 from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import json
 import logging
 import math
 import os
+import platform
+import random
+import re
+import socket
+import subprocess
 import sys
 import uuid
 from collections import Counter, defaultdict
@@ -48,6 +65,7 @@ from eval.judge import (
     judge_claim_precision,
     judge_conflict_adherence,
     judge_coherence,
+    compute_cross_script_consistency,
     judge_cross_language_consistency,
     judge_factual_accuracy,
     judge_faithfulness,
@@ -123,6 +141,48 @@ async def _persist_eval_run(result: dict) -> None:
             await db.commit()
     except Exception as exc:  # pragma: no cover — DB errors should never break the run
         logger.warning("eval_runs persist failed: %s", exc)
+
+
+async def _compute_cross_script_for_run(rows: list[dict]) -> dict:
+    """Enrich result rows with cited URLs from the ``turns`` table and run
+    the C4 pair-level cross-script consistency aggregator.
+
+    Result rows don't carry ``urls_opened`` (only ``turn_id``); we hydrate
+    that here before delegating to ``compute_cross_script_consistency``.
+    Rows without a ``turn_id`` fall back to the markdown links embedded in
+    ``agent_answer`` (already handled by the aggregator).
+    """
+    import aiosqlite
+
+    from agent.memory import DB_PATH
+
+    turn_ids = [r.get("turn_id") for r in rows if r.get("turn_id")]
+    url_by_turn: dict[str, list[str]] = {}
+    # SQLite's compile-time SQLITE_MAX_VARIABLE_NUMBER is 999 on older builds;
+    # chunk the IN-clause to stay well below that and keep query plans cheap.
+    _BATCH_SIZE = 500
+    if turn_ids:
+        async with aiosqlite.connect(DB_PATH) as db:
+            db.row_factory = aiosqlite.Row
+            for start in range(0, len(turn_ids), _BATCH_SIZE):
+                batch = turn_ids[start:start + _BATCH_SIZE]
+                placeholders = ",".join("?" * len(batch))
+                cursor = await db.execute(
+                    f"SELECT turn_id, urls_opened FROM turns WHERE turn_id IN ({placeholders})",
+                    batch,
+                )
+                for row in await cursor.fetchall():
+                    try:
+                        url_by_turn[row["turn_id"]] = json.loads(row["urls_opened"] or "[]")
+                    except (json.JSONDecodeError, TypeError):
+                        url_by_turn[row["turn_id"]] = []
+
+    enriched: list[dict] = []
+    for r in rows:
+        tid = r.get("turn_id")
+        enriched.append({**r, "cited_urls": url_by_turn.get(tid, [])} if tid else r)
+
+    return compute_cross_script_consistency(enriched)
 
 
 async def _update_calibration_correlation(run_at: str, correlation: float) -> None:
@@ -224,6 +284,90 @@ def _percentile(values: list[float], pct: float) -> Optional[float]:
     return xs[lo] + (xs[hi] - xs[lo]) * (k - lo)
 
 
+def bootstrap_ci(
+    values: list[float],
+    n_resamples: int = 2000,
+    ci: float = 0.95,
+    seed: int = 42,
+) -> tuple[float, float]:
+    """95% bootstrap CI via stdlib random.choices resampling.
+
+    Returns (low, high). Uses a fixed seed for reproducibility. For an empty
+    or single-element input, returns the degenerate (val, val) or (0.0, 0.0).
+    """
+    if not values:
+        return (0.0, 0.0)
+    if len(values) == 1:
+        v = float(values[0])
+        return (v, v)
+    rng = random.Random(seed)
+    n = len(values)
+    means: list[float] = []
+    for _ in range(n_resamples):
+        sample = rng.choices(values, k=n)
+        means.append(sum(sample) / n)
+    means.sort()
+    alpha = (1.0 - ci) / 2.0
+    low = means[int(math.floor(alpha * n_resamples))]
+    high_idx = int(math.ceil((1.0 - alpha) * n_resamples)) - 1
+    high = means[max(0, min(high_idx, n_resamples - 1))]
+    return (low, high)
+
+
+# ── Indic script-preservation metric (deterministic, no LLM) ─────────────────
+_DEVANAGARI_RANGE = (0x0900, 0x097F)
+_TAMIL_RANGE = (0x0B80, 0x0BFF)
+_BENGALI_RANGE = (0x0980, 0x09FF)
+
+_SCRIPT_RANGES_BY_LANG: dict[str, tuple[int, int]] = {
+    "hi": _DEVANAGARI_RANGE,
+    "mr": _DEVANAGARI_RANGE,
+    "ta": _TAMIL_RANGE,
+    "bn": _BENGALI_RANGE,
+}
+
+# Strip citation markers ([doc_N], markdown links), URLs, digits before counting.
+_DOC_MARKER_RE = re.compile(r"\[doc_\d+\]")
+_MD_LINK_RE = re.compile(r"\[([^\]]+)\]\([^)]*\)")
+_URL_RE = re.compile(r"https?://\S+")
+
+
+def _strip_for_script_count(text: str) -> str:
+    text = _DOC_MARKER_RE.sub("", text)
+    # Keep the link text, drop the URL part.
+    text = _MD_LINK_RE.sub(r"\1", text)
+    text = _URL_RE.sub("", text)
+    # Drop digits — they're script-neutral.
+    return re.sub(r"\d+", "", text)
+
+
+def script_preservation_ratio(answer: str, language: str) -> Optional[float]:
+    """Fraction of alphabetic chars in `answer` that are in the expected script.
+
+    Returns None when the language has no Indic-script expectation, or when
+    the answer has no alphabetic characters after stripping.
+    """
+    script_range = _SCRIPT_RANGES_BY_LANG.get((language or "").lower())
+    if script_range is None:
+        return None
+    cleaned = _strip_for_script_count(answer or "")
+    in_script = 0
+    alpha_total = 0
+    lo, hi = script_range
+    for ch in cleaned:
+        if ch.isalpha():
+            alpha_total += 1
+            cp = ord(ch)
+            if lo <= cp <= hi:
+                in_script += 1
+    if alpha_total == 0:
+        return None
+    return in_script / alpha_total
+
+
+_SCRIPT_PRESERVATION_THRESHOLD = 0.80
+
+
 def _compute_aggregates(results: list[dict]) -> dict:
     """Means, P50/P95 latency, per-category breakdown."""
     if not results:
@@ -253,11 +397,36 @@ def _compute_aggregates(results: list[dict]) -> dict:
         "total_cost_usd": sum(r.get("cost_usd", 0.0) or 0.0 for r in results),
     }
     for k in metric_keys:
-        overall[f"mean_{k.replace('_score', '')}"] = _safe(results, k)
+        base = k.replace("_score", "")
+        overall[f"mean_{base}"] = _safe(results, k)
         vals = [r[k] for r in results if r.get(k) is not None]
         if vals:
-            overall[f"p50_{k.replace('_score', '')}"] = _percentile(vals, 0.50)
-            overall[f"p95_{k.replace('_score', '')}"] = _percentile(vals, 0.95)
+            overall[f"p50_{base}"] = _percentile(vals, 0.50)
+            overall[f"p95_{base}"] = _percentile(vals, 0.95)
+            # 95% bootstrap CI on the top-line mean.
+            low, high = bootstrap_ci(vals)
+            overall[f"mean_{base}_ci_low"] = low
+            overall[f"mean_{base}_ci_high"] = high
+
+    # ── Script preservation (Indic subset only, deterministic) ────────────
+    indic_ratios: list[float] = []
+    for r in results:
+        ratio = script_preservation_ratio(
+            r.get("agent_answer", "") or "",
+            r.get("language", "en") or "en",
+        )
+        if ratio is not None:
+            indic_ratios.append(ratio)
+    if indic_ratios:
+        overall["script_preservation_mean"] = mean(indic_ratios)
+        overall["script_preservation_pass_rate"] = sum(
+            1 for v in indic_ratios if v >= _SCRIPT_PRESERVATION_THRESHOLD
+        ) / len(indic_ratios)
+        overall["script_preservation_n"] = len(indic_ratios)
+    else:
+        overall["script_preservation_mean"] = None
+        overall["script_preservation_pass_rate"] = None
+        overall["script_preservation_n"] = 0
 
     categories: dict[str, dict] = {}
     for cat in sorted({r["category"] for r in results}):
@@ -322,9 +491,23 @@ def _compute_aggregates(results: list[dict]) -> dict:
     return {"overall": overall, "by_category": categories}
 
 
-def _print_aggregates(agg: dict, taxonomy: Counter) -> None:
+def _print_aggregates(agg: dict, taxonomy: Counter, modes: Optional[set[str]] = None) -> None:
+    """Print the summary table.
+
+    When `modes` contains both "deterministic" and a judge-bearing mode
+    (`full` or `judge_only`), the header splits into two columns. With a
+    single mode, only the relevant column is labelled — saves the reader
+    from interpreting `0.000` rows as real LLM scores.
+    """
     print(f"\n{'='*72}")
-    print("AGGREGATES")
+    if modes and len(modes) > 1:
+        print(f"AGGREGATES  (modes: {', '.join(sorted(modes))})")
+    elif modes:
+        label = next(iter(modes))
+        col = "Deterministic" if label == "deterministic" else "Judge"
+        print(f"AGGREGATES  ({col} mode)")
+    else:
+        print("AGGREGATES")
     print(f"{'='*72}")
     o = agg.get("overall", {})
     print(f"n={o.get('n_questions', 0)}  pass_rate={o.get('pass_rate', 0):.2%}  "
@@ -349,6 +532,52 @@ def _print_aggregates(agg: dict, taxonomy: Counter) -> None:
 
 def _fmt(value: Optional[float], digits: int = 3) -> str:
     return f"{value:.{digits}f}" if value is not None else "—"
+
+
+def _git_output(args: list[str]) -> str:
+    try:
+        return subprocess.check_output(
+            ["git", *args],
+            cwd=str(Path(__file__).parent.parent),
+            stderr=subprocess.DEVNULL,
+        ).decode().strip()
+    except (subprocess.CalledProcessError, FileNotFoundError, OSError):
+        return "unknown"
+
+
+def _dataset_sha256() -> str:
+    try:
+        return hashlib.sha256(_DATASET.read_bytes()).hexdigest()
+    except OSError:
+        return "unknown"
+
+
+def _provenance_info(run_at_iso: str) -> dict[str, str]:
+    """Capture git, dataset, model, host metadata for the report header."""
+    return {
+        "git_sha": _git_output(["rev-parse", "HEAD"]),
+        "git_commit_timestamp": _git_output(["log", "-1", "--format=%cI", "HEAD"]),
+        "dataset_path": str(_DATASET),
+        "dataset_sha256": _dataset_sha256(),
+        "synthesizer_model": os.getenv("SYNTH_MODEL")
+            or os.getenv("GEMINI_MODEL", "gemini-2.5-flash"),
+        "planner_model": os.getenv("PLANNER_MODEL", "llama-3.3-70b-versatile"),
+        "judge_model": os.getenv("JUDGE_MODEL", "gpt-4o-mini"),
+        "run_started_at": run_at_iso,
+        "host": f"{socket.gethostname()} · Python {platform.python_version()}",
+    }
+
+
+def _render_provenance_block(prov: dict[str, str]) -> list[str]:
+    lines = ["```", "Provenance"]
+    for key in (
+        "git_sha", "git_commit_timestamp", "dataset_path", "dataset_sha256",
+        "synthesizer_model", "planner_model", "judge_model",
+        "run_started_at", "host",
+    ):
+        lines.append(f"  {key}: {prov.get(key, 'unknown')}")
+    lines.append("```")
+    return lines
 
 
 def _worst_rows(results: list[dict], n: int = 3) -> list[dict]:
@@ -378,6 +607,9 @@ def _write_markdown_report(
     lines: list[str] = []
     lines.append(f"# Eval Report — `{run_at_iso}`")
     lines.append("")
+    # Provenance block — git/dataset/model/host metadata for reproducibility.
+    lines.extend(_render_provenance_block(_provenance_info(run_at_iso)))
+    lines.append("")
     lines.append(
         f"- **Retrieval mode:** `{retrieval_mode}`"
         + (f"  ·  **Ablation id:** `{ablation_id}`" if ablation_id else "")
@@ -400,19 +632,41 @@ def _write_markdown_report(
     lines.append("")
     lines.append("## Overall metrics")
     lines.append("")
-    lines.append("| Metric | Mean | P50 | P95 |")
+    lines.append("| Metric | Mean [95% CI] | P50 | P95 |")
     lines.append("|---|---:|---:|---:|")
     for k in (
         "faithfulness", "relevance", "context_precision",
         "citation_integrity", "claim_precision", "factual_accuracy",
         "quote_grounding_ratio", "uncertainty_handling",
     ):
+        m = overall.get(f"mean_{k}")
+        ci_low = overall.get(f"mean_{k}_ci_low")
+        ci_high = overall.get(f"mean_{k}_ci_high")
+        if m is not None and ci_low is not None and ci_high is not None:
+            mean_cell = f"{m:.3f} [{ci_low:.3f}, {ci_high:.3f}]"
+        else:
+            mean_cell = _fmt(m)
         lines.append(
             f"| {k.replace('_', ' ')} "
-            f"| {_fmt(overall.get(f'mean_{k}'))} "
+            f"| {mean_cell} "
             f"| {_fmt(overall.get(f'p50_{k}'))} "
             f"| {_fmt(overall.get(f'p95_{k}'))} |"
         )
+
+    # Script preservation (Indic subset only). Emit explicit null when subset is empty.
+    sp_mean = overall.get("script_preservation_mean")
+    sp_pass = overall.get("script_preservation_pass_rate")
+    sp_n = overall.get("script_preservation_n", 0)
+    lines.append("")
+    lines.append("## Script preservation (Indic subset)")
+    lines.append("")
+    if sp_n and sp_mean is not None:
+        lines.append(
+            f"- n = {sp_n}  ·  mean ratio = {sp_mean:.3f}  ·  "
+            f"pass rate (≥0.80) = {sp_pass:.1%}"
+        )
+    else:
+        lines.append("- n = 0  ·  mean ratio = null  ·  pass rate = null")
 
     if by_category:
         lines.append("")
@@ -516,6 +770,29 @@ def _write_markdown_report(
             f"judge faithfulness score: **{calibration['correlation']:.3f}**"
         )
 
+    # C3 calibration — pure-Python, hedge-vs-evidence calibration on
+    # insufficient_evidence + conflicting cases.
+    c3 = calibration.get("c3") if isinstance(calibration, dict) else None
+    if c3 and c3.get("n_cases", 0) > 0:
+        lines.append("")
+        lines.append("## C3 calibration (hedge vs evidence)")
+        lines.append("")
+        lines.append(
+            f"Calibration score: **{c3['calibration_score']:.3f}**  ·  "
+            f"Brier score: **{c3['brier_score']:.3f}**  ·  "
+            f"n={c3['n_cases']}"
+        )
+        if c3.get("per_category"):
+            lines.append("")
+            lines.append("| Category | n | Calibration | MAE |")
+            lines.append("|---|---:|---:|---:|")
+            for cat, stats in c3["per_category"].items():
+                lines.append(
+                    f"| {cat} | {stats['n_cases']} | "
+                    f"{stats['calibration_score']:.3f} | "
+                    f"{stats['mean_abs_error']:.3f} |"
+                )
+
     if cross_family:
         sample_n = cross_family.get("cross_family_sample_size", 0)
         n_total = len(results)
@@ -595,11 +872,483 @@ def _select_cross_family_sample(
     return set(ids[:n])
 
 
+async def _run_all_judges(
+    *,
+    query: str,
+    answer: str,
+    internal_answer: str,
+    context_xml: str,
+    doc_map: dict,
+    fetched_urls: set,
+    category: str,
+    is_multiturn: bool,
+    scenario: Optional[str],
+    turn: int,
+    scenario_sessions: dict,
+    turn_id_out: str,
+    q: dict,
+    cross_family_judge: bool,
+    qid: str,
+    cross_family_sample_ids: set,
+) -> dict:
+    """Run every LLM-judge (and deterministic) scorer for a single row.
+
+    Extracted so both the live run and the cache-replay (`--judge-only`)
+    path call exactly the same scoring logic. Returns a flat dict of
+    score fields ready to splice into the result row.
+    """
+    faithfulness_score = 0.5
+    relevance_score = 0.5
+    context_precision_score = 0.5
+    conflict_adherence_score = None
+    coherence_score = None
+    factual_accuracy_score: Optional[float] = None
+    factual_accuracy_reasoning = ""
+
+    try:
+        fres = await judge_faithfulness(context_xml or "(no context)", answer)
+        faithfulness_score = fres.faithfulness_score
+    except Exception as e:
+        print(f"  Faithfulness judge error: {e}")
+
+    try:
+        rres = await judge_relevance(query, answer)
+        relevance_score = rres.answer_relevance_score
+    except Exception as e:
+        print(f"  Relevance judge error: {e}")
+
+    try:
+        cp_res = await judge_context_precision(query, context_xml or "(no context)")
+        context_precision_score = cp_res.context_precision_score
+    except Exception as e:
+        print(f"  Context Precision judge error: {e}")
+
+    ci_res = judge_citation_integrity(internal_answer, doc_map, fetched_urls)
+
+    claim_precision_score = 1.0
+    claim_precision_reasoning = ""
+    if turn_id_out:
+        try:
+            cp = await judge_claim_precision(turn_id_out)
+            claim_precision_score = cp.claim_precision_score
+            claim_precision_reasoning = cp.reasoning
+        except Exception as e:
+            print(f"  Claim Precision judge error: {e}")
+
+    if category == "conflicting":
+        try:
+            cres = await judge_conflict_adherence(query, context_xml or "", answer)
+            conflict_adherence_score = cres.conflict_adherence_score
+        except Exception as e:
+            print(f"  Conflict judge error: {e}")
+
+    if is_multiturn and scenario and turn == 2:
+        t1_info = scenario_sessions.get(scenario)
+        if t1_info and t1_info[1]:
+            try:
+                coh = await judge_coherence(t1_info[1], t1_info[2], query, answer)
+                coherence_score = coh.session_coherence_score
+            except Exception as e:
+                print(f"  Coherence judge error: {e}")
+
+    if "gold_answer" in q:
+        try:
+            factual_accuracy_score, factual_accuracy_reasoning = judge_factual_accuracy(
+                answer,
+                q.get("gold_answer"),
+                q.get("gold_aliases"),
+                q.get("gold_entities"),
+            )
+        except Exception as e:
+            print(f"  Factual judge error: {e}")
+
+    cross_family_scores: dict[str, dict] = {}
+    if cross_family_judge and qid in cross_family_sample_ids:
+        prompts = {
+            "faithfulness": build_faithfulness_prompt(
+                context_xml or "(no context)", answer
+            ),
+            "answer_relevance": build_relevance_prompt(query, answer),
+            "context_precision": build_context_precision_prompt(
+                query, context_xml or "(no context)"
+            ),
+        }
+        for metric_name, p in prompts.items():
+            try:
+                cross_family_scores[metric_name] = await judge_with_dual_family(
+                    p, metric_name
+                )
+            except Exception as e:
+                print(f"  Cross-family judge error ({metric_name}): {e}")
+                cross_family_scores[metric_name] = {
+                    "primary_score": None,
+                    "secondary_score": None,
+                    "agreement_delta": None,
+                }
+
+    return {
+        "faithfulness_score": faithfulness_score,
+        "relevance_score": relevance_score,
+        "context_precision_score": context_precision_score,
+        "ci_res": ci_res,
+        "claim_precision_score": claim_precision_score,
+        "claim_precision_reasoning": claim_precision_reasoning,
+        "conflict_adherence_score": conflict_adherence_score,
+        "coherence_score": coherence_score,
+        "factual_accuracy_score": factual_accuracy_score,
+        "factual_accuracy_reasoning": factual_accuracy_reasoning,
+        "cross_family_scores": cross_family_scores,
+    }
+
+
+def _deterministic_only_scores(
+    *,
+    internal_answer: str,
+    doc_map: dict,
+    fetched_urls: set,
+    q: dict,
+    answer: str,
+) -> dict:
+    """Compute only the deterministic (no-LLM) scorers used by --no-judge.
+
+    Citation integrity is rule-based; factual accuracy uses gold-alias
+    matching when gold data is present. All LLM-judge scores are set to
+    None so the dashboard renders them as "—" rather than the
+    misleading 0.5 sentinel that the live path uses.
+    """
+    ci_res = judge_citation_integrity(internal_answer, doc_map, fetched_urls)
+    factual_accuracy_score: Optional[float] = None
+    factual_accuracy_reasoning = ""
+    if "gold_answer" in q:
+        try:
+            factual_accuracy_score, factual_accuracy_reasoning = judge_factual_accuracy(
+                answer,
+                q.get("gold_answer"),
+                q.get("gold_aliases"),
+                q.get("gold_entities"),
+            )
+        except Exception as e:
+            print(f"  Factual judge error: {e}")
+    return {
+        "faithfulness_score": None,
+        "relevance_score": None,
+        "context_precision_score": None,
+        "ci_res": ci_res,
+        "claim_precision_score": None,
+        "claim_precision_reasoning": "",
+        "conflict_adherence_score": None,
+        "coherence_score": None,
+        "factual_accuracy_score": factual_accuracy_score,
+        "factual_accuracy_reasoning": factual_accuracy_reasoning,
+        "cross_family_scores": {},
+    }
+
+
+async def _load_cached_rows_for_replay(run_id: str) -> list[dict]:
+    """Load prior eval rows for --judge-only replay.
+
+    Strategy:
+      1. Find the JSONL whose first row's `run_at` equals `run_id`
+         (run_id is the ISO-timestamp stamped on every result row).
+         If not found, fall back to interpreting `run_id` as a file path
+         or filename stem so users can pass `eval_20260520_142539` directly.
+      2. For each row, load the matching `turns` table record via
+         `turn_id` to recover `context_xml_sent`, `doc_map`, and
+         `urls_opened` — these are NOT stored in the JSONL.
+
+    Rows without a `turn_id` (e.g. agent-timeout rows from the original
+    run) are still returned, but with empty context/doc_map so the
+    judge calls still execute and score the answer in isolation.
+    """
+    import aiosqlite
+
+    candidates: list[Path] = []
+    # 1. Direct file/stem reference.
+    direct = Path(run_id)
+    if direct.exists():
+        candidates.append(direct)
+    stem_match = _RESULTS_DIR / f"{run_id}.jsonl" if not run_id.endswith(".jsonl") \
+        else _RESULTS_DIR / run_id
+    if stem_match.exists() and stem_match not in candidates:
+        candidates.append(stem_match)
+
+    matched_path: Optional[Path] = candidates[0] if candidates else None
+    raw_rows: list[dict] = []
+    # 2. Otherwise scan all eval_*.jsonl files for run_at == run_id.
+    if matched_path is None:
+        for jsonl in sorted(_RESULTS_DIR.glob("eval_*.jsonl")):
+            try:
+                with open(jsonl) as fh:
+                    first = fh.readline()
+                if not first.strip():
+                    continue
+                row = json.loads(first)
+                if row.get("run_at") == run_id:
+                    matched_path = jsonl
+                    break
+            except (OSError, json.JSONDecodeError):
+                continue
+
+    if matched_path is None:
+        raise FileNotFoundError(
+            f"No prior eval run matches --run-id={run_id!r}. "
+            f"Pass an ISO timestamp from a prior run's `run_at` field, a "
+            f"path to its JSONL, or the filename stem (e.g. "
+            f"`eval_20260520_142539`)."
+        )
+
+    with open(matched_path) as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            raw_rows.append(json.loads(line))
+
+    if not raw_rows:
+        return []
+
+    # 3. Pull context_xml_sent + doc_map + urls_opened for each turn_id.
+    turn_ids = [r.get("turn_id") for r in raw_rows if r.get("turn_id")]
+    turn_artifacts: dict[str, dict] = {}
+    if turn_ids:
+        async with aiosqlite.connect(DB_PATH) as db:
+            db.row_factory = aiosqlite.Row
+            placeholders = ",".join("?" * len(turn_ids))
+            cursor = await db.execute(
+                f"SELECT turn_id, context_xml_sent, doc_map, urls_opened, response "
+                f"FROM turns WHERE turn_id IN ({placeholders})",
+                turn_ids,
+            )
+            async for row in cursor:
+                turn_artifacts[row["turn_id"]] = {
+                    "context_xml_sent": row["context_xml_sent"] or "",
+                    "doc_map": json.loads(row["doc_map"]) if row["doc_map"] else {},
+                    "urls_opened": json.loads(row["urls_opened"] or "[]"),
+                    "response": row["response"] or "",
+                }
+
+    enriched: list[dict] = []
+    for r in raw_rows:
+        tid = r.get("turn_id")
+        artifact = turn_artifacts.get(tid, {}) if tid else {}
+        enriched.append({
+            **r,
+            "_context_xml": artifact.get("context_xml_sent", ""),
+            "_doc_map": artifact.get("doc_map", {}),
+            "_fetched_urls": set(artifact.get("urls_opened", [])),
+            # Prefer the full DB-persisted response over the JSONL's
+            # 1000-char truncated `agent_answer`.
+            "_full_answer": artifact.get("response") or r.get("agent_answer", ""),
+        })
+    return enriched
+
+
+async def run_judge_only(
+    run_id: str,
+    cross_family_judge: bool = False,
+    cross_family_sample_size: int = 20,
+) -> str:
+    """Cache-replay: re-run only LLM-judge scoring against a prior run.
+
+    No search, no fetch, no synthesis — everything comes from the
+    persisted JSONL + `turns` table. Useful for re-judging with a
+    different judge model, or re-judging old runs after fixing a
+    scoring bug.
+    """
+    await init_db()
+
+    cached = await _load_cached_rows_for_replay(run_id)
+    if not cached:
+        raise ValueError(f"--judge-only: no cached rows found for run_id={run_id!r}")
+
+    with open(_DATASET) as f:
+        questions_by_id = {q["id"]: q for q in json.load(f)}
+
+    cross_family_sample_ids: set[str] = set()
+    if cross_family_judge:
+        cross_family_sample_ids = _select_cross_family_sample(
+            list(questions_by_id.values()), sample_size=cross_family_sample_size
+        )
+        reset_cross_family_counter()
+
+    run_ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    run_at_iso = datetime.now(timezone.utc).isoformat()
+    out_path = _RESULTS_DIR / f"eval_judgeonly_{run_ts}.jsonl"
+    scenario_sessions: dict[str, tuple[str, str, str]] = {}
+    results_summary: list[dict] = []
+
+    print(f"\n{'='*72}")
+    print(f"Deep Research Agent — JUDGE-ONLY Replay {run_ts}  "
+          f"(source_run_id={run_id})")
+    print(f"{'='*72}")
+    print(f"{'ID':<10} {'Category':<20} {'Faith':>6} {'Rel':>6} {'CitI':>6} {'CtxP':>6} {'Fail':<20}")
+    print("-" * 79)
+
+    with open(out_path, "w") as outf:
+        for cached_row in cached:
+            qid = cached_row["question_id"]
+            q = questions_by_id.get(qid, {
+                "id": qid,
+                "query": cached_row.get("question", ""),
+                "category": cached_row.get("category", "unknown"),
+            })
+            category = cached_row.get("category", q.get("category", "unknown"))
+            query = cached_row.get("question", q.get("query", ""))
+            language = cached_row.get("language", "en")
+            is_multiturn = q.get("is_multiturn", False)
+            scenario = q.get("scenario")
+            turn = q.get("turn", 1)
+
+            answer = cached_row["_full_answer"]
+            context_xml = cached_row["_context_xml"]
+            doc_map = cached_row["_doc_map"]
+            fetched_urls = cached_row["_fetched_urls"]
+            turn_id_out = cached_row.get("turn_id") or ""
+
+            scores = await _run_all_judges(
+                query=query, answer=answer, internal_answer=answer,
+                context_xml=context_xml, doc_map=doc_map,
+                fetched_urls=fetched_urls, category=category,
+                is_multiturn=is_multiturn, scenario=scenario, turn=turn,
+                scenario_sessions=scenario_sessions, turn_id_out=turn_id_out,
+                q=q, cross_family_judge=cross_family_judge, qid=qid,
+                cross_family_sample_ids=cross_family_sample_ids,
+            )
+            if is_multiturn and scenario and turn == 1:
+                scenario_sessions[scenario] = (
+                    scenario_sessions.get(scenario, (str(uuid.uuid4()),))[0],
+                    query, answer,
+                )
+
+            result = _build_result_row(
+                qid=qid, query=query, category=category, language=language,
+                retrieval_mode=cached_row.get("retrieval_mode", "bm25"),
+                ablation_id=None, answer=answer, scores=scores,
+                turn_id_out=turn_id_out, run_at_iso=run_at_iso,
+                latency_ms=cached_row.get("latency_ms", 0),
+                planning_ms=0, search_ms=0, fetch_ms=0,
+                select_ms=0, synthesize_ms=0,
+                run_metadata=cached_row.get("run_metadata", {}) or {},
+                prompt_tokens=cached_row.get("prompt_tokens", 0),
+                completion_tokens=cached_row.get("completion_tokens", 0),
+                mode="judge_only",
+            )
+            outf.write(json.dumps(result) + "\n")
+            outf.flush()
+            results_summary.append(result)
+            await _persist_eval_run(result)
+            print(
+                f"{qid:<10} {category:<20} "
+                f"{(scores['faithfulness_score'] or 0):>6.2f} "
+                f"{(scores['relevance_score'] or 0):>6.2f} "
+                f"{scores['ci_res'].citation_integrity_score:>6.2f} "
+                f"{(scores['context_precision_score'] or 0):>6.2f} "
+                f"{result['failure_class']:<20}"
+            )
+
+    taxonomy = Counter(r["failure_class"] for r in results_summary)
+    agg = _compute_aggregates(results_summary)
+    _print_aggregates(agg, taxonomy, modes={r.get("mode", "judge_only") for r in results_summary})
+    print(f"\nJudge-only results written to: {out_path}")
+    return run_at_iso
+
+
+def _build_result_row(
+    *,
+    qid: str, query: str, category: str, language: str,
+    retrieval_mode: str, ablation_id: Optional[str],
+    answer: str, scores: dict, turn_id_out: str, run_at_iso: str,
+    latency_ms: int, planning_ms: int, search_ms: int, fetch_ms: int,
+    select_ms: int, synthesize_ms: int, run_metadata: dict,
+    prompt_tokens: int, completion_tokens: int,
+    mode: str = "full",
+) -> dict:
+    """Assemble a result row. Same shape regardless of mode; mode field
+    distinguishes downstream consumers."""
+    ci_res = scores["ci_res"]
+    cross_family_scores = scores.get("cross_family_scores", {})
+    cost_usd = cost_for(DEFAULT_MODEL, prompt_tokens, completion_tokens)
+    return {
+        "run_id": str(uuid.uuid4()),
+        "run_at": run_at_iso,
+        "mode": mode,
+        "question_id": qid,
+        "question": query,
+        "category": category,
+        "language": language,
+        "retrieval_mode": retrieval_mode,
+        "ablation_id": ablation_id,
+        "agent_answer": (answer or "")[:1000],
+        "faithfulness_score": scores["faithfulness_score"],
+        "answer_relevance_score": scores["relevance_score"],
+        "context_precision_score": scores["context_precision_score"],
+        "citation_integrity_score": ci_res.citation_integrity_score,
+        "claim_precision_score": scores["claim_precision_score"],
+        "claim_precision_reasoning": scores["claim_precision_reasoning"],
+        "factual_accuracy_score": scores["factual_accuracy_score"],
+        "factual_accuracy_reasoning": scores["factual_accuracy_reasoning"],
+        "turn_id": turn_id_out,
+        "conflict_adherence_score": scores["conflict_adherence_score"],
+        "session_coherence_score": scores["coherence_score"],
+        "latency_ms": latency_ms,
+        "planning_ms": planning_ms,
+        "search_ms": search_ms,
+        "fetch_ms": fetch_ms,
+        "select_ms": select_ms,
+        "synthesize_ms": synthesize_ms,
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": completion_tokens,
+        "cost_usd": cost_usd,
+        "quote_grounding_ratio": (run_metadata or {}).get("quote_grounding_ratio"),
+        "uncertainty_handling_score": score_uncertainty_handling(
+            category, answer,
+            (run_metadata or {}).get("uncertainty_kind"),
+            (run_metadata or {}).get("follow_up_queries"),
+        ),
+        "uncertainty_kind": (run_metadata or {}).get("uncertainty_kind"),
+        "follow_up_queries": (run_metadata or {}).get("follow_up_queries"),
+        "numeric_grounding_ratio": (run_metadata or {}).get("numeric_grounding_ratio"),
+        "criteria_coverage_ratio": _criteria_coverage_ratio(
+            (run_metadata or {}).get("criteria_coverage")
+        ),
+        "terminator_fired": (run_metadata or {}).get("terminator_fired"),
+        "evidence_gap_count": len((run_metadata or {}).get("evidence_gaps") or []),
+        "planner_provider": (run_metadata or {}).get("planner_provider"),
+        "synth_provider_chain": (run_metadata or {}).get("synth_provider_chain"),
+        "reranker_used": (run_metadata or {}).get("reranker_used"),
+        "supplementary_sources": (run_metadata or {}).get("supplementary_sources", {}),
+        "extraction_fallbacks": (run_metadata or {}).get("extraction_fallbacks", {}),
+        "language_detection": (run_metadata or {}).get("language_detection", {}),
+        "context_fallbacks": (run_metadata or {}).get("context_fallbacks", {}),
+        "budget_distribution": (run_metadata or {}).get("budget_distribution", {}),
+        "run_metadata": run_metadata,
+        "faithfulness_score_primary": cross_family_scores.get("faithfulness", {}).get("primary_score"),
+        "faithfulness_score_secondary": cross_family_scores.get("faithfulness", {}).get("secondary_score"),
+        "faithfulness_agreement_delta": cross_family_scores.get("faithfulness", {}).get("agreement_delta"),
+        "answer_relevance_score_primary": cross_family_scores.get("answer_relevance", {}).get("primary_score"),
+        "answer_relevance_score_secondary": cross_family_scores.get("answer_relevance", {}).get("secondary_score"),
+        "answer_relevance_agreement_delta": cross_family_scores.get("answer_relevance", {}).get("agreement_delta"),
+        "context_precision_score_primary": cross_family_scores.get("context_precision", {}).get("primary_score"),
+        "context_precision_score_secondary": cross_family_scores.get("context_precision", {}).get("secondary_score"),
+        "context_precision_agreement_delta": cross_family_scores.get("context_precision", {}).get("agreement_delta"),
+        "failure_class": classify_failure({
+            "faithfulness_score": scores["faithfulness_score"] if scores["faithfulness_score"] is not None else 1.0,
+            "answer_relevance_score": scores["relevance_score"] if scores["relevance_score"] is not None else 1.0,
+            "context_precision_score": scores["context_precision_score"] if scores["context_precision_score"] is not None else 1.0,
+            "citation_integrity_score": ci_res.citation_integrity_score,
+            "claim_precision_score": scores["claim_precision_score"] if scores["claim_precision_score"] is not None else 1.0,
+            "conflict_adherence_score": scores["conflict_adherence_score"],
+            "session_coherence_score": scores["coherence_score"],
+        }),
+    }
+
+
 async def run_eval(
     ablation_id: Optional[str] = None,
     question_ids: Optional[list[str]] = None,
     cross_family_judge: bool = False,
     cross_family_sample_size: int = 20,
+    skip_judge: bool = False,
 ) -> str:
     """Run the eval dataset once. Returns the run_at timestamp.
 
@@ -742,207 +1491,54 @@ async def run_eval(
                 answer = f"[Agent error: {e}]"
                 internal_answer = answer
 
-            # ── Judge calls ──────────────────────────────────────────────
-            faithfulness_score = 0.5
-            relevance_score = 0.5
-            context_precision_score = 0.5
-            conflict_adherence_score = None
-            coherence_score = None
-            factual_accuracy_score: Optional[float] = None
-            factual_accuracy_reasoning = ""
-
-            try:
-                fres = await judge_faithfulness(context_xml or "(no context)", answer)
-                faithfulness_score = fres.faithfulness_score
-            except Exception as e:
-                print(f"  Faithfulness judge error: {e}")
-
-            try:
-                rres = await judge_relevance(query, answer)
-                relevance_score = rres.answer_relevance_score
-            except Exception as e:
-                print(f"  Relevance judge error: {e}")
-
-            try:
-                cp_res = await judge_context_precision(query, context_xml or "(no context)")
-                context_precision_score = cp_res.context_precision_score
-            except Exception as e:
-                print(f"  Context Precision judge error: {e}")
-
-            ci_res = judge_citation_integrity(internal_answer, doc_map, fetched_urls)
-
-            claim_precision_score = 1.0
-            claim_precision_reasoning = ""
-            if turn_id_out:
-                try:
-                    cp = await judge_claim_precision(turn_id_out)
-                    claim_precision_score = cp.claim_precision_score
-                    claim_precision_reasoning = cp.reasoning
-                except Exception as e:
-                    print(f"  Claim Precision judge error: {e}")
-
-            if category == "conflicting":
-                try:
-                    cres = await judge_conflict_adherence(query, context_xml or "", answer)
-                    conflict_adherence_score = cres.conflict_adherence_score
-                except Exception as e:
-                    print(f"  Conflict judge error: {e}")
-
-            if is_multiturn and scenario and turn == 2:
-                t1_info = scenario_sessions.get(scenario)
-                if t1_info and t1_info[1]:
-                    try:
-                        coh = await judge_coherence(t1_info[1], t1_info[2], query, answer)
-                        coherence_score = coh.session_coherence_score
-                    except Exception as e:
-                        print(f"  Coherence judge error: {e}")
-
-            if "gold_answer" in q:
-                try:
-                    factual_accuracy_score, factual_accuracy_reasoning = judge_factual_accuracy(
-                        answer,
-                        q.get("gold_answer"),
-                        q.get("gold_aliases"),
-                        q.get("gold_entities"),
-                    )
-                except Exception as e:
-                    print(f"  Factual judge error: {e}")
+            # ── Score calls (judge or deterministic-only) ───────────────
+            if skip_judge:
+                scores = _deterministic_only_scores(
+                    internal_answer=internal_answer, doc_map=doc_map,
+                    fetched_urls=fetched_urls, q=q, answer=answer,
+                )
+            else:
+                scores = await _run_all_judges(
+                    query=query, answer=answer, internal_answer=internal_answer,
+                    context_xml=context_xml, doc_map=doc_map,
+                    fetched_urls=fetched_urls, category=category,
+                    is_multiturn=is_multiturn, scenario=scenario, turn=turn,
+                    scenario_sessions=scenario_sessions,
+                    turn_id_out=turn_id_out, q=q,
+                    cross_family_judge=cross_family_judge, qid=qid,
+                    cross_family_sample_ids=cross_family_sample_ids,
+                )
 
             if is_multiturn and scenario and turn == 1:
                 session_id_stored = scenario_sessions[scenario][0]
                 scenario_sessions[scenario] = (session_id_stored, query, answer)
 
-            cost_usd = cost_for(DEFAULT_MODEL, prompt_tokens, completion_tokens)
-
-            # ── Tier C: cross-family double-judging on sampled subset ───────
-            cross_family_scores: dict[str, dict] = {}
-            if cross_family_judge and qid in cross_family_sample_ids:
-                prompts = {
-                    "faithfulness": build_faithfulness_prompt(
-                        context_xml or "(no context)", answer
-                    ),
-                    "answer_relevance": build_relevance_prompt(query, answer),
-                    "context_precision": build_context_precision_prompt(
-                        query, context_xml or "(no context)"
-                    ),
-                }
-                for metric_name, p in prompts.items():
-                    try:
-                        cross_family_scores[metric_name] = await judge_with_dual_family(
-                            p, metric_name
-                        )
-                    except Exception as e:
-                        print(f"  Cross-family judge error ({metric_name}): {e}")
-                        cross_family_scores[metric_name] = {
-                            "primary_score": None,
-                            "secondary_score": None,
-                            "agreement_delta": None,
-                        }
-
-            result = {
-                "run_id": str(uuid.uuid4()),
-                "run_at": run_at_iso,
-                "question_id": qid,
-                "question": query,
-                "category": category,
-                "language": language,
-                "retrieval_mode": retrieval_mode,
-                "ablation_id": ablation_id,
-                "agent_answer": answer[:1000],
-                "faithfulness_score": faithfulness_score,
-                "answer_relevance_score": relevance_score,
-                "context_precision_score": context_precision_score,
-                "citation_integrity_score": ci_res.citation_integrity_score,
-                "claim_precision_score": claim_precision_score,
-                "claim_precision_reasoning": claim_precision_reasoning,
-                "factual_accuracy_score": factual_accuracy_score,
-                "factual_accuracy_reasoning": factual_accuracy_reasoning,
-                "turn_id": turn_id_out,
-                "conflict_adherence_score": conflict_adherence_score,
-                "session_coherence_score": coherence_score,
-                "latency_ms": latency_ms,
-                "planning_ms": planning_ms,
-                "search_ms": search_ms,
-                "fetch_ms": fetch_ms,
-                "select_ms": select_ms,
-                "synthesize_ms": synthesize_ms,
-                "prompt_tokens": prompt_tokens,
-                "completion_tokens": completion_tokens,
-                "cost_usd": cost_usd,
-                "quote_grounding_ratio": (run_metadata or {}).get("quote_grounding_ratio"),
-                # Phase 1.5: deterministic uncertainty-handling score. Only
-                # populated for insufficient_evidence category; None otherwise.
-                "uncertainty_handling_score": score_uncertainty_handling(
-                    category,
-                    answer,
-                    (run_metadata or {}).get("uncertainty_kind"),
-                    (run_metadata or {}).get("follow_up_queries"),
-                ),
-                "uncertainty_kind": (run_metadata or {}).get("uncertainty_kind"),
-                "follow_up_queries": (run_metadata or {}).get("follow_up_queries"),
-                # ── Tier A (Phase 1+) per-row metrics & routing ────────────
-                "numeric_grounding_ratio": (run_metadata or {}).get("numeric_grounding_ratio"),
-                "criteria_coverage_ratio": _criteria_coverage_ratio(
-                    (run_metadata or {}).get("criteria_coverage")
-                ),
-                "terminator_fired": (run_metadata or {}).get("terminator_fired"),
-                "evidence_gap_count": len((run_metadata or {}).get("evidence_gaps") or []),
-                "planner_provider": (run_metadata or {}).get("planner_provider"),
-                "synth_provider_chain": (run_metadata or {}).get("synth_provider_chain"),
-                "reranker_used": (run_metadata or {}).get("reranker_used"),
-                "supplementary_sources": (run_metadata or {}).get("supplementary_sources", {}),
-                "extraction_fallbacks": (run_metadata or {}).get("extraction_fallbacks", {}),
-                "language_detection": (run_metadata or {}).get("language_detection", {}),
-                "context_fallbacks": (run_metadata or {}).get("context_fallbacks", {}),
-                "budget_distribution": (run_metadata or {}).get("budget_distribution", {}),
-                "run_metadata": run_metadata,
-                # Tier C: cross-family dual-judge scores (None if not sampled)
-                "faithfulness_score_primary": cross_family_scores.get(
-                    "faithfulness", {}
-                ).get("primary_score"),
-                "faithfulness_score_secondary": cross_family_scores.get(
-                    "faithfulness", {}
-                ).get("secondary_score"),
-                "faithfulness_agreement_delta": cross_family_scores.get(
-                    "faithfulness", {}
-                ).get("agreement_delta"),
-                "answer_relevance_score_primary": cross_family_scores.get(
-                    "answer_relevance", {}
-                ).get("primary_score"),
-                "answer_relevance_score_secondary": cross_family_scores.get(
-                    "answer_relevance", {}
-                ).get("secondary_score"),
-                "answer_relevance_agreement_delta": cross_family_scores.get(
-                    "answer_relevance", {}
-                ).get("agreement_delta"),
-                "context_precision_score_primary": cross_family_scores.get(
-                    "context_precision", {}
-                ).get("primary_score"),
-                "context_precision_score_secondary": cross_family_scores.get(
-                    "context_precision", {}
-                ).get("secondary_score"),
-                "context_precision_agreement_delta": cross_family_scores.get(
-                    "context_precision", {}
-                ).get("agreement_delta"),
-                "failure_class": classify_failure({
-                    "faithfulness_score": faithfulness_score,
-                    "answer_relevance_score": relevance_score,
-                    "context_precision_score": context_precision_score,
-                    "citation_integrity_score": ci_res.citation_integrity_score,
-                    "claim_precision_score": claim_precision_score,
-                    "conflict_adherence_score": conflict_adherence_score,
-                    "session_coherence_score": coherence_score,
-                }),
-            }
+            result = _build_result_row(
+                qid=qid, query=query, category=category, language=language,
+                retrieval_mode=retrieval_mode, ablation_id=ablation_id,
+                answer=answer, scores=scores, turn_id_out=turn_id_out,
+                run_at_iso=run_at_iso, latency_ms=latency_ms,
+                planning_ms=planning_ms, search_ms=search_ms,
+                fetch_ms=fetch_ms, select_ms=select_ms,
+                synthesize_ms=synthesize_ms, run_metadata=run_metadata,
+                prompt_tokens=prompt_tokens, completion_tokens=completion_tokens,
+                mode="deterministic" if skip_judge else "full",
+            )
             outf.write(json.dumps(result) + "\n")
             outf.flush()
             results_summary.append(result)
             await _persist_eval_run(result)
 
+            ci_score = scores["ci_res"].citation_integrity_score
+            faith_disp = f"{scores['faithfulness_score']:>6.2f}" \
+                if scores["faithfulness_score"] is not None else f"{'—':>6}"
+            rel_disp = f"{scores['relevance_score']:>6.2f}" \
+                if scores["relevance_score"] is not None else f"{'—':>6}"
+            ctxp_disp = f"{scores['context_precision_score']:>6.2f}" \
+                if scores["context_precision_score"] is not None else f"{'—':>6}"
             print(
                 f"{qid:<10} {category:<20} "
-                f"{faithfulness_score:>6.2f} {relevance_score:>6.2f} "
-                f"{ci_res.citation_integrity_score:>6.2f} {context_precision_score:>6.2f} "
+                f"{faith_disp} {rel_disp} {ci_score:>6.2f} {ctxp_disp} "
                 f"{result['failure_class']:<20}"
             )
 
@@ -951,7 +1547,10 @@ async def run_eval(
     # ── Post-run aggregates ───────────────────────────────────────────────
     taxonomy = Counter(r["failure_class"] for r in results_summary)
     agg = _compute_aggregates(results_summary)
-    _print_aggregates(agg, taxonomy)
+    _print_aggregates(
+        agg, taxonomy,
+        modes={r.get("mode", "full") for r in results_summary},
+    )
 
     # ── Cross-language consistency ────────────────────────────────────────
     try:
@@ -969,8 +1568,50 @@ async def run_eval(
         logger.warning("cross-language consistency failed: %s", exc)
         cl_rows = []
 
+    # ── C4: Cross-script consistency (pair-level URL + entity overlap) ────
+    # Enrich rows with cited URLs from the `turns` table, then aggregate
+    # pairwise across languages that share a `concept_id`. Pure-Python.
+    cross_script: dict = {}
+    try:
+        cross_script = await _compute_cross_script_for_run(results_summary)
+        if cross_script.get("n_pairs"):
+            print("\nCross-script consistency (C4):")
+            print(
+                f"  pairs={cross_script['n_pairs']}  topics={cross_script['n_topics']}  "
+                f"mean_citation_overlap={cross_script['mean_citation_overlap']:.3f}  "
+                f"mean_entity_overlap={cross_script['mean_entity_overlap']:.3f}"
+            )
+            for p in cross_script["pairs"]:
+                print(
+                    f"    {p['concept_id']:<32} {p['lang_a']}↔{p['lang_b']} "
+                    f"cite={p['citation_overlap']:.2f}  ent={p['entity_overlap']:.2f}"
+                )
+    except Exception as exc:
+        logger.warning("cross-script consistency failed: %s", exc)
+        cross_script = {}
+
+    # ── C3 calibration: model self-confidence ↔ judge confidence ─────────
+    # Novel metric, scoped to insufficient_evidence + conflicting categories.
+    # See eval/judge.py::compute_calibration_score for definition.
+    from eval.judge import compute_calibration_score as _compute_c3
+    c3_calibration = _compute_c3(results_summary)
+    print(
+        "\nC3 calibration (model self-confidence vs judge confidence): "
+        f"score={c3_calibration['calibration_score']:.3f}  "
+        f"brier={c3_calibration['brier_score']:.3f}  "
+        f"n={c3_calibration['n_cases']}"
+    )
+    for cat, stats in c3_calibration.get("per_category", {}).items():
+        print(
+            f"  {cat:<24} n={stats['n_cases']:>2}  "
+            f"score={stats['calibration_score']:.3f}  "
+            f"mae={stats['mean_abs_error']:.3f}"
+        )
+
     # ── Confidence calibration ────────────────────────────────────────────
     calibration = _compute_calibration(results_summary)
+    # Attach C3 so the markdown report can render it without a signature change.
+    calibration["c3"] = c3_calibration
     if calibration["correlation"] is not None:
         await _update_calibration_correlation(run_at_iso, calibration["correlation"])
     calib_path = _RESULTS_DIR / f"calibration_{run_ts}.json"
@@ -1056,6 +1697,9 @@ async def run_eval(
         "total_cost_usd": overall.get("total_cost_usd", 0.0),
         "retrieval_mode": retrieval_mode,
         "calibration_correlation": calibration.get("correlation"),
+        "c3_calibration_score": c3_calibration.get("calibration_score"),
+        "c3_brier_score": c3_calibration.get("brier_score"),
+        "c3_n_cases": c3_calibration.get("n_cases", 0),
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
     await save_eval_run_summary(summary_row)
@@ -1073,7 +1717,9 @@ async def run_eval(
                 "aggregates": agg,
                 "failure_taxonomy": dict(taxonomy),
                 "calibration": calibration,
+                "c3_calibration": c3_calibration,
                 "cross_language": cl_rows,
+                "cross_script": cross_script,
                 "cross_family_judge": cross_family_summary,
                 "groq_key_count": groq_rotator_snapshot["total_keys"],
                 "groq_key_rotator": groq_rotator_snapshot,
@@ -1148,6 +1794,25 @@ def _parse_args() -> argparse.Namespace:
         "--cross-family-sample-size", type=int, default=20,
         help="Sample size for cross-family judging (default: 20)."
     )
+    mode_group = parser.add_mutually_exclusive_group()
+    mode_group.add_argument(
+        "--no-judge", action="store_true",
+        help="Skip all LLM-judge calls — emit only deterministic metrics "
+             "(citation integrity, factual accuracy, grounding ratios). Fast, "
+             "offline-safe, suitable for CI sweeps."
+    )
+    mode_group.add_argument(
+        "--judge-only", action="store_true",
+        help="Cache replay: re-run judge passes against a prior run's cached "
+             "answer + context + doc_map. Requires --run-id. Skips search/"
+             "extract/synthesize entirely."
+    )
+    parser.add_argument(
+        "--run-id", type=str, default=None,
+        help="Prior run identifier for --judge-only (ISO timestamp matching "
+             "`run_at` on a previous JSONL row, a path to a JSONL file, or "
+             "an eval_<ts> filename stem)."
+    )
     return parser.parse_args()
 
 
@@ -1179,6 +1844,20 @@ async def _run_preflight() -> None:
 
 
 async def _main(args: argparse.Namespace) -> None:
+    if args.judge_only and not args.run_id:
+        print("ERROR: --judge-only requires --run-id <prior-run-id>", file=sys.stderr)
+        sys.exit(2)
+
+    # --judge-only is a pure cache replay: never run preflight (network may
+    # be offline) and never start the live agent.
+    if args.judge_only:
+        await run_judge_only(
+            run_id=args.run_id,
+            cross_family_judge=args.cross_family_judge,
+            cross_family_sample_size=args.cross_family_sample_size,
+        )
+        return
+
     if not args.skip_preflight:
         await _run_preflight()
     if args.ablate:
@@ -1187,6 +1866,7 @@ async def _main(args: argparse.Namespace) -> None:
         await run_eval(
             cross_family_judge=args.cross_family_judge,
             cross_family_sample_size=args.cross_family_sample_size,
+            skip_judge=args.no_judge,
         )
 
 
