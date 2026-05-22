@@ -186,12 +186,44 @@ def extract_doc_ids(text: str) -> list[str]:
     return ids
 
 
+_QUOTE_TAG_RE = re.compile(r'<quote>(.*?)</quote>', re.DOTALL | re.IGNORECASE)
+_CLAIM_TAG_RE = re.compile(r'<claim>(.*?)</claim>', re.DOTALL | re.IGNORECASE)
+
+
+def strip_quote_claim_tags(answer: str) -> str:
+    """Strip the ReClaim-style <quote>/<claim> wrapper tags from the answer
+    text used for display. The synthesizer is instructed to wrap each
+    verbatim quote in <quote>...</quote> and each paraphrase in
+    <claim>...</claim>, both followed by [doc_N] citations. Those tags are
+    invaluable for the audit pipeline (build_cite_quote_map,
+    verify_quoted_text, judge faithfulness scoring) but they leak through
+    react-markdown as raw text, so chat answers showed literal
+    "<quote>...</quote>" strings.
+
+    Transformation:
+      <quote>X</quote>      → *"X"*      (italic curly-quoted span)
+      <claim>Y</claim>      → Y          (plain inline text)
+
+    Idempotent — re-running on an already-stripped answer is a no-op.
+    The audit code that needs the original tags reads `full_answer` (the
+    pre-conversion buffer), so this strip only affects the display copy.
+    """
+    if not answer:
+        return answer
+    answer = _QUOTE_TAG_RE.sub(lambda m: f'*"{m.group(1).strip()}"*', answer)
+    answer = _CLAIM_TAG_RE.sub(lambda m: m.group(1).strip(), answer)
+    return answer
+
+
 def convert_citations(answer: str, doc_map: dict[str, tuple[str, str, str]]) -> str:
     """
     Replace [doc_N] with [Title — domain](URL).
     doc_map: {"doc_1": ("Title", "https://url.com", "domain.com")}
     Unknown doc IDs are left unchanged.
+    Also strips ReClaim-style <quote>/<claim> wrapper tags so they don't
+    leak through to the chat UI as raw HTML.
     """
+    answer = strip_quote_claim_tags(answer)
     def to_link(doc_id: str) -> str:
         if doc_id in doc_map:
             title, url, domain = doc_map[doc_id]
