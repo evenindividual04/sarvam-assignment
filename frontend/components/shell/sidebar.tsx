@@ -30,7 +30,6 @@ import {
 
 const HEALTH_POLL_MS = 30_000;
 const SESSIONS_POLL_MS = 60_000;
-const SEARCH_THRESHOLD = 5; // show search input only when list grows beyond this
 
 const ADMIN_NAV: ReadonlyArray<{
   href: string;
@@ -170,8 +169,6 @@ export function Sidebar() {
   );
   const groups = useMemo(() => groupSessionsByDate(filtered), [filtered]);
 
-  const showSearch = sessions.length > SEARCH_THRESHOLD;
-
   const handleSelect = (id: string) => {
     setActiveSessionId(id);
     emitSessionSelect(id);
@@ -224,29 +221,28 @@ export function Sidebar() {
         </button>
       </div>
 
-      {/* Search */}
-      {showSearch && (
-        <div className="px-4 pb-2">
-          <div className="relative">
-            <SearchIcon
-              size={12}
-              aria-hidden
-              className="absolute left-2.5 top-1/2 -translate-y-1/2 text-subtle-foreground pointer-events-none"
-            />
-            <input
-              ref={searchRef}
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              placeholder="Search sessions…"
-              aria-label="Search sessions"
-              className="w-full pl-7 pr-2 h-8 rounded-[5px] bg-surface border border-border focus:border-border-strong focus:outline-none font-sans text-[12px] placeholder:text-subtle-foreground"
-            />
-            <kbd className="absolute right-2 top-1/2 -translate-y-1/2 hidden lg:inline-block font-mono text-[9px] text-subtle-foreground border border-border rounded px-1 leading-none py-[2px]">
-              ⌘K
-            </kbd>
-          </div>
+      {/* Search — always visible for discoverability; disabled when no sessions */}
+      <div className="px-4 pb-2">
+        <div className="relative">
+          <SearchIcon
+            size={12}
+            aria-hidden
+            className="absolute left-2.5 top-1/2 -translate-y-1/2 text-subtle-foreground pointer-events-none"
+          />
+          <input
+            ref={searchRef}
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder={sessions.length === 0 ? "Search sessions…" : "Search sessions…"}
+            aria-label="Search sessions"
+            disabled={sessions.length === 0}
+            className="w-full pl-7 pr-2 h-8 rounded-[5px] bg-surface border border-border focus:border-border-strong focus:outline-none font-sans text-[12px] placeholder:text-subtle-foreground disabled:opacity-50 disabled:cursor-not-allowed"
+          />
+          <kbd className="absolute right-2 top-1/2 -translate-y-1/2 hidden lg:inline-block font-mono text-[9px] text-subtle-foreground border border-border rounded px-1 leading-none py-[2px]">
+            ⌘K
+          </kbd>
         </div>
-      )}
+      </div>
 
       {/* Session list — the only scrolling area */}
       <ScrollArea className="flex-1 min-h-0">
