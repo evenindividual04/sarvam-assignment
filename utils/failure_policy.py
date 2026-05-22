@@ -29,6 +29,7 @@ CIRCUIT_THRESHOLDS: dict[str, BreakerConfig] = {
     "gemini":        BreakerConfig(threshold=5, window_s=60.0, open_duration_s=30.0),
     "openrouter":    BreakerConfig(threshold=5, window_s=60.0, open_duration_s=30.0),
     "github_models": BreakerConfig(threshold=3, window_s=60.0, open_duration_s=30.0),
+    "judge":         BreakerConfig(threshold=3, window_s=60.0, open_duration_s=30.0),
     "parallel":      BreakerConfig(threshold=4, window_s=60.0, open_duration_s=30.0),
     "tavily":        BreakerConfig(threshold=4, window_s=60.0, open_duration_s=30.0),
     "serper":        BreakerConfig(threshold=4, window_s=60.0, open_duration_s=30.0),

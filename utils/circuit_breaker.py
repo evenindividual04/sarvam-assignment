@@ -5,10 +5,12 @@ threshold; auto-routes callers via CircuitOpenError. Tenacity retries are
 expected to live INSIDE the wrapped function — one Tenacity-exhausted call
 counts as one breaker failure.
 
-Note on async safety: the breaker is per-event-loop. async_bridge spawns a
-thread-per-turn each running its own asyncio loop, so state is not shared
-across turns. Acceptable for sequential eval; revisit if turns run concurrently
-in the same process.
+Note on async safety: state lives in module-level dicts keyed by provider. In
+the FastAPI app process, all turns share one event loop — state IS shared
+across concurrent turns, so the breaker correctly trips for everyone when an
+upstream provider goes down. For the eval CLI (sequential turns in one loop)
+behavior is identical. Lock-free reads are acceptable because writes
+(state transitions) are async-cooperative — no preemption between read+write.
 """
 from __future__ import annotations
 
