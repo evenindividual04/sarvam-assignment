@@ -429,8 +429,8 @@ function SmokeStatusInline({
 function LastRunDelta({ runs }: { runs: EvalRun[] }) {
   const latest = runs[0];
   const prev = runs[1];
-  const norm = (v: number | undefined): number => {
-    if (v === undefined || Number.isNaN(v)) return 0;
+  const norm = (v: number | null | undefined): number => {
+    if (v === null || v === undefined || Number.isNaN(v)) return 0;
     return v <= 1 ? v : v / 100;
   };
   const items: { label: string; latest: number; prev: number }[] = [

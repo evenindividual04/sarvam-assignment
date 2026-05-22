@@ -4,7 +4,7 @@ import { cn } from "@/lib/utils";
 
 interface MetricBarProps {
   label: string;
-  value: number | undefined; // 0..1 expected
+  value: number | null | undefined; // 0..1 expected; null/undefined renders as "—"
   tone?: "accent" | "emerald" | "rose" | "amber" | "muted";
   className?: string;
   compact?: boolean;
@@ -25,10 +25,15 @@ export function MetricBar({
   className,
   compact,
 }: MetricBarProps) {
-  const v = value === undefined || Number.isNaN(value) ? 0 : value;
+  // Backends sometimes report null for metrics that weren't computed on a
+  // given run (e.g. claim_precision on pre-V2.4 rows, context_precision on
+  // pre-V3 rows). Treat both null and undefined as "not measured".
+  const missing =
+    value === null || value === undefined || Number.isNaN(value);
+  const v = missing ? 0 : (value as number);
   const normalized = v <= 1 ? v : v / 100;
   const pct = Math.max(0, Math.min(100, normalized * 100));
-  const display = value === undefined ? "—" : normalized.toFixed(2);
+  const display = missing ? "—" : normalized.toFixed(2);
 
   const autoTone: NonNullable<MetricBarProps["tone"]> =
     tone ??
