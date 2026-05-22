@@ -180,24 +180,11 @@ export function StreamProgress({ events, status, error }: StreamProgressProps) {
                       skipped: {r.note}
                     </div>
                   )}
-                  {/* Phase 1.25: per-source rail rendered beneath the active phase */}
+                  {/* Phase 1.25: per-source rail rendered beneath the active phase.
+                      Defaults to first 12 chips; rest are revealed via toggle so
+                      reviewers can see every URL the agent actually pulled. */}
                   {extra?.chips && extra.chips.length > 0 && (
-                    <div className="flex flex-wrap gap-1 mt-1.5">
-                      {extra.chips.slice(0, 12).map((c) => (
-                        <SourceChip
-                          key={c.url}
-                          url={c.url}
-                          title={c.title}
-                          domain={c.domain}
-                          status={c.status}
-                        />
-                      ))}
-                      {extra.chips.length > 12 && (
-                        <span className="font-mono text-[10px] text-subtle-foreground self-center">
-                          +{extra.chips.length - 12} more
-                        </span>
-                      )}
-                    </div>
+                    <SourceChipRail chips={extra.chips} />
                   )}
                 </div>
                 <span
@@ -242,6 +229,42 @@ const DOT_CLASS: Record<RowStatus, string> = {
   skipped: "bg-surface ring-1 ring-amber-500/50",
   cancelled: "bg-surface ring-1 ring-destructive/60",
 };
+
+interface ChipRow {
+  url: string;
+  title: string;
+  domain: string;
+  status: SourceChipStatus;
+}
+
+function SourceChipRail({ chips }: { chips: ChipRow[] }) {
+  const [expanded, setExpanded] = useState(false);
+  const INITIAL = 12;
+  const visible = expanded ? chips : chips.slice(0, INITIAL);
+  const remaining = chips.length - INITIAL;
+  return (
+    <div className="flex flex-wrap gap-1 mt-1.5">
+      {visible.map((c) => (
+        <SourceChip
+          key={c.url}
+          url={c.url}
+          title={c.title}
+          domain={c.domain}
+          status={c.status}
+        />
+      ))}
+      {remaining > 0 && (
+        <button
+          type="button"
+          onClick={() => setExpanded((v) => !v)}
+          className="font-mono text-[10px] uppercase tracking-[0.10em] text-subtle-foreground hover:text-foreground self-center px-1.5 py-0.5 rounded-[3px] hover:bg-surface-hover"
+        >
+          {expanded ? "show less" : `+${remaining} more`}
+        </button>
+      )}
+    </div>
+  );
+}
 
 function computeTiming(
   row: RowState,

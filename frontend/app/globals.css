@@ -246,10 +246,23 @@
   text-decoration-color: rgba(13, 148, 136, 0.35);
   text-underline-offset: 3px;
   transition: color 0.15s, text-decoration-color 0.15s;
+  /* Long URLs in the Sources section were overflowing the chat
+     bubble's max-width — break them at any character if normal word
+     wrap can't fit. `anywhere` is the modern keyword; `break-word` is
+     the safari fallback. Both let the link break mid-domain rather
+     than punching out of the container. */
+  word-break: break-word;
+  overflow-wrap: anywhere;
 }
 .rich-md a:hover {
   color: #2dd4bf;
   text-decoration-color: #2dd4bf;
+}
+/* Containers around markdown also need to permit wrapping for the
+   long URLs that appear inside <p> and <li> wrappers. */
+.rich-md p, .rich-md li {
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 .rich-md ul { list-style: disc; padding-left: 1.25rem; margin: 0.5rem 0; }
 .rich-md ol { list-style: decimal; padding-left: 1.25rem; margin: 0.5rem 0; }

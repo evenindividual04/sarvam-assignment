@@ -309,91 +309,7 @@ export function TraceInspector({
               </TabsContent>
 
               <TabsContent value="sources" className="pt-6">
-                {data.context_snippets && data.context_snippets.length > 0 ? (
-                  <>
-                    {/* V3.11: each row shows a tier dot reflecting V2.3 source-
-                       trust prior. Tier comes from the backend, computed via
-                       `utils.source_trust.trust_for(domain)`. */}
-                    <ul className="divide-y divide-border">
-                      {data.context_snippets.map((s) => (
-                        <li key={s.doc_id} className="py-3 flex items-start gap-3">
-                          <span className="font-mono text-[10px] uppercase tracking-[0.10em] text-subtle-foreground w-12 shrink-0 pt-1">
-                            {s.doc_id}
-                          </span>
-                          <span
-                            className={`inline-block size-[8px] rounded-full shrink-0 mt-[7px] ${trustTierColor(s.trust_tier)}`}
-                            title={`Trust: ${trustTierLabel(s.trust_tier)} (score ${formatScore(s.trust_score)})`}
-                          />
-                          <div className="flex-1 min-w-0">
-                            <a
-                              href={s.url}
-                              target="_blank"
-                              rel="noopener noreferrer"
-                              className="font-mono text-[11px] text-accent hover:underline truncate block"
-                            >
-                              {s.domain}
-                            </a>
-                            <div
-                              className="text-[13px] text-foreground truncate"
-                              title={s.title}
-                            >
-                              {s.title}
-                            </div>
-                          </div>
-                        </li>
-                      ))}
-                    </ul>
-                    <TrustLegend />
-                  </>
-                ) : data.doc_map && Object.keys(data.doc_map).length > 0 ? (
-                  <ul className="divide-y divide-border">
-                    {Object.entries(data.doc_map).map(([docId, tup]) => {
-                      const [title, url, domain] = tup;
-                      return (
-                        <li key={docId} className="py-3 flex items-start gap-3">
-                          <span className="font-mono text-[10px] uppercase tracking-[0.10em] text-subtle-foreground w-12 shrink-0 pt-0.5">
-                            {docId}
-                          </span>
-                          <div className="flex-1 min-w-0">
-                            <a
-                              href={url}
-                              target="_blank"
-                              rel="noopener noreferrer"
-                              className="font-mono text-[11px] text-accent hover:underline truncate block"
-                            >
-                              {domain}
-                            </a>
-                            <div
-                              className="text-[13px] text-foreground truncate"
-                              title={title}
-                            >
-                              {title}
-                            </div>
-                          </div>
-                        </li>
-                      );
-                    })}
-                  </ul>
-                ) : data.urls && data.urls.length > 0 ? (
-                  <ul className="divide-y divide-border">
-                    {data.urls.map((u) => (
-                      <li key={u} className="py-3">
-                        <a
-                          href={u}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="font-mono text-[12px] text-accent hover:underline truncate block"
-                        >
-                          {u}
-                        </a>
-                      </li>
-                    ))}
-                  </ul>
-                ) : (
-                  <div className="font-mono text-[11px] uppercase tracking-[0.12em] text-subtle-foreground">
-                    No sources recorded.
-                  </div>
-                )}
+                <SourcesTab data={data} />
               </TabsContent>
 
               <TabsContent value="evidence" className="pt-6 space-y-6">
@@ -584,6 +500,150 @@ function ExportButton({
     >
       {label}
     </button>
+  );
+}
+
+function SourcesTab({ data }: { data: TraceInspectorData }) {
+  // Build the full picture: every URL that was *fetched* (`data.urls`),
+  // plus extra metadata (trust tier, doc_id, title) for the subset that
+  // made it through reranking into `context_snippets` / `doc_map`. This
+  // way the tab badge "Sources (14)" matches what the user actually sees,
+  // and we explicitly mark which sources were SELECTED vs FILTERED OUT
+  // by the context engine — both are demo-worthy signals.
+  const allUrls: string[] = Array.isArray(data.urls) ? data.urls : [];
+
+  // Lookup tables for the selected subset.
+  const snippetByUrl = new Map<string, ContextSnippetRow>();
+  for (const s of data.context_snippets ?? []) {
+    if (s?.url && !snippetByUrl.has(s.url)) snippetByUrl.set(s.url, s);
+  }
+  const docMapByUrl = new Map<string, [string, string, string]>();
+  if (data.doc_map) {
+    for (const tup of Object.values(data.doc_map)) {
+      const [, url] = tup;
+      if (url && !docMapByUrl.has(url)) docMapByUrl.set(url, tup);
+    }
+  }
+
+  // Order: selected first, then filtered-out. Preserve original
+  // appearance order within each group.
+  const rows: Array<{
+    url: string;
+    selected: boolean;
+    snippet?: ContextSnippetRow;
+    docMapEntry?: [string, string, string];
+  }> = [];
+  const seen = new Set<string>();
+  for (const u of allUrls) {
+    if (seen.has(u)) continue;
+    seen.add(u);
+    const snippet = snippetByUrl.get(u);
+    const docMapEntry = docMapByUrl.get(u);
+    rows.push({
+      url: u,
+      selected: Boolean(snippet || docMapEntry),
+      snippet,
+      docMapEntry,
+    });
+  }
+  // Edge case: a doc_map row whose URL wasn't in data.urls (defensive —
+  // shouldn't happen but render it anyway so the count is correct).
+  for (const [url, tup] of docMapByUrl) {
+    if (!seen.has(url)) {
+      seen.add(url);
+      rows.push({ url, selected: true, docMapEntry: tup });
+    }
+  }
+
+  if (rows.length === 0) {
+    return (
+      <div className="font-mono text-[11px] uppercase tracking-[0.12em] text-subtle-foreground">
+        No sources recorded.
+      </div>
+    );
+  }
+
+  // Sort: selected first, then filtered. Stable within each group.
+  rows.sort((a, b) => Number(b.selected) - Number(a.selected));
+
+  const selectedCount = rows.filter((r) => r.selected).length;
+
+  return (
+    <div>
+      <div className="font-mono text-[10px] uppercase tracking-[0.14em] text-subtle-foreground mb-3">
+        {selectedCount} of {rows.length} sources made it into the final context
+      </div>
+      <ul className="divide-y divide-border">
+        {rows.map((row) => (
+          <SourcesTabRow key={row.url} row={row} />
+        ))}
+      </ul>
+      {selectedCount > 0 && <TrustLegend />}
+    </div>
+  );
+}
+
+function SourcesTabRow({
+  row,
+}: {
+  row: {
+    url: string;
+    selected: boolean;
+    snippet?: ContextSnippetRow;
+    docMapEntry?: [string, string, string];
+  };
+}) {
+  const snippet = row.snippet;
+  const dm = row.docMapEntry;
+  // Resolve title / domain / doc_id from whichever source is richest.
+  const title = snippet?.title ?? dm?.[0] ?? "";
+  let domain = snippet?.domain ?? dm?.[2] ?? "";
+  if (!domain) {
+    try {
+      domain = new URL(row.url).hostname.replace(/^www\./, "");
+    } catch {
+      domain = row.url;
+    }
+  }
+  const docId = snippet?.doc_id;
+
+  return (
+    <li
+      className={`py-3 flex items-start gap-3 ${
+        row.selected ? "" : "opacity-55"
+      }`}
+    >
+      <span className="font-mono text-[10px] uppercase tracking-[0.10em] text-subtle-foreground w-12 shrink-0 pt-1">
+        {docId ?? (row.selected ? "—" : "skip")}
+      </span>
+      {row.selected ? (
+        <span
+          className={`inline-block size-[8px] rounded-full shrink-0 mt-[7px] ${trustTierColor(snippet?.trust_tier)}`}
+          title={`Trust: ${trustTierLabel(snippet?.trust_tier)} (score ${formatScore(snippet?.trust_score)})`}
+        />
+      ) : (
+        <span
+          className="inline-block size-[8px] rounded-full shrink-0 mt-[7px] bg-transparent border border-border"
+          title="Fetched but filtered out by context engine"
+        />
+      )}
+      <div className="flex-1 min-w-0">
+        <a
+          href={row.url}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="font-mono text-[11px] text-accent hover:underline truncate block break-all"
+        >
+          {domain}
+        </a>
+        <div
+          className="text-[13px] text-foreground truncate"
+          title={title || row.url}
+        >
+          {title || row.url}
+        </div>
+      </div>
+    </li>
   );
 }
 
