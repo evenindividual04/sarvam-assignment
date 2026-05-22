@@ -115,7 +115,7 @@ export default function EvalListPage() {
   useEffect(() => () => abortRef.current?.abort(), []);
 
   return (
-    <div className="px-8 md:px-12 py-12 max-w-[1280px] mx-auto w-full">
+    <div className="px-6 md:px-12 py-12 max-w-5xl mx-auto w-full">
       <div className="flex items-end justify-between">
         <div>
           <h1 className="text-2xl font-sans font-medium tracking-tight">
@@ -160,7 +160,7 @@ export default function EvalListPage() {
               onClick={runSmoke}
               className="font-mono text-[10px] uppercase tracking-[0.12em]"
             >
-              ▶ Run smoke eval (8 questions, ~2-3 min)
+              ▶ Run smoke eval (8 questions, ~2–3 min)
             </Button>
           </div>
         )}
@@ -201,7 +201,7 @@ export default function EvalListPage() {
                   <div className="text-right font-mono tabular-nums text-[12px] text-muted-foreground">
                     {r.n_questions}
                   </div>
-                  <div className="text-right font-mono tabular-nums text-[13px] text-foreground">
+                  <div className="text-right font-mono tabular-nums-lining text-[13px] text-foreground">
                     {passPct.toFixed(0)}%
                   </div>
                   <MetricBar label="" value={r.avg_faithfulness} compact />
@@ -243,22 +243,59 @@ function SmokePanel({
 }) {
   if (variant === "empty") {
     return (
-      <div className="border border-border rounded-[6px] p-8 bg-surface space-y-4">
-        <div className="font-mono text-[11px] uppercase tracking-[0.14em] text-muted-foreground">
-          No evaluation runs yet
+      <div className="border border-border rounded-[8px] bg-surface p-8 space-y-6">
+        <div>
+          <div className="font-mono text-[11px] uppercase tracking-[0.14em] text-muted-foreground">
+            No evaluation runs yet
+          </div>
+          <h2 className="mt-1 font-sans text-[18px] font-medium tracking-tight text-foreground">
+            Run your first eval
+          </h2>
+          <p className="mt-2 font-sans text-[13px] leading-normal text-muted-foreground max-w-prose">
+            The full 53-question dataset is meant to be run from CLI for
+            reproducibility (
+            <code className="font-mono text-[12px] text-foreground bg-surface-hover border border-border rounded-[3px] px-1 py-px">
+              python eval/eval_runner.py
+            </code>
+            ). The 8-question smoke eval runs in-browser in ~2–3 minutes and
+            covers all six categories plus a multi-turn pair.
+          </p>
         </div>
-        <p className="text-[14px] leading-relaxed text-foreground max-w-[680px]">
-          The full 53-question dataset is meant to be run from CLI for
-          reproducibility (
-          <code className="font-mono text-[12px] text-muted-foreground">
-            python eval/eval_runner.py
-          </code>
-          ), but you can trigger an 8-question{" "}
-          <span className="text-foreground">smoke eval</span> right here. It
-          covers all 6 categories plus a multi-turn pair, takes ~2-3 minutes,
-          and persists results into the dashboard.
-        </p>
-        <SmokeStatusInline smoke={smoke} onRun={onRun} />
+
+        <div className="flex flex-wrap items-center gap-3">
+          <SmokeStatusInline smoke={smoke} onRun={onRun} />
+          <a
+            href={`${BACKEND}/eval/results/SAMPLE_REPORT.md`}
+            target="_blank"
+            rel="noreferrer"
+            className="font-mono text-[10px] uppercase tracking-[0.14em] text-muted-foreground hover:text-accent transition-colors"
+          >
+            View sample report →
+          </a>
+        </div>
+
+        <div className="border-t border-border pt-5">
+          <div className="font-mono text-[10px] uppercase tracking-[0.18em] text-subtle-foreground mb-3">
+            What the eval measures
+          </div>
+          <ul className="grid grid-cols-1 sm:grid-cols-2 gap-x-8 gap-y-2 font-sans text-[12px] text-muted-foreground">
+            {[
+              ["Faithfulness", "Claims grounded in cited sources"],
+              ["Citation integrity", "URLs match the cited claim"],
+              ["Context precision", "Retrieval surfaced what was needed"],
+              ["Answer relevance", "Response addresses the question"],
+              ["Claim precision", "No unsupported assertions"],
+              ["Conflict adherence", "Disagreements are surfaced, not hidden"],
+              ["Session coherence", "Multi-turn references are resolved"],
+              ["Numeric audit", "Numbers tie back to source text"],
+            ].map(([label, desc]) => (
+              <li key={label} className="flex items-baseline gap-2">
+                <span className="text-foreground font-sans">{label}</span>
+                <span className="text-subtle-foreground">— {desc}</span>
+              </li>
+            ))}
+          </ul>
+        </div>
       </div>
     );
   }
@@ -302,9 +339,9 @@ function SmokeStatusInline({
             style={{ width: `${pct}%` }}
           />
         </div>
-        <p className="font-mono text-[10px] text-subtle-foreground leading-relaxed">
+        <p className="font-sans text-[12px] text-muted-foreground leading-normal max-w-prose">
           The smoke eval runs sequentially against the live agent. Each
-          question generates an answer, then 5-7 LLM-judge calls evaluate
+          question generates an answer, then 5–7 LLM-judge calls evaluate
           faithfulness, citation integrity, relevance, conflict adherence,
           and (for the multi-turn pair) session coherence.
         </p>

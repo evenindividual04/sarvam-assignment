@@ -1,7 +1,7 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
-import { SessionsRail } from "@/components/chat/sessions-rail";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { ArrowDown } from "lucide-react";
 import { ChatInput, type ChatInputHandle } from "@/components/chat/chat-input";
 import { StreamProgress } from "@/components/chat/stream-progress";
 import { MetricBar } from "@/components/chat/metric-bar";
@@ -51,9 +51,9 @@ interface ChatRow {
 }
 
 const SUGGESTED = [
-  "What is India's current repo rate, and how has it changed in the last 12 months?",
+  "What is India’s current repo rate, and how has it changed in the last 12 months?",
   "भारत में मानसून कब आता है और इस वर्ष कैसा रहा?",
-  "What is the current status of India's Digital India initiative and DPI exports?",
+  "What is the current status of India’s Digital India initiative and DPI exports?",
   "Compare GPT-5 and Claude Opus 4.7 on coding benchmarks.",
 ];
 
@@ -69,9 +69,12 @@ export default function ChatPage() {
   const [rows, setRows] = useState<ChatRow[]>([]);
   const [traceOpen, setTraceOpen] = useState(false);
   const [traceData, setTraceData] = useState<TraceInspectorData | null>(null);
-  const [refreshKey, setRefreshKey] = useState(0);
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const inputRef = useRef<ChatInputHandle | null>(null);
+  // Scroll-to-bottom pill: pause auto-scroll when the user is reading older
+  // turns mid-stream, resume silently when they return near the bottom.
+  const [autoStick, setAutoStick] = useState(true);
+  const [showJumpPill, setShowJumpPill] = useState(false);
 
   const sse = useSseResearch();
 
@@ -126,15 +129,52 @@ export default function ChatPage() {
     sse.evidenceGaps,
   ]);
 
+  // Auto-stick to bottom while streaming, but only when the user hasn't
+  // scrolled away. The scroll listener below flips `autoStick` when the user
+  // moves >100px from the bottom and restores it once they're within 50px.
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el || !autoStick) return;
+    el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
+  }, [rows, sse.currentText, autoStick]);
+
   useEffect(() => {
     const el = scrollRef.current;
     if (!el) return;
+    let timer: number | null = null;
+    const onScroll = () => {
+      if (timer !== null) window.clearTimeout(timer);
+      timer = window.setTimeout(() => {
+        const distance = el.scrollHeight - el.scrollTop - el.clientHeight;
+        if (distance > 100) {
+          setAutoStick(false);
+          setShowJumpPill(true);
+        } else if (distance < 50) {
+          setAutoStick(true);
+          setShowJumpPill(false);
+        }
+      }, 100);
+    };
+    el.addEventListener("scroll", onScroll, { passive: true });
+    return () => {
+      el.removeEventListener("scroll", onScroll);
+      if (timer !== null) window.clearTimeout(timer);
+    };
+  }, []);
+
+  const jumpToBottom = useCallback(() => {
+    const el = scrollRef.current;
+    if (!el) return;
     el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
-  }, [rows, sse.currentText]);
+    setAutoStick(true);
+    setShowJumpPill(false);
+  }, []);
 
   useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    if (sse.status === "done") setRefreshKey((k) => k + 1);
+    if (sse.status === "done") {
+      // Broadcast so the sidebar can refresh its session list.
+      window.dispatchEvent(new CustomEvent("dra:turn-done"));
+    }
   }, [sse.status]);
 
   // Hydrate rows from backend whenever the active session changes (initial mount,
@@ -191,7 +231,7 @@ export default function ChatPage() {
     inputRef.current?.prefill(query);
   };
 
-  const handleNewSession = () => {
+  const handleNewSession = useCallback(() => {
     if (sse.status === "streaming") sse.cancel();
     sse.reset();
     const id = newSessionId();
@@ -199,8 +239,41 @@ export default function ChatPage() {
     setSessionId(id);
     if (typeof window !== "undefined") {
       window.localStorage.setItem("dra:lastSessionId", id);
+      window.dispatchEvent(
+        new CustomEvent("dra:session-select", { detail: { sessionId: id } }),
+      );
     }
-  };
+  }, [sse]);
+
+  const handlePickSession = useCallback(
+    (id: string) => {
+      if (id === sessionId) return;
+      if (sse.status === "streaming") sse.cancel();
+      sse.reset();
+      setRows([]);
+      setSessionId(id);
+      if (typeof window !== "undefined") {
+        window.localStorage.setItem("dra:lastSessionId", id);
+      }
+    },
+    [sessionId, sse],
+  );
+
+  // The sidebar lives in the layout tree and cannot share state via props.
+  // It broadcasts user intent through CustomEvents on `window`.
+  useEffect(() => {
+    const onSelect = (e: Event) => {
+      const detail = (e as CustomEvent<{ sessionId: string }>).detail;
+      if (detail?.sessionId) handlePickSession(detail.sessionId);
+    };
+    const onNew = () => handleNewSession();
+    window.addEventListener("dra:session-select", onSelect);
+    window.addEventListener("dra:session-new", onNew);
+    return () => {
+      window.removeEventListener("dra:session-select", onSelect);
+      window.removeEventListener("dra:session-new", onNew);
+    };
+  }, [handlePickSession, handleNewSession]);
 
   const openTrace = (row: ChatRow) => {
     if (row.final) {
@@ -225,24 +298,7 @@ export default function ChatPage() {
 
   return (
     <div className="flex flex-1 min-h-0">
-      <div className="hidden lg:block">
-        <SessionsRail
-          currentSessionId={sessionId}
-          onSelect={(id) => {
-            if (id === sessionId) return;
-            sse.reset();
-            setRows([]);
-            setSessionId(id);
-            if (typeof window !== "undefined") {
-              window.localStorage.setItem("dra:lastSessionId", id);
-            }
-          }}
-          onNew={handleNewSession}
-          refreshKey={refreshKey}
-        />
-      </div>
-
-      <div className="flex-1 flex flex-col min-w-0">
+      <div className="flex-1 flex flex-col min-w-0 relative">
         <div className="h-14 px-8 border-b border-border flex items-center justify-between bg-background/80 backdrop-blur-sm sticky top-0 z-10">
           <div className="flex items-baseline gap-4 min-w-0">
             <h1 className="font-sans text-[15px] font-medium tracking-tight">
@@ -252,17 +308,18 @@ export default function ChatPage() {
               {sessionId ? `session · ${sessionId.slice(0, 8)}` : ""}
             </span>
           </div>
-          <div className="flex items-center gap-2">
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={handleNewSession}
-              className="font-mono text-[11px] uppercase tracking-[0.12em]"
-            >
-              New session
-            </Button>
-          </div>
         </div>
+
+        {showJumpPill && (
+          <button
+            onClick={jumpToBottom}
+            aria-label="Jump to latest message"
+            className="absolute left-1/2 -translate-x-1/2 bottom-28 z-20 flex items-center gap-2 px-3 py-1.5 rounded-full border border-border bg-background/95 backdrop-blur-sm shadow-md hover:bg-surface-hover transition-colors font-mono text-[11px] uppercase tracking-[0.12em] text-foreground"
+          >
+            <ArrowDown size={12} aria-hidden />
+            Jump to latest
+          </button>
+        )}
 
         <div
           ref={scrollRef}
@@ -333,13 +390,15 @@ function EmptyState({ onPick }: { onPick: (q: string) => void }) {
         What would you like to{" "}
         <span className="text-accent">research</span> today?
       </h1>
-      <p className="mt-5 font-sans text-base text-muted-foreground max-w-xl leading-relaxed">
+      <p className="mt-5 font-sans text-base text-muted-foreground max-w-prose leading-normal">
         Multi-source web research with claim verification. Every fact is
         traced back to a URL fetched in this session; conflicting sources
         are surfaced rather than hidden.
       </p>
-      <p className="mt-2 font-mono text-[11px] uppercase tracking-[0.14em] text-subtle-foreground">
-        Planning → Search → Fetch → Rerank → Probe → Synthesize → Verify
+      {/* Pipeline marquee — sentence case + horizontal scroll on narrow
+          viewports so the row never wraps awkwardly mid-arrow. */}
+      <p className="mt-2 font-mono text-[11px] text-subtle-foreground whitespace-nowrap overflow-x-auto -mx-2 px-2">
+        Planning · Search · Fetch · Rerank · Probe · Synthesize · Verify
       </p>
 
       <div className="mt-12">

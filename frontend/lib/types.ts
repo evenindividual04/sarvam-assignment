@@ -225,6 +225,14 @@ export interface SessionListItem {
   session_id: string;
   updated_at: string;
   turn_count: number;
+  /**
+   * Optional human-friendly title (e.g. derived from the first user query).
+   * The backend may populate this; the sidebar falls back to a session-id
+   * slug when absent. See `lib/sessions.ts::sessionDisplayTitle`.
+   */
+  title?: string | null;
+  /** Optional URL count rolled up across all turns; rendered as metadata. */
+  source_count?: number | null;
 }
 
 export interface Turn {

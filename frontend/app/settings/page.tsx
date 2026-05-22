@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { getSettingsDefaults } from "@/lib/api";
 import {
   clearOverrides,
@@ -11,7 +11,41 @@ import {
   type RuntimeOverrides,
 } from "@/lib/settings";
 import { Button } from "@/components/ui/button";
+import { Skeleton } from "@/components/ui/skeleton";
 import { toast } from "sonner";
+
+type SectionKey =
+  | "Retrieval"
+  | "Routing"
+  | "Approval gate"
+  | "Supplementary providers";
+
+const SECTION_ORDER: SectionKey[] = [
+  "Retrieval",
+  "Routing",
+  "Approval gate",
+  "Supplementary providers",
+];
+
+// Map each knob key to a UI section. Anything unmapped falls into "Retrieval"
+// so the page never silently drops a knob the backend just learned.
+const KNOB_SECTION: Record<string, SectionKey> = {
+  RETRIEVAL_MODE: "Retrieval",
+  FAILURE_POLICY_MAX_HOPS: "Retrieval",
+  CONTEXT_SELECTION_STRATEGY: "Retrieval",
+  MMR_LAMBDA: "Retrieval",
+  RETRIEVAL_DOMAIN_BLOCKLIST: "Retrieval",
+  PLANNER_PROVIDER: "Routing",
+  CLAIM_VERIFIER_PROVIDER: "Routing",
+  CONFLICT_PROBE_PROVIDER: "Routing",
+  FOLLOW_UP_PROVIDER: "Routing",
+  APPROVAL_TIMEOUT_S: "Approval gate",
+  SARVAM_INDIC_AUTO: "Supplementary providers",
+  LANG_DETECT_DISABLE_FASTTEXT: "Supplementary providers",
+  WIKIPEDIA_DISABLED: "Supplementary providers",
+  SCHOLAR_DISABLED: "Supplementary providers",
+  JINA_READER_DISABLED: "Supplementary providers",
+};
 
 export default function SettingsPage() {
   const [defaults, setDefaults] = useState<DefaultsResponse | null>(null);
@@ -28,18 +62,18 @@ export default function SettingsPage() {
       .finally(() => setLoading(false));
   }, []);
 
-  const setOverride = <K extends keyof RuntimeOverrides>(
-    key: K,
-    value: RuntimeOverrides[K] | undefined,
+  const setOverride = (
+    key: string,
+    value: RuntimeOverrides[keyof RuntimeOverrides] | undefined,
   ) => {
-    const next: RuntimeOverrides = { ...overrides };
+    const next = { ...overrides } as Record<string, unknown>;
     if (value === undefined) {
       delete next[key];
     } else {
       next[key] = value;
     }
-    setOverrides(next);
-    saveOverrides(next);
+    setOverrides(next as RuntimeOverrides);
+    saveOverrides(next as RuntimeOverrides);
   };
 
   const resetAll = () => {
@@ -48,8 +82,23 @@ export default function SettingsPage() {
     toast.info("Overrides cleared. Falling back to env defaults.");
   };
 
+  const grouped = useMemo(() => {
+    const g: Record<SectionKey, KnobDef[]> = {
+      Retrieval: [],
+      Routing: [],
+      "Approval gate": [],
+      "Supplementary providers": [],
+    };
+    if (!defaults) return g;
+    for (const k of defaults.knobs) {
+      const section = (KNOB_SECTION[k.key] ?? "Retrieval") as SectionKey;
+      g[section].push(k);
+    }
+    return g;
+  }, [defaults]);
+
   return (
-    <div className="px-8 md:px-12 py-12 max-w-[760px] mx-auto w-full">
+    <div className="px-6 md:px-12 py-12 max-w-5xl mx-auto w-full">
       <h1 className="text-2xl font-sans font-medium tracking-tight">
         Runtime Settings
       </h1>
@@ -57,23 +106,21 @@ export default function SettingsPage() {
         Per-request overrides · stored locally · sent with each turn
       </p>
 
-      <div className="mt-3 font-mono text-[11px] text-subtle-foreground leading-relaxed max-w-[560px]">
-        These knobs are read at request time. Eval runs from the CLI ignore
-        them and stay reproducible from env vars. Every saved turn stamps the
-        resolved config into its trace, so changes here don&apos;t rewrite history.
-        Secrets (API keys, DB path) are never exposed here by design.
-      </div>
+      <p className="mt-3 font-sans text-[13px] text-muted-foreground leading-normal max-w-prose">
+        These knobs are read at request time. Eval runs from the CLI ignore them
+        and stay reproducible from env vars. Every saved turn stamps the
+        resolved config into its trace, so changes here don’t rewrite
+        history. Secrets (API keys, DB path) are never exposed here by design.
+      </p>
 
-      {/* V3.11: active-overrides banner makes it impossible to forget that
-          settings flips persist across browser sessions until cleared. */}
       {Object.keys(overrides).length > 0 && (
-        <div className="mt-6 border border-accent/40 bg-accent-dim rounded-[6px] px-4 py-3 flex items-center justify-between gap-4">
+        <div className="mt-6 border border-accent/40 bg-accent-dim rounded-[6px] px-4 py-3 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
           <div className="space-y-0.5">
             <div className="font-mono text-[10px] uppercase tracking-[0.16em] text-accent">
               {Object.keys(overrides).length} override
               {Object.keys(overrides).length === 1 ? "" : "s"} active
             </div>
-            <div className="font-mono text-[11px] text-muted-foreground">
+            <div className="font-sans text-[12px] text-muted-foreground">
               Sent with every research request from this browser until cleared.
             </div>
           </div>
@@ -81,7 +128,7 @@ export default function SettingsPage() {
             variant="ghost"
             size="sm"
             onClick={resetAll}
-            className="font-mono text-[10px] uppercase tracking-[0.12em] shrink-0"
+            className="font-mono text-[10px] uppercase tracking-[0.12em] shrink-0 self-start sm:self-auto"
           >
             Reset all
           </Button>
@@ -89,9 +136,9 @@ export default function SettingsPage() {
       )}
 
       {loading && (
-        <div className="mt-10 space-y-2">
-          {Array.from({ length: 3 }).map((_, i) => (
-            <div key={i} className="h-16 rounded-[4px] animate-pulse bg-[var(--surface-hover)]" />
+        <div className="mt-10 space-y-3">
+          {Array.from({ length: 4 }).map((_, i) => (
+            <Skeleton key={i} className="h-16 w-full" />
           ))}
         </div>
       )}
@@ -103,46 +150,85 @@ export default function SettingsPage() {
 
       {defaults && (
         <>
-          <div className="mt-12 mb-6 flex items-baseline justify-between">
-            <h2 className="font-mono text-[10px] uppercase tracking-[0.18em] text-muted-foreground">
-              Knobs
-            </h2>
-            {Object.keys(overrides).length > 0 && (
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={resetAll}
-                className="font-mono text-[10px] uppercase tracking-[0.14em]"
-              >
-                Reset all to env defaults
-              </Button>
-            )}
-          </div>
+          {SECTION_ORDER.map((section) => {
+            const knobs = grouped[section];
+            if (knobs.length === 0) return null;
+            return (
+              <section key={section} className="mt-12">
+                <div className="flex items-baseline justify-between border-b border-border pb-3 mb-2">
+                  <h2 className="font-sans text-[14px] font-medium tracking-tight text-foreground">
+                    {section}
+                  </h2>
+                  <span className="font-mono text-[10px] uppercase tracking-[0.18em] text-subtle-foreground">
+                    {knobs.length} knob{knobs.length === 1 ? "" : "s"}
+                  </span>
+                </div>
+                {knobs.map((knob) => (
+                  <KnobRow
+                    key={knob.key}
+                    knob={knob}
+                    value={
+                      (overrides as Record<string, unknown>)[knob.key] as
+                        | RuntimeOverrides[keyof RuntimeOverrides]
+                        | undefined
+                    }
+                    onChange={(v) => setOverride(knob.key, v)}
+                    defaultValue={resolveDefault(knob, defaults)}
+                  />
+                ))}
+              </section>
+            );
+          })}
 
-          <div className="border-t border-border">
-            {defaults.knobs.map((knob) => (
-              <KnobRow
-                key={knob.key}
-                knob={knob}
-                value={overrides[knob.key]}
-                onChange={(v) => setOverride(knob.key, v)}
-                defaultValue={resolveDefault(knob, defaults)}
-              />
-            ))}
-          </div>
-
-          <div className="mt-12 pt-6 border-t border-border">
-            <div className="font-mono text-[10px] uppercase tracking-[0.18em] text-muted-foreground mb-3">
-              Effective config (no overrides)
+          <section className="mt-14 pt-6 border-t border-border">
+            <div className="flex items-baseline justify-between mb-3">
+              <h2 className="font-sans text-[14px] font-medium tracking-tight text-foreground">
+                Effective config
+              </h2>
+              <span className="font-mono text-[10px] uppercase tracking-[0.16em] text-subtle-foreground">
+                {Object.keys(overrides).length === 0
+                  ? "no overrides — pure env defaults"
+                  : `${Object.keys(overrides).length} override(s) layered on top`}
+              </span>
             </div>
-            <pre className="font-mono text-[11px] text-muted-foreground bg-surface border border-border rounded-[6px] p-4 overflow-x-auto">
-{JSON.stringify(defaults.effective, null, 2)}
+            <p className="font-sans text-[12px] text-muted-foreground mb-3">
+              Effective baseline returned by{" "}
+              <code className="font-mono text-[11px] bg-surface-hover border border-border rounded-[3px] px-1 py-px">
+                GET /settings/defaults
+              </code>
+              , merged with active overrides (if any).
+            </p>
+            <pre className="font-mono text-[11px] text-muted-foreground bg-surface border border-border rounded-[6px] p-4 overflow-x-auto leading-normal tabular-nums-lining">
+              {JSON.stringify(mergedEffective(defaults, overrides), null, 2)}
             </pre>
-          </div>
+            <div className="mt-2 font-mono text-[10px] uppercase tracking-[0.14em] text-subtle-foreground">
+              Local overrides:{" "}
+              {Object.keys(overrides).length === 0
+                ? "{}"
+                : JSON.stringify(overrides)}
+            </div>
+          </section>
         </>
       )}
     </div>
   );
+}
+
+/**
+ * Returns the merged "what would actually be in effect right now" payload —
+ * backend's effective baseline overlaid with the user's local overrides. We
+ * keep the merge shallow because overrides are flat string/number values.
+ */
+function mergedEffective(
+  defaults: DefaultsResponse,
+  overrides: RuntimeOverrides,
+): Record<string, unknown> {
+  const base: Record<string, unknown> = { ...defaults.effective };
+  for (const [k, v] of Object.entries(overrides)) {
+    if (v === undefined) continue;
+    base[k] = v;
+  }
+  return base;
 }
 
 function resolveDefault(knob: KnobDef, defaults: DefaultsResponse): string {
@@ -151,6 +237,8 @@ function resolveDefault(knob: KnobDef, defaults: DefaultsResponse): string {
   if (knob.key === "FAILURE_POLICY_MAX_HOPS") return String(e.max_hops);
   if (knob.key === "CONTEXT_SELECTION_STRATEGY")
     return String(e.selection_strategy);
+  if (knob.key === "MMR_LAMBDA")
+    return e.mmr_lambda != null ? String(e.mmr_lambda) : "0.7";
   if (knob.key === "RETRIEVAL_DOMAIN_BLOCKLIST") {
     const list = e.domain_blocklist;
     if (Array.isArray(list) && list.length > 0) {
@@ -158,7 +246,7 @@ function resolveDefault(knob: KnobDef, defaults: DefaultsResponse): string {
     }
     return "none";
   }
-  return "—";
+  return "env";
 }
 
 interface KnobRowProps {
@@ -173,16 +261,17 @@ function KnobRow({ knob, value, onChange, defaultValue }: KnobRowProps) {
   return (
     <div
       className={
-        "grid grid-cols-[1fr_220px] gap-6 py-5 pl-4 border-b border-border items-start border-l-2 " +
+        "grid grid-cols-1 md:grid-cols-[minmax(0,3fr)_minmax(0,2fr)] gap-4 md:gap-8 py-5 pl-4 border-b border-border items-start border-l-2 " +
         (overridden ? "border-l-accent" : "border-l-transparent")
       }
     >
-      <div>
-        <div className="text-[14px] text-foreground">{knob.label}</div>
-        <div className="mt-1 font-mono text-[10px] uppercase tracking-[0.12em] text-subtle-foreground">
+      <div className="min-w-0">
+        <div className="text-[14px] font-sans text-foreground">{knob.label}</div>
+        <div className="mt-1 font-mono text-[10px] uppercase tracking-[0.12em] text-subtle-foreground break-all">
           {knob.key}
           <span className="ml-2 normal-case tracking-normal">
-            env default: <span className="text-muted-foreground">{defaultValue}</span>
+            env default:{" "}
+            <span className="text-muted-foreground">{defaultValue}</span>
           </span>
           {overridden && (
             <span className="ml-2 normal-case tracking-normal text-accent">
@@ -191,13 +280,13 @@ function KnobRow({ knob, value, onChange, defaultValue }: KnobRowProps) {
           )}
         </div>
         {knob.note && (
-          <div className="mt-2 font-mono text-[10px] text-subtle-foreground leading-relaxed">
+          <div className="mt-2 font-sans text-[12px] text-muted-foreground leading-relaxed">
             {knob.note}
           </div>
         )}
       </div>
 
-      <div className="flex flex-col items-end gap-2">
+      <div className="min-w-0 md:justify-self-end w-full md:max-w-full">
         {knob.type === "boolean" && (
           <BoolControl
             value={value as "0" | "1" | undefined}
@@ -207,6 +296,14 @@ function KnobRow({ knob, value, onChange, defaultValue }: KnobRowProps) {
         )}
         {knob.type === "integer" && (
           <IntControl
+            value={value as number | undefined}
+            min={knob.min}
+            max={knob.max}
+            onChange={onChange as (v: number | undefined) => void}
+          />
+        )}
+        {(knob.type === "float") && (
+          <FloatControl
             value={value as number | undefined}
             min={knob.min}
             max={knob.max}
@@ -232,6 +329,21 @@ function KnobRow({ knob, value, onChange, defaultValue }: KnobRowProps) {
   );
 }
 
+/**
+ * Unified chip styling so every selectable control across the page reads as
+ * one component family — bordered when inactive, filled teal when active.
+ */
+function chipClass(active: boolean, disabled?: boolean): string {
+  const base =
+    "font-mono text-[11px] uppercase tracking-[0.12em] px-3 py-1.5 border rounded-[4px] transition-colors shrink-0";
+  if (disabled) {
+    return `${base} opacity-40 cursor-not-allowed border-border text-muted-foreground`;
+  }
+  return active
+    ? `${base} border-accent bg-accent text-accent-foreground`
+    : `${base} border-border text-muted-foreground hover:border-border-strong hover:text-foreground`;
+}
+
 function StringControl({
   value,
   onChange,
@@ -240,26 +352,26 @@ function StringControl({
   onChange: (v: string | undefined) => void;
 }) {
   return (
-    <div className="flex items-center gap-2">
-      <button
-        onClick={() => onChange(undefined)}
-        className={`font-mono text-[11px] uppercase tracking-[0.12em] px-3 py-1.5 border ${
-          value === undefined
-            ? "border-accent text-accent bg-accent-dim"
-            : "border-border text-muted-foreground hover:border-border-strong"
-        }`}
-      >
-        default
-      </button>
+    <div className="flex flex-col gap-2 w-full">
+      <div className="flex items-center gap-2 flex-wrap">
+        <button
+          type="button"
+          onClick={() => onChange(undefined)}
+          className={chipClass(value === undefined)}
+        >
+          default
+        </button>
+      </div>
       <input
         type="text"
         value={value ?? ""}
-        placeholder="extra.com, another.com  (or 'none')"
+        placeholder="extra.com, another.com (or ‘none’)"
+        aria-label="Domain blocklist override"
         onChange={(e) => {
           const v = e.target.value;
           onChange(v === "" ? undefined : v);
         }}
-        className="w-[240px] font-mono text-[12px] bg-background border border-border rounded-[4px] px-2 py-1.5 text-foreground"
+        className="w-full min-w-0 font-mono text-[12px] bg-background border border-border rounded-[4px] px-3 py-2 text-foreground focus:outline-none focus:border-accent"
       />
     </div>
   );
@@ -274,32 +386,29 @@ function BoolControl({
   disabled?: boolean;
   onChange: (v: "0" | "1" | undefined) => void;
 }) {
-  const pickerCls = (active: boolean) =>
-    `font-mono text-[11px] uppercase tracking-[0.12em] px-3 py-1.5 border ${
-      active
-        ? "border-accent text-accent bg-accent-dim"
-        : "border-border text-muted-foreground hover:border-border-strong"
-    } ${disabled ? "opacity-40 cursor-not-allowed" : ""}`;
   return (
-    <div className="flex gap-1">
+    <div className="flex flex-nowrap gap-1 overflow-x-auto md:justify-end">
       <button
+        type="button"
         disabled={disabled}
         onClick={() => onChange(undefined)}
-        className={pickerCls(value === undefined)}
+        className={chipClass(value === undefined, disabled)}
       >
         default
       </button>
       <button
+        type="button"
         disabled={disabled}
         onClick={() => onChange("0")}
-        className={pickerCls(value === "0")}
+        className={chipClass(value === "0", disabled)}
       >
         off
       </button>
       <button
+        type="button"
         disabled={disabled}
         onClick={() => onChange("1")}
-        className={pickerCls(value === "1")}
+        className={chipClass(value === "1", disabled)}
       >
         on
       </button>
@@ -319,14 +428,11 @@ function IntControl({
   onChange: (v: number | undefined) => void;
 }) {
   return (
-    <div className="flex items-center gap-2">
+    <div className="flex flex-nowrap items-center gap-2 overflow-x-auto md:justify-end">
       <button
+        type="button"
         onClick={() => onChange(undefined)}
-        className={`font-mono text-[11px] uppercase tracking-[0.12em] px-3 py-1.5 border ${
-          value === undefined
-            ? "border-accent text-accent bg-accent-dim"
-            : "border-border text-muted-foreground hover:border-border-strong"
-        }`}
+        className={chipClass(value === undefined)}
       >
         default
       </button>
@@ -336,11 +442,50 @@ function IntControl({
         max={max}
         value={value ?? ""}
         placeholder={`${min ?? ""}–${max ?? ""}`}
+        aria-label="Override value"
         onChange={(e) => {
           const v = e.target.value;
           onChange(v === "" ? undefined : Number(v));
         }}
-        className="w-20 font-mono text-[12px] tabular-nums bg-background border border-border rounded-[4px] px-2 py-1.5 text-foreground"
+        className="w-24 font-mono text-[12px] tabular-nums bg-background border border-border rounded-[4px] px-2 py-1.5 text-foreground focus:outline-none focus:border-accent shrink-0"
+      />
+    </div>
+  );
+}
+
+function FloatControl({
+  value,
+  min,
+  max,
+  onChange,
+}: {
+  value: number | undefined;
+  min?: number;
+  max?: number;
+  onChange: (v: number | undefined) => void;
+}) {
+  return (
+    <div className="flex flex-nowrap items-center gap-2 overflow-x-auto md:justify-end">
+      <button
+        type="button"
+        onClick={() => onChange(undefined)}
+        className={chipClass(value === undefined)}
+      >
+        default
+      </button>
+      <input
+        type="number"
+        step="0.05"
+        min={min}
+        max={max}
+        value={value ?? ""}
+        placeholder={`${min ?? "0.0"}–${max ?? "1.0"}`}
+        aria-label="Override value"
+        onChange={(e) => {
+          const v = e.target.value;
+          onChange(v === "" ? undefined : Number(v));
+        }}
+        className="w-24 font-mono text-[12px] tabular-nums bg-background border border-border rounded-[4px] px-2 py-1.5 text-foreground focus:outline-none focus:border-accent shrink-0"
       />
     </div>
   );
@@ -357,50 +502,42 @@ function EnumControl({
   effectivePerChoice?: Record<string, string>;
   onChange: (v: string | undefined) => void;
 }) {
-  const pickerCls = (active: boolean, unavailable?: boolean) =>
-    `font-mono text-[11px] uppercase tracking-[0.12em] px-3 py-1.5 border ${
-      unavailable
-        ? "opacity-50 cursor-not-allowed border-border text-muted-foreground"
-        : active
-        ? "border-accent text-accent bg-accent-dim"
-        : "border-border text-muted-foreground hover:border-border-strong"
-    }`;
   return (
-    <div className="flex flex-col items-end gap-2">
-      <div className="flex flex-wrap gap-1 justify-end">
-        <button
-          onClick={() => onChange(undefined)}
-          className={pickerCls(value === undefined)}
-        >
-          default
-        </button>
-        {choices.map((c) => {
-          const eff = effectivePerChoice?.[c];
-          const unavailable = eff === "unavailable";
-          return (
-            <button
-              key={c}
-              disabled={unavailable}
-              onClick={() => onChange(c)}
-              title={
-                eff && eff !== c
-                  ? `→ effective: ${eff}`
-                  : unavailable
+    <div className="flex flex-nowrap items-center gap-1 overflow-x-auto md:justify-end -mx-1 px-1">
+      <button
+        type="button"
+        onClick={() => onChange(undefined)}
+        className={chipClass(value === undefined)}
+      >
+        default
+      </button>
+      {choices.map((c) => {
+        const eff = effectivePerChoice?.[c];
+        const unavailable = eff === "unavailable";
+        return (
+          <button
+            key={c}
+            type="button"
+            disabled={unavailable}
+            onClick={() => onChange(c)}
+            title={
+              eff && eff !== c
+                ? `→ effective: ${eff}`
+                : unavailable
                   ? "Not available on this host"
                   : undefined
-              }
-              className={pickerCls(value === c, unavailable)}
-            >
-              {c}
-              {eff && eff !== c && eff !== "unavailable" && (
-                <span className="ml-1 opacity-60 normal-case tracking-normal">
-                  → {eff}
-                </span>
-              )}
-            </button>
-          );
-        })}
-      </div>
+            }
+            className={chipClass(value === c, unavailable)}
+          >
+            {c}
+            {eff && eff !== c && eff !== "unavailable" && (
+              <span className="ml-1 opacity-70 normal-case tracking-normal">
+                → {eff}
+              </span>
+            )}
+          </button>
+        );
+      })}
     </div>
   );
 }

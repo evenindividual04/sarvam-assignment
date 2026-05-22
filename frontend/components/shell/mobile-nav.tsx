@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useRouter, usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
-import { MenuIcon } from "lucide-react";
+import { MenuIcon, PlusIcon } from "lucide-react";
 import {
   Sheet,
   SheetContent,
@@ -15,60 +15,73 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { ThemeToggle } from "./theme-toggle";
 import { QuotaPill } from "./quota-pill";
 import { listSessions } from "@/lib/api";
-import { formatRelativeTime, truncate } from "@/lib/format";
 import type { SessionListItem } from "@/lib/types";
 import { cn } from "@/lib/utils";
+import {
+  SESSION_GROUP_ORDER,
+  groupSessionsByDate,
+  sessionDisplayTitle,
+} from "@/lib/sessions";
 
-const NAV = [
-  { href: "/", label: "Chat" },
-  { href: "/sessions", label: "Sessions" },
+const ADMIN_NAV = [
   { href: "/eval", label: "Eval" },
   { href: "/settings", label: "Settings" },
   { href: "/status", label: "Status" },
-];
-
-const RECENT_LIMIT = 10;
+] as const;
 
 export function MobileNav() {
   const pathname = usePathname();
   const router = useRouter();
   const [open, setOpen] = useState(false);
   const [sessions, setSessions] = useState<SessionListItem[]>([]);
-  const [sessionsLoaded, setSessionsLoaded] = useState(false);
+  const [loaded, setLoaded] = useState(false);
 
-  // Fetch recent sessions only when the sheet opens — keeps cold paint cheap.
+  // Lazy-load the session list when the drawer opens so the cold paint stays cheap.
   useEffect(() => {
-    if (!open || sessionsLoaded) return;
+    if (!open || loaded) return;
     let alive = true;
     listSessions()
       .then((s) => {
         if (alive) {
-          setSessions(s.slice(0, RECENT_LIMIT));
-          setSessionsLoaded(true);
+          setSessions(s);
+          setLoaded(true);
         }
       })
       .catch(() => {
-        if (alive) setSessionsLoaded(true);
+        if (alive) setLoaded(true);
       });
     return () => {
       alive = false;
     };
-  }, [open, sessionsLoaded]);
+  }, [open, loaded]);
 
   const onPickSession = (id: string) => {
     if (typeof window !== "undefined") {
       window.localStorage.setItem("dra:lastSessionId", id);
+      window.dispatchEvent(
+        new CustomEvent("dra:session-select", { detail: { sessionId: id } }),
+      );
     }
     setOpen(false);
     router.push("/");
   };
+
+  const onNewSession = () => {
+    if (typeof window !== "undefined") {
+      window.dispatchEvent(new CustomEvent("dra:session-new"));
+    }
+    setOpen(false);
+    router.push("/");
+  };
+
+  const groups = groupSessionsByDate(sessions);
 
   return (
     <div className="md:hidden flex items-center gap-3 px-5 h-14 border-b border-border sticky top-0 bg-background/80 backdrop-blur-sm z-20">
       <Sheet open={open} onOpenChange={setOpen}>
         <SheetTrigger
           render={
-            <Button variant="ghost" size="icon">
+            <Button variant="ghost" size="icon" aria-label="Open menu">
               <MenuIcon className="size-5" />
             </Button>
           }
@@ -79,24 +92,80 @@ export function MobileNav() {
           className="w-[280px] p-0 bg-background border-r border-border flex flex-col"
         >
           <SheetTitle className="sr-only">Navigation</SheetTitle>
-          <div className="px-6 pt-6 pb-5 border-b border-border">
-            <div className="text-[15px] font-medium tracking-tight">
+
+          <div className="px-5 pt-5 pb-4 border-b border-border flex items-center justify-between">
+            <span className="text-[15px] font-medium tracking-tight">
               Deep Research
-            </div>
+            </span>
+            <ThemeToggle size="sm" />
           </div>
-          <nav className="px-6 py-5 flex flex-col gap-0.5 border-b border-border">
-            {NAV.map((item) => {
-              const active =
-                item.href === "/"
-                  ? pathname === "/"
-                  : pathname?.startsWith(item.href);
+
+          <div className="px-4 pt-4 pb-2">
+            <button
+              onClick={onNewSession}
+              className="w-full flex items-center justify-center gap-2 h-9 rounded-[6px] border border-border-accent/40 bg-accent-dim/40 hover:bg-accent-dim text-accent font-sans text-[13px] font-medium tracking-tight transition-colors"
+            >
+              <PlusIcon size={14} aria-hidden />
+              <span>New session</span>
+            </button>
+          </div>
+
+          <ScrollArea className="flex-1">
+            <div className="py-1">
+              {!loaded && (
+                <div className="px-5 py-3 space-y-2">
+                  {Array.from({ length: 3 }).map((_, i) => (
+                    <div
+                      key={i}
+                      className="h-7 rounded-[4px] animate-pulse bg-[var(--surface-hover)]"
+                    />
+                  ))}
+                </div>
+              )}
+              {loaded && sessions.length === 0 && (
+                <div className="px-5 py-4 font-mono text-[11px] text-subtle-foreground leading-relaxed">
+                  No sessions yet — start one ↑
+                </div>
+              )}
+
+              {SESSION_GROUP_ORDER.map((group) => {
+                const items = groups[group];
+                if (items.length === 0) return null;
+                return (
+                  <div key={group} className="mb-3">
+                    <div className="px-5 pt-2 pb-1 font-display italic text-[12px] text-subtle-foreground lowercase tracking-tight">
+                      {group}
+                    </div>
+                    {items.map((s) => (
+                      <button
+                        key={s.session_id}
+                        onClick={() => onPickSession(s.session_id)}
+                        className="w-full text-left px-5 py-2 border-l-2 border-transparent hover:bg-surface-hover/60 transition-colors flex flex-col gap-0.5"
+                      >
+                        <span className="font-sans text-[13px] text-foreground/90 truncate leading-tight">
+                          {sessionDisplayTitle(s)}
+                        </span>
+                        <span className="font-mono text-[10px] text-subtle-foreground tabular-nums">
+                          {s.turn_count} {s.turn_count === 1 ? "turn" : "turns"}
+                        </span>
+                      </button>
+                    ))}
+                  </div>
+                );
+              })}
+            </div>
+          </ScrollArea>
+
+          <nav className="px-5 py-3 border-t border-border flex flex-col gap-0.5">
+            {ADMIN_NAV.map((item) => {
+              const active = pathname?.startsWith(item.href);
               return (
                 <Link
                   key={item.href}
                   href={item.href}
                   onClick={() => setOpen(false)}
                   className={cn(
-                    "py-2 font-sans text-[13px] uppercase tracking-[0.12em] transition-colors",
+                    "py-1.5 font-sans text-[12px] tracking-tight transition-colors",
                     active
                       ? "text-foreground"
                       : "text-muted-foreground hover:text-foreground",
@@ -108,65 +177,15 @@ export function MobileNav() {
             })}
           </nav>
 
-          {/* Sessions section — fixes the "mobile users can't switch sessions"
-              gap. The desktop SessionsRail (`hidden lg:block`) was unreachable
-              below 1024px; here we surface the 10 most-recent inline. */}
-          <div className="px-6 py-4 border-b border-border">
-            <div className="flex items-center justify-between mb-2">
-              <span className="font-mono text-[10px] uppercase tracking-[0.18em] text-muted-foreground">
-                Recent sessions
-              </span>
-              <Link
-                href="/sessions"
-                onClick={() => setOpen(false)}
-                className="font-mono text-[10px] uppercase tracking-[0.12em] text-muted-foreground hover:text-accent transition-colors"
-              >
-                View all →
-              </Link>
-            </div>
-          </div>
-          <ScrollArea className="flex-1">
-            <div className="py-1">
-              {!sessionsLoaded && (
-                <div className="px-6 py-3 space-y-2">
-                  {Array.from({ length: 3 }).map((_, i) => (
-                    <div
-                      key={i}
-                      className="h-7 rounded-[4px] animate-pulse bg-[var(--surface-hover)]"
-                    />
-                  ))}
-                </div>
-              )}
-              {sessionsLoaded && sessions.length === 0 && (
-                <div className="px-6 py-4 font-mono text-[11px] text-subtle-foreground leading-relaxed">
-                  No sessions yet. Send a query to start one.
-                </div>
-              )}
-              {sessions.map((s) => (
-                <button
-                  key={s.session_id}
-                  onClick={() => onPickSession(s.session_id)}
-                  className="w-full text-left px-5 py-2.5 border-l-2 border-transparent hover:bg-surface-hover/60 hover:border-border-strong transition-colors flex flex-col gap-0.5"
-                >
-                  <span className="font-mono text-[11px] text-foreground truncate">
-                    {truncate(s.session_id, 24)}
-                  </span>
-                  <span className="font-mono text-[10px] text-subtle-foreground tabular-nums">
-                    {s.turn_count}T · {formatRelativeTime(s.updated_at)}
-                  </span>
-                </button>
-              ))}
-            </div>
-          </ScrollArea>
-
-          <div className="px-6 py-4 border-t border-border space-y-3">
+          <div className="px-5 py-3 border-t border-border space-y-2">
             <QuotaPill />
-            <div className="flex items-center justify-end">
-              <ThemeToggle size="sm" />
+            <div className="font-mono text-[10px] uppercase tracking-[0.18em] text-subtle-foreground pt-1">
+              Built for Sarvam — 2026
             </div>
           </div>
         </SheetContent>
       </Sheet>
+
       <div className="flex flex-col flex-1">
         <span className="text-sm font-medium tracking-tight leading-none">
           Deep Research

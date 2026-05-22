@@ -1,32 +1,76 @@
 "use client";
 
-import { ThemeProvider as NextThemesProvider } from "next-themes";
-import type { ComponentProps } from "react";
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useState,
+  type ReactNode,
+} from "react";
 
-// next-themes 1.0+ no longer exports ThemeProviderProps as a named type.
-// Derive it from the component itself so future shape changes stay in sync.
-type ThemeProviderProps = ComponentProps<typeof NextThemesProvider>;
+export type Theme = "light" | "dark";
 
-/**
- * Client-only wrapper around `next-themes` so the server-rendered
- * `app/layout.tsx` can mount the provider without becoming a client
- * component itself.
- *
- * Configured for class-based theming on `<html>`, dark default, and no
- * system-preference auto-switch — the toggle is explicit so user intent
- * is the only signal. (System preference following can be re-enabled by
- * flipping `enableSystem` to `true` at the call site.)
- */
-export function ThemeProvider({ children, ...props }: ThemeProviderProps) {
+interface ThemeContextValue {
+  theme: Theme;
+  resolvedTheme: Theme;
+  setTheme: (theme: Theme) => void;
+}
+
+const STORAGE_KEY = "theme";
+const DEFAULT_THEME: Theme = "dark";
+
+const ThemeContext = createContext<ThemeContextValue | null>(null);
+
+function applyTheme(theme: Theme) {
+  const root = document.documentElement;
+  root.classList.remove("light", "dark");
+  root.classList.add(theme);
+  root.style.colorScheme = theme;
+}
+
+function readStoredTheme(): Theme {
+  try {
+    const stored = localStorage.getItem(STORAGE_KEY);
+    if (stored === "light" || stored === "dark") return stored;
+  } catch {
+    // localStorage unavailable (private mode, SSR) — fall through.
+  }
+  return DEFAULT_THEME;
+}
+
+export function ThemeProvider({ children }: { children: ReactNode }) {
+  const [theme, setThemeState] = useState<Theme>(DEFAULT_THEME);
+
+  useEffect(() => {
+    const initial = readStoredTheme();
+    setThemeState(initial);
+    applyTheme(initial);
+  }, []);
+
+  const setTheme = useCallback((next: Theme) => {
+    setThemeState(next);
+    applyTheme(next);
+    try {
+      localStorage.setItem(STORAGE_KEY, next);
+    } catch {
+      // Persistence is best-effort.
+    }
+  }, []);
+
   return (
-    <NextThemesProvider
-      attribute="class"
-      defaultTheme="dark"
-      enableSystem={false}
-      disableTransitionOnChange
-      {...props}
-    >
+    <ThemeContext.Provider value={{ theme, resolvedTheme: theme, setTheme }}>
       {children}
-    </NextThemesProvider>
+    </ThemeContext.Provider>
   );
+}
+
+export function useTheme(): ThemeContextValue {
+  const ctx = useContext(ThemeContext);
+  if (!ctx) {
+    // Mirror next-themes' permissive behavior so SSR / out-of-tree consumers
+    // don't throw — the toggle component already gates on `mounted`.
+    return { theme: DEFAULT_THEME, resolvedTheme: DEFAULT_THEME, setTheme: () => {} };
+  }
+  return ctx;
 }

@@ -248,7 +248,7 @@ export default function QuestionDetailPage({ params }: PageProps) {
                   <div className="font-mono text-[10px] uppercase tracking-[0.18em] text-subtle-foreground mb-3">
                     Judge reasoning
                   </div>
-                  <div className="border border-border bg-surface rounded-[6px] p-5 text-[14px] leading-relaxed whitespace-pre-wrap text-foreground">
+                  <div className="border border-border bg-surface rounded-[6px] p-5 text-[14px] leading-normal whitespace-pre-wrap text-foreground max-w-prose">
                     {detail.judge_reasoning}
                   </div>
                 </div>

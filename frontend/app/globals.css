@@ -177,7 +177,11 @@
   }
   body {
     @apply bg-background text-foreground;
-    font-feature-settings: "ss01", "cv11";
+    font-feature-settings: "ss01", "cv11", "kern" 1, "liga" 1;
+    text-rendering: optimizeLegibility;
+  }
+  .tabular-nums-lining {
+    font-variant-numeric: tabular-nums lining-nums;
   }
   html {
     @apply font-sans;

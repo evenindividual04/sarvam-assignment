@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { useTheme } from "next-themes";
+import { useTheme } from "@/components/shell/theme-provider";
 import { MoonIcon, SunIcon } from "lucide-react";
 import { cn } from "@/lib/utils";
 

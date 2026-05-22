@@ -104,11 +104,11 @@ export default function RunSummaryPage({ params }: PageProps) {
             <div className="font-mono text-[11px] uppercase tracking-[0.18em] text-muted-foreground">
               Pass rate
             </div>
-            <div className="mt-2 font-mono tabular-nums text-6xl md:text-7xl text-foreground leading-none">
+            <div className="mt-2 font-mono tabular-nums-lining text-6xl md:text-7xl text-foreground leading-none">
               {passPct.toFixed(0)}
               <span className="text-muted-foreground">%</span>
             </div>
-            <div className="mt-3 font-mono text-[11px] text-muted-foreground tabular-nums">
+            <div className="mt-3 font-mono text-[11px] text-muted-foreground tabular-nums-lining">
               {questions.length || Object.values(summary.failure_class_distribution).reduce((a, b) => a + b, 0)} questions evaluated
             </div>
           </div>
@@ -510,11 +510,11 @@ function FailureClassLegend() {
   const items: { fc: string; explanation: string }[] = [
     { fc: "PASS", explanation: "Judges agreed the answer is grounded, relevant, and well-cited." },
     { fc: "HALLUCINATION_FACT", explanation: "A claim asserted in the answer is not present in the retrieved context." },
-    { fc: "HALLUCINATION_ATTRIBUTION", explanation: "A citation points to a doc that doesn't support the claim it's attached to." },
-    { fc: "KNOWLEDGE_BLEED", explanation: "The answer leaned on the model's training-data prior instead of the retrieved context." },
-    { fc: "RETRIEVAL_FAILURE", explanation: "Retrieval didn't surface the relevant information; synthesis was set up to fail." },
+    { fc: "HALLUCINATION_ATTRIBUTION", explanation: "A citation points to a doc that doesn’t support the claim it’s attached to." },
+    { fc: "KNOWLEDGE_BLEED", explanation: "The answer leaned on the model’s training-data prior instead of the retrieved context." },
+    { fc: "RETRIEVAL_FAILURE", explanation: "Retrieval didn’t surface the relevant information; synthesis was set up to fail." },
     { fc: "CONFLICT_MISS", explanation: "Sources disagreed but the agent picked a side without surfacing the disagreement." },
-    { fc: "COHERENCE_FAIL", explanation: "A multi-turn follow-up lost the prior turn's context." },
+    { fc: "COHERENCE_FAIL", explanation: "A multi-turn follow-up lost the prior turn’s context." },
   ];
   return (
     <details className="mb-6 border border-border rounded-[6px] bg-surface px-5 py-3">
@@ -527,7 +527,7 @@ function FailureClassLegend() {
             <span className={`inline-block px-1.5 py-0.5 rounded-[3px] border font-mono text-[10px] uppercase tracking-[0.10em] shrink-0 ${failureClassColor(fc)}`}>
               {fc}
             </span>
-            <span className="text-[12px] text-muted-foreground leading-relaxed">
+            <span className="text-[12px] text-muted-foreground leading-normal max-w-prose">
               {explanation}
             </span>
           </li>

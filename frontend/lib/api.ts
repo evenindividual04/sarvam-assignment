@@ -40,7 +40,7 @@ export async function getHealth(): Promise<{ status: string; version?: string }>
 export interface ProviderProbe {
   name: string;
   role: string;
-  status: "ok" | "degraded" | "down" | "missing_key";
+  status: "ok" | "degraded" | "down" | "missing_key" | "not_configured";
   latency_ms: number | null;
   detail: string;
 }

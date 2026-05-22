@@ -95,7 +95,7 @@ export function ClaimsTable({ rows }: ClaimsTableProps) {
             className="grid grid-cols-[1.5fr_140px_100px_140px_120px] gap-4 py-4 border-b border-border items-start"
           >
             <div>
-              <div className="text-[13px] leading-relaxed text-foreground line-clamp-3">
+              <div className="text-[13px] leading-normal text-foreground line-clamp-3">
                 {r.claim_text}
               </div>
               {r.reasoning && (
@@ -131,7 +131,7 @@ export function ClaimsTable({ rows }: ClaimsTableProps) {
                   style={{ width: `${pct}%` }}
                 />
               </div>
-              <span className="font-mono tabular-nums text-[11px] text-foreground">
+              <span className="font-mono tabular-nums-lining text-[11px] text-foreground">
                 {normalized.toFixed(2)}
               </span>
             </div>

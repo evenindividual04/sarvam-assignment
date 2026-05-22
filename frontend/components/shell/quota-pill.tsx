@@ -54,7 +54,7 @@ export function QuotaPill() {
     return (
       <Link
         href="/status"
-        className="block font-mono text-[10px] uppercase tracking-[0.14em] text-subtle-foreground hover:text-foreground transition-colors"
+        className="block font-mono text-[10px] uppercase tracking-[0.14em] text-muted-foreground hover:text-foreground transition-colors"
         title="No usage recorded today yet"
       >
         Quota — no usage today
@@ -75,10 +75,10 @@ export function QuotaPill() {
       title={`${hottest.provider}: ${hottest.requests}${limit ? `/${limit}` : ""} requests today (click for full per-provider snapshot)`}
     >
       <span className={cn("inline-block size-[6px] rounded-full shrink-0", dotColor)} />
-      <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-muted-foreground group-hover:text-foreground transition-colors truncate">
+      <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-foreground/80 group-hover:text-foreground transition-colors truncate">
         {hottest.provider} {hottest.requests}
         {limit > 0 && `/${limit}`}
-        {pctLabel && <span className="ml-1 text-subtle-foreground">· {pctLabel}</span>}
+        {pctLabel && <span className="ml-1 text-muted-foreground">· {pctLabel}</span>}
       </span>
     </Link>
   );

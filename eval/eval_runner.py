@@ -1163,7 +1163,7 @@ async def _run_preflight() -> None:
         print(f"  {ok_n}/{len(snap.providers)} providers OK  ·  overall={snap.overall}")
         for p in snap.providers:
             marker = {"ok": "✓", "degraded": "~", "down": "✗",
-                      "missing_key": "·"}.get(p.status, "?")
+                      "missing_key": "·", "not_configured": "·"}.get(p.status, "?")
             latency = f"{p.latency_ms} ms" if p.latency_ms is not None else "—"
             print(f"  {marker} {p.name:<14} {p.role:<16} {p.status:<12} {latency:>8}"
                   + (f"  {p.detail}" if p.detail else ""))

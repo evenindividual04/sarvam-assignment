@@ -70,7 +70,7 @@ export default function SessionDetailPage({ params }: PageProps) {
       await navigator.clipboard.writeText(url);
       toast.success("Turn link copied");
     } catch {
-      toast.error("Couldn't copy link");
+      toast.error("Couldn’t copy link");
     }
   };
 
@@ -167,7 +167,7 @@ export default function SessionDetailPage({ params }: PageProps) {
               <div className="font-mono text-[10px] uppercase tracking-[0.18em] text-subtle-foreground mb-2">
                 Question
               </div>
-              <div className="text-[15px] leading-relaxed font-sans border-l-2 border-border pl-4">
+              <div className="text-[15px] leading-normal font-sans border-l-2 border-border pl-4 max-w-prose">
                 {t.query}
               </div>
             </div>

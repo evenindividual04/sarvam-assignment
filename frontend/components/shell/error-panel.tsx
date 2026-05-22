@@ -28,8 +28,8 @@ export function ErrorPanel({
       <div className="font-mono text-[11px] uppercase tracking-[0.14em] text-destructive">
         {title}
       </div>
-      <p className="text-[14px] leading-relaxed text-foreground">
-        The backend isn&apos;t responding. The deployed Hugging Face Space
+      <p className="text-[14px] leading-normal max-w-prose text-foreground">
+        The backend isn’t responding. The deployed Hugging Face Space
         sleeps on the free tier — the first request after a wake takes about
         30 seconds. Try again in a moment.
       </p>

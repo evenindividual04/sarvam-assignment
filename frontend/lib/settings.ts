@@ -12,10 +12,25 @@ export interface RuntimeOverrides {
   RETRIEVAL_MODE?: "auto" | "hybrid" | "lexical";
   FAILURE_POLICY_MAX_HOPS?: number;
   CONTEXT_SELECTION_STRATEGY?: "heuristic" | "mmr";
+  MMR_LAMBDA?: number;
   // Phase 5b: comma-separated extra blocked domains. Default behavior blocks
   // reddit/twitter/x/tiktok/quora/instagram/facebook/pinterest; pass "none"
   // to disable the default blocklist entirely.
   RETRIEVAL_DOMAIN_BLOCKLIST?: string;
+  // Routing knobs surfaced in the Settings UI. The backend reads these from
+  // process env when the user has not set an override; sending them here makes
+  // them per-request without env churn.
+  PLANNER_PROVIDER?: string;
+  CLAIM_VERIFIER_PROVIDER?: string;
+  CONFLICT_PROBE_PROVIDER?: string;
+  FOLLOW_UP_PROVIDER?: string;
+  APPROVAL_TIMEOUT_S?: number;
+  // Supplementary toggles. "0" = off, "1" = on (matches existing BoolControl).
+  SARVAM_INDIC_AUTO?: "0" | "1";
+  LANG_DETECT_DISABLE_FASTTEXT?: "0" | "1";
+  WIKIPEDIA_DISABLED?: "0" | "1";
+  SCHOLAR_DISABLED?: "0" | "1";
+  JINA_READER_DISABLED?: "0" | "1";
 }
 
 const KEY = "dra:overrides";
@@ -47,7 +62,9 @@ export function clearOverrides(): void {
 }
 
 export interface KnobDef {
-  key: keyof RuntimeOverrides;
+  // Backend may ship new knob keys this build doesn't know about — keep this
+  // permissive instead of erroring out at runtime.
+  key: keyof RuntimeOverrides | string;
   label: string;
   type: "boolean" | "integer" | "enum" | "string" | "float";
   min?: number;
@@ -55,6 +72,8 @@ export interface KnobDef {
   choices?: string[];
   available?: boolean;
   note?: string | null;
+  /** UI-only grouping. Frontend assigns this client-side. */
+  section?: "Retrieval" | "Routing" | "Approval gate" | "Supplementary providers";
   // V3.8: for RETRIEVAL_MODE, the backend reports what *would* happen under
   // each user choice given the current capability probe. Lets the UI label
   // "hybrid → unavailable on this host" without a separate API round trip.
