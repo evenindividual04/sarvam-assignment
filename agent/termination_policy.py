@@ -157,7 +157,13 @@ async def decide_continuation(
         )
 
     # R5: planner confidence is good enough.
-    if state.planner_confidence != "low":
+    # Demo tuning: was `!= "low"` (terminate on medium+high), now `== "high"`
+    # so `medium` confidence is allowed to fall through to R6. The vast
+    # majority of Groq Llama 3.3 70B planner outputs come back "medium",
+    # which under the old threshold killed hop 2 on essentially every
+    # query and made multi-hop invisible during demos. Keeping the rule
+    # itself — just loosening when it fires.
+    if state.planner_confidence == "high":
         return TerminationDecision(
             should_terminate=True,
             reason="CONFIDENCE_HIGH_ENOUGH",
@@ -166,7 +172,12 @@ async def decide_continuation(
         )
 
     # R6: enough evidence selected (context NOT thin).
-    context_thin = state.selected_tokens < int(0.5 * state.web_context_budget)
+    # Demo tuning: was `< 0.5 * web_context_budget` (terminate at half
+    # full), now `< 0.8 * ...` so only genuinely-saturated context stops
+    # the loop. Combined with the R5 loosening above, this lets hop 2
+    # fire on the typical "medium confidence + partially-filled context"
+    # case that previously short-circuited at hop 1.
+    context_thin = state.selected_tokens < int(0.8 * state.web_context_budget)
     if not context_thin:
         return TerminationDecision(
             should_terminate=True,

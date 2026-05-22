@@ -132,17 +132,55 @@ async def test_confidence_high_enough():
 
 @pytest.mark.asyncio
 async def test_evidence_sufficient_when_context_not_thin():
-    """R6: selected_tokens >= 50% of web budget → EVIDENCE_SUFFICIENT."""
+    """R6: selected_tokens >= 80% of web budget → EVIDENCE_SUFFICIENT.
+
+    Threshold was loosened from 0.5 to 0.8 (demo tuning, see
+    termination_policy.py) so hop 2 can fire on the typical
+    half-full-context case. 5500 > 0.8 * 6400 = 5120, so this still
+    terminates."""
     out = await decide_continuation(
         _state(
             hop_index=0, max_hops=3,
-            selected_tokens=4_000, web_context_budget=6_400,  # 4000 >= 3200
+            selected_tokens=5_500, web_context_budget=6_400,  # 5500 >= 5120
             planner_confidence="low", difficulty="medium",
         ),
         stop_rag_caller=None,
     )
     assert out.should_terminate
     assert out.reason == "EVIDENCE_SUFFICIENT"
+
+
+@pytest.mark.asyncio
+async def test_evidence_thin_at_old_half_threshold_does_not_terminate():
+    """Demo-tuning regression guard: 4000 tokens (62.5% of 6400 budget)
+    used to fire R6 under the legacy 0.5 threshold but should now fall
+    through to CONTINUE so hop 2 can fire."""
+    out = await decide_continuation(
+        _state(
+            hop_index=0, max_hops=3,
+            selected_tokens=4_000, web_context_budget=6_400,
+            planner_confidence="low", difficulty="medium",
+        ),
+        stop_rag_caller=None,
+    )
+    assert not out.should_terminate
+    assert out.reason == "CONTINUE"
+
+
+@pytest.mark.asyncio
+async def test_confidence_medium_does_not_terminate():
+    """Demo-tuning regression guard: confidence='medium' used to fire R5
+    under the legacy '!=low' threshold but should now fall through."""
+    out = await decide_continuation(
+        _state(
+            hop_index=0, max_hops=3,
+            cumulative_tokens=100, selected_tokens=1_000,
+            planner_confidence="medium", difficulty="medium",
+        ),
+        stop_rag_caller=None,
+    )
+    assert not out.should_terminate
+    assert out.reason == "CONTINUE"
 
 
 @pytest.mark.asyncio

@@ -325,10 +325,12 @@ def test_second_hop_skipped_when_confidence_high(monkeypatch):
     assert probe.persisted_run_metadata.get("hop_count") == 1
 
 
-def test_second_hop_skipped_when_context_above_half_budget(monkeypatch):
+def test_second_hop_skipped_when_context_above_80pct_budget(monkeypatch):
     probe = _GateProbe()
-    # Selected tokens > 0.5 * 6400 = 3200; use 4000 to be safely over.
-    _install_common_mocks(monkeypatch, probe, selected_tokens_per_hop=[4000])
+    # Demo tuning: threshold was loosened from 0.5 to 0.8 of
+    # web_context_budget (6400). 5500 > 0.8 * 6400 = 5120, so R6
+    # (EVIDENCE_SUFFICIENT) still fires and hop 2 is skipped.
+    _install_common_mocks(monkeypatch, probe, selected_tokens_per_hop=[5500])
     _patch_plan(
         monkeypatch,
         probe,
