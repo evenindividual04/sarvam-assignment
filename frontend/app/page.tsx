@@ -2,11 +2,16 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { SessionsRail } from "@/components/chat/sessions-rail";
-import { ChatInput } from "@/components/chat/chat-input";
+import { ChatInput, type ChatInputHandle } from "@/components/chat/chat-input";
 import { StreamProgress } from "@/components/chat/stream-progress";
 import { MetricBar } from "@/components/chat/metric-bar";
+import { UncertaintyBadge } from "@/components/chat/uncertainty-badge";
+import { PlanCard } from "@/components/chat/plan-card";
 import { RichMarkdown } from "@/lib/markdown";
-import { useSseResearch } from "@/lib/use-sse-research";
+import {
+  useSseResearch,
+  type UncertaintySignal,
+} from "@/lib/use-sse-research";
 import {
   TraceInspector,
   doneToTraceData,
@@ -18,7 +23,14 @@ import { toast } from "sonner";
 import { cn } from "@/lib/utils";
 import { formatMs } from "@/lib/format";
 import { getSessionHistory, getTurnDetail } from "@/lib/api";
-import type { DoneEventData, ExecutionEvent, Turn } from "@/lib/types";
+import type {
+  DoneEventData,
+  EvidenceGap,
+  ExecutionEvent,
+  PlannerOutput,
+  PlanQueryPhase,
+  Turn,
+} from "@/lib/types";
 import type { SseStatus } from "@/lib/use-sse-research";
 
 interface ChatRow {
@@ -28,15 +40,21 @@ interface ChatRow {
   liveText?: string;
   final?: DoneEventData;
   error?: string | null;
+  /** Phase 1.5: structured uncertainty signal for this turn, if emitted. */
+  uncertainty?: UncertaintySignal | null;
+  /** Phase 1.875: planner-level state surfaced as a PlanCard above the answer. */
+  plan?: PlannerOutput | null;
+  phaseProgress?: Record<string, PlanQueryPhase>;
+  evidenceGaps?: EvidenceGap[];
   /** Set when row was rehydrated from /sessions history (not from a live SSE stream). */
   historyTurn?: Turn;
 }
 
 const SUGGESTED = [
   "What is India's current repo rate, and how has it changed in the last 12 months?",
-  "Summarize the latest research on Mixture-of-Experts LLMs in 2026.",
+  "भारत में मानसून कब आता है और इस वर्ष कैसा रहा?",
+  "What is the current status of India's Digital India initiative and DPI exports?",
   "Compare GPT-5 and Claude Opus 4.7 on coding benchmarks.",
-  "What's the status of the EU AI Act enforcement?",
 ];
 
 function newSessionId(): string {
@@ -53,6 +71,7 @@ export default function ChatPage() {
   const [traceData, setTraceData] = useState<TraceInspectorData | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
   const scrollRef = useRef<HTMLDivElement | null>(null);
+  const inputRef = useRef<ChatInputHandle | null>(null);
 
   const sse = useSseResearch();
 
@@ -88,10 +107,24 @@ export default function ChatPage() {
         liveText: sse.currentText,
         final: sse.finalData ?? undefined,
         error: sse.error,
+        uncertainty: sse.uncertainty,
+        plan: sse.plan,
+        phaseProgress: sse.phaseProgress,
+        evidenceGaps: sse.evidenceGaps,
       };
       return [...prev.slice(0, -1), updated];
     });
-  }, [sse.events, sse.status, sse.currentText, sse.finalData, sse.error]);
+  }, [
+    sse.events,
+    sse.status,
+    sse.currentText,
+    sse.finalData,
+    sse.error,
+    sse.uncertainty,
+    sse.plan,
+    sse.phaseProgress,
+    sse.evidenceGaps,
+  ]);
 
   useEffect(() => {
     const el = scrollRef.current;
@@ -122,7 +155,6 @@ export default function ChatPage() {
           liveText: t.response,
           historyTurn: t,
         }));
-        // eslint-disable-next-line react-hooks/set-state-in-effect
         setRows(hydrated);
       })
       .catch(() => {
@@ -138,18 +170,25 @@ export default function ChatPage() {
 
   const inFlight = sse.status === "streaming";
 
-  const handleSubmit = (query: string) => {
+  const handleSubmit = (
+    query: string,
+    options: { approvalRequired: boolean } = { approvalRequired: false },
+  ) => {
     if (!sessionId) return;
     setRows((prev) => [
       ...prev,
       { query, events: [], status: "streaming", liveText: "" },
     ]);
-    void sse.start(query, sessionId);
+    void sse.start(query, sessionId, options);
   };
 
   const handleCancel = () => {
     sse.cancel();
     toast.info("Cancelling…");
+  };
+
+  const handleFollowUpClick = (query: string) => {
+    inputRef.current?.prefill(query);
   };
 
   const handleNewSession = () => {
@@ -165,7 +204,7 @@ export default function ChatPage() {
 
   const openTrace = (row: ChatRow) => {
     if (row.final) {
-      setTraceData(doneToTraceData(row.query, row.final));
+      setTraceData(doneToTraceData(row.query, row.final, sessionId));
       setTraceOpen(true);
       return;
     }
@@ -237,12 +276,23 @@ export default function ChatPage() {
                 <ChatTurn
                   key={i}
                   row={row}
+                  onFollowUpClick={handleFollowUpClick}
                   onCancel={
                     i === rows.length - 1 && row.status === "streaming"
                       ? handleCancel
                       : undefined
                   }
                   onOpenTrace={() => openTrace(row)}
+                  onRegenerate={
+                    (row.status === "cancelled" || row.status === "error") &&
+                    !inFlight
+                      ? () => {
+                          // Drop the failed row, then re-submit the same query.
+                          setRows((prev) => prev.filter((_, j) => j !== i));
+                          handleSubmit(row.query);
+                        }
+                      : undefined
+                  }
                 />
               ))}
             </div>
@@ -252,6 +302,7 @@ export default function ChatPage() {
         <div className="border-t border-border bg-background px-6 md:px-12 py-5">
           <div className="max-w-3xl mx-auto">
             <ChatInput
+              ref={inputRef}
               onSubmit={handleSubmit}
               onCancel={handleCancel}
               busy={inFlight}
@@ -282,9 +333,13 @@ function EmptyState({ onPick }: { onPick: (q: string) => void }) {
         What would you like to{" "}
         <span className="text-accent">research</span> today?
       </h1>
-      <p className="mt-5 font-sans text-base text-muted-foreground max-w-lg">
-        Web-grounded answers with full provenance — planning, search, fetch,
-        rerank, and synthesis, every step recorded.
+      <p className="mt-5 font-sans text-base text-muted-foreground max-w-xl leading-relaxed">
+        Multi-source web research with claim verification. Every fact is
+        traced back to a URL fetched in this session; conflicting sources
+        are surfaced rather than hidden.
+      </p>
+      <p className="mt-2 font-mono text-[11px] uppercase tracking-[0.14em] text-subtle-foreground">
+        Planning → Search → Fetch → Rerank → Probe → Synthesize → Verify
       </p>
 
       <div className="mt-12">
@@ -314,15 +369,34 @@ function ChatTurn({
   row,
   onCancel,
   onOpenTrace,
+  onRegenerate,
+  onFollowUpClick,
 }: {
   row: ChatRow;
   onCancel?: () => void;
   onOpenTrace?: () => void;
+  onRegenerate?: () => void;
+  onFollowUpClick?: (q: string) => void;
 }) {
   const answerText =
     row.final?.answer ??
     row.liveText ??
     (row.status === "cancelled" ? "_[Cancelled by user]_" : "");
+
+  // Phase 1.875: surface unverified numeric tokens (from numeric_audit in
+  // run_metadata) so RichMarkdown can wrap them with a ⚠ unverified badge.
+  const unverifiedTokens = (() => {
+    const meta = row.final?.run_metadata as
+      | { numeric_audit?: { audit?: Array<{ token: string; grounded: boolean }> } }
+      | undefined;
+    const audit = meta?.numeric_audit?.audit;
+    if (!audit || audit.length === 0) return undefined;
+    const s = new Set<string>();
+    for (const a of audit) {
+      if (!a.grounded && a.token) s.add(a.token);
+    }
+    return s.size > 0 ? s : undefined;
+  })();
 
   const copyAnswer = async () => {
     if (!row.final?.answer) return;
@@ -362,8 +436,22 @@ function ChatTurn({
           Agent
         </div>
         <div className="flex-1 min-w-0">
+          {row.plan && (
+            <PlanCard plan={row.plan} phaseProgress={row.phaseProgress} />
+          )}
+          {row.uncertainty && onFollowUpClick && (
+            <UncertaintyBadge
+              kind={row.uncertainty.kind}
+              followUps={row.uncertainty.follow_ups}
+              reason={row.uncertainty.reason}
+              evidenceGaps={row.evidenceGaps}
+              onFollowUpClick={onFollowUpClick}
+            />
+          )}
           {answerText ? (
-            <RichMarkdown>{answerText}</RichMarkdown>
+            <RichMarkdown unverifiedNumericTokens={unverifiedTokens}>
+              {answerText}
+            </RichMarkdown>
           ) : (
             <span className="text-sm text-muted-foreground font-mono">
               {row.status === "streaming"
@@ -471,6 +559,24 @@ function ChatTurn({
                 className="font-mono text-[11px] uppercase tracking-[0.12em] text-destructive hover:text-destructive"
               >
                 Cancel
+              </Button>
+            </div>
+          )}
+
+          {onRegenerate && (
+            <div className="mt-4 pt-3 border-t border-border flex items-center justify-between gap-3">
+              <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-subtle-foreground">
+                {row.status === "cancelled"
+                  ? "This turn was cancelled."
+                  : "This turn errored."}
+              </span>
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={onRegenerate}
+                className="font-mono text-[11px] uppercase tracking-[0.12em] text-accent hover:text-accent"
+              >
+                ↻ Regenerate
               </Button>
             </div>
           )}

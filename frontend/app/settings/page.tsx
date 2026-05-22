@@ -15,12 +15,13 @@ import { toast } from "sonner";
 
 export default function SettingsPage() {
   const [defaults, setDefaults] = useState<DefaultsResponse | null>(null);
-  const [overrides, setOverrides] = useState<RuntimeOverrides>({});
+  const [overrides, setOverrides] = useState<RuntimeOverrides>(() =>
+    loadOverrides(),
+  );
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
 
   useEffect(() => {
-    setOverrides(loadOverrides());
     getSettingsDefaults()
       .then(setDefaults)
       .catch((e) => setErr(e instanceof Error ? e.message : "error"))
@@ -63,14 +64,40 @@ export default function SettingsPage() {
         Secrets (API keys, DB path) are never exposed here by design.
       </div>
 
+      {/* V3.11: active-overrides banner makes it impossible to forget that
+          settings flips persist across browser sessions until cleared. */}
+      {Object.keys(overrides).length > 0 && (
+        <div className="mt-6 border border-accent/40 bg-accent-dim rounded-[6px] px-4 py-3 flex items-center justify-between gap-4">
+          <div className="space-y-0.5">
+            <div className="font-mono text-[10px] uppercase tracking-[0.16em] text-accent">
+              {Object.keys(overrides).length} override
+              {Object.keys(overrides).length === 1 ? "" : "s"} active
+            </div>
+            <div className="font-mono text-[11px] text-muted-foreground">
+              Sent with every research request from this browser until cleared.
+            </div>
+          </div>
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={resetAll}
+            className="font-mono text-[10px] uppercase tracking-[0.12em] shrink-0"
+          >
+            Reset all
+          </Button>
+        </div>
+      )}
+
       {loading && (
-        <div className="mt-10 font-mono text-[11px] uppercase tracking-[0.12em] text-subtle-foreground">
-          loading defaults…
+        <div className="mt-10 space-y-2">
+          {Array.from({ length: 3 }).map((_, i) => (
+            <div key={i} className="h-16 rounded-[4px] animate-pulse bg-[var(--surface-hover)]" />
+          ))}
         </div>
       )}
       {err && !loading && (
         <div className="mt-10 font-mono text-[11px] uppercase tracking-[0.12em] text-subtle-foreground">
-          backend unreachable.
+          Backend unreachable. Defaults will load on next refresh.
         </div>
       )}
 
@@ -120,10 +147,17 @@ export default function SettingsPage() {
 
 function resolveDefault(knob: KnobDef, defaults: DefaultsResponse): string {
   const e = defaults.effective as Record<string, unknown>;
-  if (knob.key === "HYBRID_RETRIEVAL") return e.hybrid_retrieval ? "on" : "off";
+  if (knob.key === "RETRIEVAL_MODE") return String(e.retrieval_mode ?? "auto");
   if (knob.key === "FAILURE_POLICY_MAX_HOPS") return String(e.max_hops);
   if (knob.key === "CONTEXT_SELECTION_STRATEGY")
     return String(e.selection_strategy);
+  if (knob.key === "RETRIEVAL_DOMAIN_BLOCKLIST") {
+    const list = e.domain_blocklist;
+    if (Array.isArray(list) && list.length > 0) {
+      return list.length > 4 ? `${list.length} domains` : list.join(",");
+    }
+    return "none";
+  }
   return "—";
 }
 
@@ -137,7 +171,12 @@ interface KnobRowProps {
 function KnobRow({ knob, value, onChange, defaultValue }: KnobRowProps) {
   const overridden = value !== undefined;
   return (
-    <div className="grid grid-cols-[1fr_220px] gap-6 py-5 border-b border-border items-start">
+    <div
+      className={
+        "grid grid-cols-[1fr_220px] gap-6 py-5 pl-4 border-b border-border items-start border-l-2 " +
+        (overridden ? "border-l-accent" : "border-l-transparent")
+      }
+    >
       <div>
         <div className="text-[14px] text-foreground">{knob.label}</div>
         <div className="mt-1 font-mono text-[10px] uppercase tracking-[0.12em] text-subtle-foreground">
@@ -178,10 +217,50 @@ function KnobRow({ knob, value, onChange, defaultValue }: KnobRowProps) {
           <EnumControl
             value={value as string | undefined}
             choices={knob.choices || []}
+            effectivePerChoice={knob.effective_per_choice}
+            onChange={onChange as (v: string | undefined) => void}
+          />
+        )}
+        {knob.type === "string" && (
+          <StringControl
+            value={value as string | undefined}
             onChange={onChange as (v: string | undefined) => void}
           />
         )}
       </div>
+    </div>
+  );
+}
+
+function StringControl({
+  value,
+  onChange,
+}: {
+  value: string | undefined;
+  onChange: (v: string | undefined) => void;
+}) {
+  return (
+    <div className="flex items-center gap-2">
+      <button
+        onClick={() => onChange(undefined)}
+        className={`font-mono text-[11px] uppercase tracking-[0.12em] px-3 py-1.5 border ${
+          value === undefined
+            ? "border-accent text-accent bg-accent-dim"
+            : "border-border text-muted-foreground hover:border-border-strong"
+        }`}
+      >
+        default
+      </button>
+      <input
+        type="text"
+        value={value ?? ""}
+        placeholder="extra.com, another.com  (or 'none')"
+        onChange={(e) => {
+          const v = e.target.value;
+          onChange(v === "" ? undefined : v);
+        }}
+        className="w-[240px] font-mono text-[12px] bg-background border border-border rounded-[4px] px-2 py-1.5 text-foreground"
+      />
     </div>
   );
 }
@@ -270,35 +349,58 @@ function IntControl({
 function EnumControl({
   value,
   choices,
+  effectivePerChoice,
   onChange,
 }: {
   value: string | undefined;
   choices: string[];
+  effectivePerChoice?: Record<string, string>;
   onChange: (v: string | undefined) => void;
 }) {
-  const pickerCls = (active: boolean) =>
+  const pickerCls = (active: boolean, unavailable?: boolean) =>
     `font-mono text-[11px] uppercase tracking-[0.12em] px-3 py-1.5 border ${
-      active
+      unavailable
+        ? "opacity-50 cursor-not-allowed border-border text-muted-foreground"
+        : active
         ? "border-accent text-accent bg-accent-dim"
         : "border-border text-muted-foreground hover:border-border-strong"
     }`;
   return (
-    <div className="flex flex-wrap gap-1 justify-end">
-      <button
-        onClick={() => onChange(undefined)}
-        className={pickerCls(value === undefined)}
-      >
-        default
-      </button>
-      {choices.map((c) => (
+    <div className="flex flex-col items-end gap-2">
+      <div className="flex flex-wrap gap-1 justify-end">
         <button
-          key={c}
-          onClick={() => onChange(c)}
-          className={pickerCls(value === c)}
+          onClick={() => onChange(undefined)}
+          className={pickerCls(value === undefined)}
         >
-          {c}
+          default
         </button>
-      ))}
+        {choices.map((c) => {
+          const eff = effectivePerChoice?.[c];
+          const unavailable = eff === "unavailable";
+          return (
+            <button
+              key={c}
+              disabled={unavailable}
+              onClick={() => onChange(c)}
+              title={
+                eff && eff !== c
+                  ? `→ effective: ${eff}`
+                  : unavailable
+                  ? "Not available on this host"
+                  : undefined
+              }
+              className={pickerCls(value === c, unavailable)}
+            >
+              {c}
+              {eff && eff !== c && eff !== "unavailable" && (
+                <span className="ml-1 opacity-60 normal-case tracking-normal">
+                  → {eff}
+                </span>
+              )}
+            </button>
+          );
+        })}
+      </div>
     </div>
   );
 }

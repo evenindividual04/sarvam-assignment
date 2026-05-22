@@ -1,26 +1,30 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { listSessions } from "@/lib/api";
 import type { SessionListItem } from "@/lib/types";
 import { formatRelativeTime, truncate } from "@/lib/format";
+import { ErrorPanel } from "@/components/shell/error-panel";
+import { Skeleton } from "@/components/ui/skeleton";
 
 export default function SessionsPage() {
   const [sessions, setSessions] = useState<SessionListItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
 
-  useEffect(() => {
-    let alive = true;
+  const load = useCallback(() => {
+    setLoading(true);
+    setErr(null);
     listSessions()
-      .then((s) => alive && setSessions(s))
-      .catch((e) => alive && setErr(e instanceof Error ? e.message : "error"))
-      .finally(() => alive && setLoading(false));
-    return () => {
-      alive = false;
-    };
+      .then((s) => setSessions(s))
+      .catch((e) => setErr(e instanceof Error ? e.message : "error"))
+      .finally(() => setLoading(false));
   }, []);
+
+  useEffect(() => {
+    load();
+  }, [load]);
 
   return (
     <div className="px-8 md:px-12 py-12 max-w-[1280px] mx-auto w-full">
@@ -31,15 +35,13 @@ export default function SessionsPage() {
 
       <div className="mt-10">
         {loading && (
-          <div className="font-mono text-[11px] uppercase tracking-[0.12em] text-subtle-foreground">
-            loading…
+          <div className="space-y-2">
+            {Array.from({ length: 5 }).map((_, i) => (
+              <Skeleton key={i} className="h-10 w-full" />
+            ))}
           </div>
         )}
-        {err && !loading && (
-          <div className="font-mono text-[11px] uppercase tracking-[0.12em] text-subtle-foreground">
-            backend unreachable · <span className="lowercase">{err}</span>
-          </div>
-        )}
+        {err && !loading && <ErrorPanel detail={err} onRetry={load} />}
         {!loading && !err && sessions.length === 0 && (
           <div className="font-mono text-[12px] text-subtle-foreground">
             No sessions yet. Submit a query from the Chat tab to start one.

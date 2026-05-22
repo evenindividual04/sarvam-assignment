@@ -7,9 +7,15 @@
 // the source-of-truth problem (DB shadow vs env) entirely.
 
 export interface RuntimeOverrides {
-  HYBRID_RETRIEVAL?: "0" | "1";
+  // V3.8: tri-state retrieval mode supersedes the boolean HYBRID_RETRIEVAL.
+  // Backend still honors HYBRID_RETRIEVAL=0|1 as a deprecated alias.
+  RETRIEVAL_MODE?: "auto" | "hybrid" | "lexical";
   FAILURE_POLICY_MAX_HOPS?: number;
   CONTEXT_SELECTION_STRATEGY?: "heuristic" | "mmr";
+  // Phase 5b: comma-separated extra blocked domains. Default behavior blocks
+  // reddit/twitter/x/tiktok/quora/instagram/facebook/pinterest; pass "none"
+  // to disable the default blocklist entirely.
+  RETRIEVAL_DOMAIN_BLOCKLIST?: string;
 }
 
 const KEY = "dra:overrides";
@@ -43,19 +49,26 @@ export function clearOverrides(): void {
 export interface KnobDef {
   key: keyof RuntimeOverrides;
   label: string;
-  type: "boolean" | "integer" | "enum";
+  type: "boolean" | "integer" | "enum" | "string" | "float";
   min?: number;
   max?: number;
   choices?: string[];
   available?: boolean;
   note?: string | null;
+  // V3.8: for RETRIEVAL_MODE, the backend reports what *would* happen under
+  // each user choice given the current capability probe. Lets the UI label
+  // "hybrid → unavailable on this host" without a separate API round trip.
+  effective_per_choice?: Record<string, string>;
 }
 
 export interface DefaultsResponse {
   effective: {
-    hybrid_retrieval: boolean;
+    retrieval_mode: string;
     max_hops: number;
     selection_strategy: string;
+    mmr_lambda?: number;
+    approval_required?: boolean;
+    domain_blocklist?: string[];
   };
   knobs: KnobDef[];
 }

@@ -13,12 +13,21 @@ import { LatencyBar } from "./latency-bar";
 import { MetricBar } from "@/components/chat/metric-bar";
 import { ClaimsTable } from "@/components/eval/claims-table";
 import { ProbePanel } from "@/components/eval/probe-panel";
-import { formatMs, formatScore } from "@/lib/format";
+import {
+  formatMs,
+  formatScore,
+  formatTurnAsBibtex,
+  formatTurnAsMarkdown,
+  trustTierColor,
+  trustTierLabel,
+} from "@/lib/format";
 import { costFor, formatCost } from "@/lib/cost";
 import type {
   ClaimAuditRow,
+  ContextSnippetRow,
   ContradictionProbeRow,
   DocMap,
+  Turn,
 } from "@/lib/types";
 
 export interface TraceInspectorData {
@@ -42,6 +51,41 @@ export interface TraceInspectorData {
   context_xml?: string;
   claim_audit?: ClaimAuditRow[];
   contradiction_probes?: ContradictionProbeRow | null;
+  // V3.8: which retrieval path actually ran for this turn (after capability
+  // fallback, if any). Sourced from `run_metadata_json.retrieval_mode`.
+  retrieval_mode_effective?: string;
+  retrieval_mode_requested?: string;
+  retrieval_mode_reason?: string | null;
+  // V3.11: per-snippet trust signals from `turn_context`. When present,
+  // takes precedence over `doc_map` in the Sources tab so tier dots can
+  // be rendered alongside each domain.
+  context_snippets?: ContextSnippetRow[];
+  // Phase 4: extra fields needed for client-side Markdown / BibTeX export.
+  // Optional so existing callers keep working; populated by `turnToTraceData`
+  // and `doneToTraceData` when the source provides them.
+  session_id?: string;
+  created_at?: string;
+  search_queries?: string[];
+  response?: string;
+  // Phase 1.5: surfaced from `run_metadata_json` so the trace inspector can
+  // show which uncertainty branch fired and which follow-ups were proposed.
+  uncertainty_kind?: "none" | "weak" | "missing" | "conflict" | null;
+  follow_up_queries?: string[];
+  evidence_gaps_reason?: string | null;
+  // Phase 1.75: per-turn budget distribution + summarization fallbacks fired
+  // during context assembly. Both are sourced from `run_metadata_json`.
+  budget_distribution?: {
+    system?: number;
+    history?: number;
+    web_context?: number;
+    output_reserved?: number;
+  };
+  context_fallbacks?: string[];
+  // Phase 1.875: agent-flow polish telemetry.
+  numeric_grounding_ratio?: number | null;
+  criteria_coverage?: boolean[];
+  terminator_fired?: string | null;
+  evidence_gaps?: Array<{ query: string; intent: string; reason: string }>;
 }
 
 interface TraceInspectorProps {
@@ -65,13 +109,27 @@ export function TraceInspector({
         side="right"
         className="w-full sm:max-w-[560px] flex flex-col p-0 gap-0 bg-background border-l border-border"
       >
-        <SheetHeader className="px-6 py-4 border-b border-border space-y-1">
+        <SheetHeader className="px-6 py-4 border-b border-border space-y-2">
           <SheetTitle className="font-mono text-[11px] uppercase tracking-[0.14em] text-muted-foreground">
             Trace · <span className="text-foreground">{turnShort}</span>
           </SheetTitle>
           <SheetDescription className="font-sans text-[13px] text-muted-foreground line-clamp-1">
             {data?.query ?? "Run details for the most recent turn."}
           </SheetDescription>
+          {data && (
+            <div className="flex gap-2 pt-1">
+              <ExportButton
+                label="Export Markdown"
+                onClick={() => exportTurn(data, "markdown")}
+                disabled={!data.turn_id}
+              />
+              <ExportButton
+                label="Export .bib"
+                onClick={() => exportTurn(data, "bibtex")}
+                disabled={!data.turn_id}
+              />
+            </div>
+          )}
         </SheetHeader>
 
         {!data ? (
@@ -97,6 +155,9 @@ export function TraceInspector({
                 <TabsTrigger value="probe" className={TAB_TRIGGER}>
                   Probe
                 </TabsTrigger>
+                <TabsTrigger value="uncertainty" className={TAB_TRIGGER}>
+                  Uncertainty
+                </TabsTrigger>
               </TabsList>
 
               <TabsContent value="overview" className="pt-6 space-y-6">
@@ -105,6 +166,18 @@ export function TraceInspector({
                   <div className="grid grid-cols-2 gap-x-6 gap-y-3">
                     <Field label="Planning" value={data.planning_strategy ?? "—"} />
                     <Field label="Selection" value={data.selection_strategy ?? "—"} />
+                    <Field
+                      label="Retrieval"
+                      value={
+                        data.retrieval_mode_effective
+                          ? data.retrieval_mode_requested &&
+                            data.retrieval_mode_requested !== data.retrieval_mode_effective
+                            ? `${data.retrieval_mode_effective} (req: ${data.retrieval_mode_requested})`
+                            : data.retrieval_mode_effective
+                          : "—"
+                      }
+                      hint={data.retrieval_mode_reason ?? undefined}
+                    />
                     <Field
                       label="Total"
                       value={formatMs(data.latency_ms)}
@@ -150,11 +223,104 @@ export function TraceInspector({
                     label="Claim precision"
                     value={data.claim_precision_score}
                   />
+                  {data.numeric_grounding_ratio !== undefined &&
+                    data.numeric_grounding_ratio !== null && (
+                      <MetricBar
+                        label="Numeric grounding"
+                        value={data.numeric_grounding_ratio}
+                      />
+                    )}
                 </section>
+
+                {(data.terminator_fired ||
+                  (data.criteria_coverage && data.criteria_coverage.length > 0) ||
+                  (data.evidence_gaps && data.evidence_gaps.length > 0)) && (
+                  <>
+                    <div className="border-t border-border" />
+                    <section className="space-y-3">
+                      <SectionLabel>Agent flow</SectionLabel>
+                      {data.terminator_fired && (
+                        <Field
+                          label="Terminator"
+                          value={data.terminator_fired}
+                          mono
+                          hint="Why the multi-hop loop stopped"
+                        />
+                      )}
+                      {data.criteria_coverage && data.criteria_coverage.length > 0 && (
+                        <Field
+                          label="Criteria coverage"
+                          value={`${data.criteria_coverage.filter(Boolean).length} / ${data.criteria_coverage.length}`}
+                          mono
+                          hint="Success criteria satisfied (heuristic)"
+                        />
+                      )}
+                      {data.evidence_gaps && data.evidence_gaps.length > 0 && (
+                        <div>
+                          <div className="font-mono text-[10px] uppercase tracking-[0.14em] text-subtle-foreground mb-1">
+                            Evidence gaps
+                          </div>
+                          <ul className="space-y-1">
+                            {data.evidence_gaps.map((g, i) => (
+                              <li
+                                key={`gap-${i}`}
+                                className="font-mono text-[11px] text-foreground"
+                              >
+                                <span className="text-amber-600 mr-2">
+                                  [{g.reason}]
+                                </span>
+                                <span className="text-subtle-foreground mr-1">
+                                  {g.intent}:
+                                </span>
+                                {g.query}
+                              </li>
+                            ))}
+                          </ul>
+                        </div>
+                      )}
+                    </section>
+                  </>
+                )}
               </TabsContent>
 
               <TabsContent value="sources" className="pt-6">
-                {data.doc_map && Object.keys(data.doc_map).length > 0 ? (
+                {data.context_snippets && data.context_snippets.length > 0 ? (
+                  <>
+                    {/* V3.11: each row shows a tier dot reflecting V2.3 source-
+                       trust prior. Tier comes from the backend, computed via
+                       `utils.source_trust.trust_for(domain)`. */}
+                    <ul className="divide-y divide-border">
+                      {data.context_snippets.map((s) => (
+                        <li key={s.doc_id} className="py-3 flex items-start gap-3">
+                          <span className="font-mono text-[10px] uppercase tracking-[0.10em] text-subtle-foreground w-12 shrink-0 pt-1">
+                            {s.doc_id}
+                          </span>
+                          <span
+                            className={`inline-block size-[8px] rounded-full shrink-0 mt-[7px] ${trustTierColor(s.trust_tier)}`}
+                            title={`Trust: ${trustTierLabel(s.trust_tier)} (score ${formatScore(s.trust_score)})`}
+                          />
+                          <div className="flex-1 min-w-0">
+                            <a
+                              href={s.url}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="font-mono text-[11px] text-accent hover:underline truncate block"
+                            >
+                              {s.domain}
+                            </a>
+                            <div
+                              className="text-[13px] text-foreground truncate"
+                              title={s.title}
+                            >
+                              {s.title}
+                            </div>
+                          </div>
+                        </li>
+                      ))}
+                    </ul>
+                    <TrustLegend />
+                  </>
+                ) : data.doc_map && Object.keys(data.doc_map).length > 0 ? (
                   <ul className="divide-y divide-border">
                     {Object.entries(data.doc_map).map(([docId, tup]) => {
                       const [title, url, domain] = tup;
@@ -205,7 +371,11 @@ export function TraceInspector({
                 )}
               </TabsContent>
 
-              <TabsContent value="context" className="pt-6">
+              <TabsContent value="context" className="pt-6 space-y-5">
+                <BudgetDistributionPanel
+                  dist={data.budget_distribution}
+                  fallbacks={data.context_fallbacks}
+                />
                 {data.context_xml ? (
                   <CodeBlock code={data.context_xml} language="xml" />
                 ) : (
@@ -222,11 +392,237 @@ export function TraceInspector({
               <TabsContent value="probe" className="pt-6">
                 <ProbePanel probe={data.contradiction_probes ?? null} />
               </TabsContent>
+
+              <TabsContent value="uncertainty" className="pt-6 space-y-4">
+                <section>
+                  <SectionLabel>Signal</SectionLabel>
+                  <Field
+                    label="Kind"
+                    value={data.uncertainty_kind ?? "none"}
+                    mono
+                  />
+                  {data.evidence_gaps_reason && (
+                    <div className="mt-3">
+                      <div className="font-mono text-[10px] uppercase tracking-[0.14em] text-subtle-foreground mb-1">
+                        Reason
+                      </div>
+                      <div className="text-[13px] text-foreground">
+                        {data.evidence_gaps_reason}
+                      </div>
+                    </div>
+                  )}
+                </section>
+                <div className="border-t border-border" />
+                <section>
+                  <SectionLabel>Suggested follow-ups</SectionLabel>
+                  {data.follow_up_queries && data.follow_up_queries.length > 0 ? (
+                    <ul className="space-y-1.5">
+                      {data.follow_up_queries.map((q, i) => (
+                        <li
+                          key={`${i}-${q}`}
+                          className="font-mono text-[12px] text-foreground"
+                        >
+                          <span className="text-subtle-foreground mr-2">
+                            {i + 1}.
+                          </span>
+                          {q}
+                        </li>
+                      ))}
+                    </ul>
+                  ) : (
+                    <div className="font-mono text-[11px] uppercase tracking-[0.12em] text-subtle-foreground">
+                      No follow-ups recorded for this turn.
+                    </div>
+                  )}
+                </section>
+              </TabsContent>
             </Tabs>
           </div>
         )}
       </SheetContent>
     </Sheet>
+  );
+}
+
+/**
+ * Build a minimal `Turn`-shaped object from a `TraceInspectorData` and hand it
+ * to the formatter. `formatTurn*` only reads typed fields, so missing optional
+ * fields render as "Not recorded" / "None recorded".
+ */
+function traceDataToTurn(d: TraceInspectorData): Turn {
+  return {
+    turn_id: d.turn_id ?? "",
+    session_id: d.session_id ?? "",
+    query: d.query ?? "",
+    response: d.response ?? "",
+    created_at: d.created_at ?? "",
+    search_queries: d.search_queries,
+    urls_opened: d.urls,
+    doc_map: d.doc_map,
+    context_xml_sent: d.context_xml,
+    prompt_tokens: d.prompt_tokens,
+    completion_tokens: d.completion_tokens,
+    latency_ms: d.latency_ms,
+    citation_integrity_score: d.citation_integrity_score,
+    claim_precision_score: d.claim_precision_score,
+    selection_strategy: d.selection_strategy,
+    planning_strategy: d.planning_strategy,
+    planning_ms: d.planning_ms,
+    search_ms: d.search_ms,
+    fetch_ms: d.fetch_ms,
+    select_ms: d.select_ms,
+    probe_ms: d.probe_ms,
+    synthesize_ms: d.synthesize_ms,
+  };
+}
+
+/**
+ * Client-side blob download. Matches the `URL.createObjectURL` + anchor-click
+ * pattern; revokes the object URL on next tick so the download starts cleanly.
+ */
+function downloadBlob(filename: string, content: string, mimeType: string): void {
+  const blob = new Blob([content], { type: mimeType });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  a.style.display = "none";
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(url), 0);
+}
+
+function exportTurn(data: TraceInspectorData, kind: "markdown" | "bibtex"): void {
+  const turn = traceDataToTurn(data);
+  const shortId = (data.turn_id ?? "turn").slice(0, 8) || "turn";
+  if (kind === "markdown") {
+    downloadBlob(`turn-${shortId}.md`, formatTurnAsMarkdown(turn), "text/markdown;charset=utf-8");
+  } else {
+    downloadBlob(
+      `turn-${shortId}.bib`,
+      formatTurnAsBibtex(turn),
+      "application/x-bibtex;charset=utf-8",
+    );
+  }
+}
+
+function ExportButton({
+  label,
+  onClick,
+  disabled,
+}: {
+  label: string;
+  onClick: () => void;
+  disabled?: boolean;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      className="font-mono text-[10px] uppercase tracking-[0.14em] px-2.5 py-1 border border-border text-muted-foreground hover:text-foreground hover:border-border-accent disabled:opacity-40 disabled:cursor-not-allowed transition-colors rounded-sm bg-transparent"
+    >
+      {label}
+    </button>
+  );
+}
+
+function TrustLegend() {
+  const tiers: { tier: string; label: string }[] = [
+    { tier: "tier_1_primary", label: "Primary (.gov / .edu / WHO)" },
+    { tier: "tier_2_reference", label: "Reference (Nature, ArXiv, Wikipedia)" },
+    { tier: "tier_3_journalism", label: "Journalism (Reuters, AP, BBC)" },
+    { tier: "tier_4_mid", label: "Mid-tier (TechCrunch, Forbes)" },
+    { tier: "tier_5_low", label: "Low (Medium, Substack, blogs)" },
+    { tier: "unknown", label: "Unknown domain (default prior)" },
+  ];
+  return (
+    <details className="mt-5 pt-4 border-t border-border">
+      <summary className="font-mono text-[10px] uppercase tracking-[0.14em] text-muted-foreground cursor-pointer hover:text-foreground transition-colors">
+        Trust tier legend
+      </summary>
+      <ul className="mt-3 space-y-1.5">
+        {tiers.map((t) => (
+          <li key={t.tier} className="flex items-center gap-2">
+            <span className={`inline-block size-[8px] rounded-full ${trustTierColor(t.tier)}`} />
+            <span className="font-mono text-[11px] text-muted-foreground">
+              {t.label}
+            </span>
+          </li>
+        ))}
+      </ul>
+    </details>
+  );
+}
+
+interface BudgetDistribution {
+  system?: number;
+  history?: number;
+  web_context?: number;
+  output_reserved?: number;
+}
+
+function BudgetDistributionPanel({
+  dist,
+  fallbacks,
+}: {
+  dist?: BudgetDistribution;
+  fallbacks?: string[];
+}) {
+  const hasDist =
+    dist &&
+    (dist.system !== undefined ||
+      dist.history !== undefined ||
+      dist.web_context !== undefined ||
+      dist.output_reserved !== undefined);
+  const hasFallback = (fallbacks?.length ?? 0) > 0;
+  if (!hasDist && !hasFallback) return null;
+
+  const rows: Array<{ label: string; tokens: number }> = hasDist
+    ? [
+        { label: "System", tokens: dist?.system ?? 0 },
+        { label: "History", tokens: dist?.history ?? 0 },
+        { label: "Web context", tokens: dist?.web_context ?? 0 },
+        { label: "Output reserved", tokens: dist?.output_reserved ?? 0 },
+      ]
+    : [];
+  const total = rows.reduce((acc, r) => acc + r.tokens, 0) || 1;
+
+  return (
+    <section>
+      <SectionLabel>Budget distribution</SectionLabel>
+      {hasFallback && (
+        <div className="mb-3 inline-flex items-center gap-2 rounded border border-amber-500/40 bg-amber-500/10 px-2 py-1 font-mono text-[10px] uppercase tracking-[0.12em] text-amber-600 dark:text-amber-400">
+          <span>⚠</span>
+          <span>
+            {(fallbacks ?? [])
+              .map((f) => f.replace(/_/g, " "))
+              .join(" · ")}
+          </span>
+        </div>
+      )}
+      {hasDist && (
+        <table className="w-full font-mono tabular-nums text-[12px]">
+          <tbody>
+            {rows.map((r) => {
+              const pct = total > 0 ? Math.round((r.tokens / total) * 100) : 0;
+              return (
+                <tr key={r.label} className="border-b border-border/50 last:border-0">
+                  <td className="py-1.5 text-foreground">{r.label}</td>
+                  <td className="py-1.5 text-right text-foreground">
+                    {r.tokens.toLocaleString()}
+                  </td>
+                  <td className="py-1.5 pl-3 text-right text-subtle-foreground w-12">
+                    {pct}%
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      )}
+    </section>
   );
 }
 
@@ -276,7 +672,11 @@ function Field({
 // for `data` prop. Kept in this file for colocation.
 export function turnToTraceData(t: {
   turn_id?: string;
+  session_id?: string;
+  created_at?: string;
   query?: string;
+  response?: string;
+  search_queries?: string[];
   context_xml_sent?: string;
   doc_map?: DocMap;
   urls_opened?: string[];
@@ -295,10 +695,37 @@ export function turnToTraceData(t: {
   synthesize_ms?: number;
   claim_audit?: ClaimAuditRow[];
   contradiction_probes?: ContradictionProbeRow | null;
+  context_snippets?: ContextSnippetRow[];
+  run_metadata_json?: Record<string, unknown>;
 }): TraceInspectorData {
+  // V3.8: extract effective retrieval mode from run_metadata if present.
+  const meta = t.run_metadata_json as
+    | {
+        retrieval_mode?: { requested?: string; effective?: string; reason?: string | null };
+        uncertainty_kind?: "none" | "weak" | "missing" | "conflict" | null;
+        follow_up_queries?: string[];
+        evidence_gaps_reason?: string | null;
+        budget_distribution?: {
+          system?: number;
+          history?: number;
+          web_context?: number;
+          output_reserved?: number;
+        };
+        context_fallbacks?: string[];
+        numeric_grounding_ratio?: number | null;
+        criteria_coverage?: boolean[];
+        terminator_fired?: string | null;
+        evidence_gaps?: Array<{ query: string; intent: string; reason: string }>;
+      }
+    | undefined;
+  const rm = meta?.retrieval_mode;
   return {
     turn_id: t.turn_id,
+    session_id: t.session_id,
+    created_at: t.created_at,
     query: t.query,
+    response: t.response,
+    search_queries: t.search_queries,
     context_xml: t.context_xml_sent,
     doc_map: t.doc_map,
     urls: t.urls_opened,
@@ -317,6 +744,19 @@ export function turnToTraceData(t: {
     synthesize_ms: t.synthesize_ms,
     claim_audit: t.claim_audit,
     contradiction_probes: t.contradiction_probes,
+    context_snippets: t.context_snippets,
+    retrieval_mode_effective: rm?.effective,
+    retrieval_mode_requested: rm?.requested,
+    retrieval_mode_reason: rm?.reason ?? null,
+    uncertainty_kind: meta?.uncertainty_kind ?? null,
+    follow_up_queries: meta?.follow_up_queries ?? [],
+    evidence_gaps_reason: meta?.evidence_gaps_reason ?? null,
+    budget_distribution: meta?.budget_distribution,
+    context_fallbacks: meta?.context_fallbacks ?? [],
+    numeric_grounding_ratio: meta?.numeric_grounding_ratio ?? null,
+    criteria_coverage: meta?.criteria_coverage ?? [],
+    terminator_fired: meta?.terminator_fired ?? null,
+    evidence_gaps: meta?.evidence_gaps ?? [],
   };
 }
 
@@ -324,6 +764,7 @@ export function doneToTraceData(
   query: string,
   d: {
     turn_id: string;
+    answer?: string;
     context_xml: string;
     doc_map: DocMap;
     urls: string[];
@@ -340,10 +781,33 @@ export function doneToTraceData(
     select_ms: number;
     probe_ms: number;
     synthesize_ms: number;
+    run_metadata?: {
+      retrieval_mode?: { requested?: string; effective?: string; reason?: string | null };
+      uncertainty_kind?: "none" | "weak" | "missing" | "conflict" | null;
+      follow_up_queries?: string[];
+      evidence_gaps_reason?: string | null;
+      budget_distribution?: {
+        system?: number;
+        history?: number;
+        web_context?: number;
+        output_reserved?: number;
+      };
+      context_fallbacks?: string[];
+      numeric_grounding_ratio?: number | null;
+      criteria_coverage?: boolean[];
+      terminator_fired?: string | null;
+      evidence_gaps?: Array<{ query: string; intent: string; reason: string }>;
+    };
   },
+  sessionId?: string,
 ): TraceInspectorData {
+  const rm = d.run_metadata?.retrieval_mode;
+  const meta = d.run_metadata;
   return {
     turn_id: d.turn_id,
+    session_id: sessionId,
+    created_at: new Date().toISOString(),
+    response: d.answer,
     query,
     context_xml: d.context_xml,
     doc_map: d.doc_map,
@@ -361,6 +825,18 @@ export function doneToTraceData(
     select_ms: d.select_ms,
     probe_ms: d.probe_ms,
     synthesize_ms: d.synthesize_ms,
+    retrieval_mode_effective: rm?.effective,
+    retrieval_mode_requested: rm?.requested,
+    retrieval_mode_reason: rm?.reason ?? null,
+    uncertainty_kind: meta?.uncertainty_kind ?? null,
+    follow_up_queries: meta?.follow_up_queries ?? [],
+    evidence_gaps_reason: meta?.evidence_gaps_reason ?? null,
+    budget_distribution: meta?.budget_distribution,
+    context_fallbacks: meta?.context_fallbacks ?? [],
+    numeric_grounding_ratio: meta?.numeric_grounding_ratio ?? null,
+    criteria_coverage: meta?.criteria_coverage ?? [],
+    terminator_fired: meta?.terminator_fired ?? null,
+    evidence_gaps: meta?.evidence_gaps ?? [],
   };
 }
 

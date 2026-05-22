@@ -66,42 +66,43 @@
   --radius-4xl: 8px;
 }
 
-/* Light kept as no-op fallback; app forces .dark. */
+/* Light theme — warm cream palette. Pairs with Instrument Serif editorial
+ * moments. Teal-600 accent is preserved (works on both backgrounds). */
 :root {
-  --background: #0a0a0c;
-  --foreground: #e7e7ea;
-  --surface: #111114;
-  --surface-hover: #16161a;
-  --surface-emphasis: #1c1c20;
+  --background: #fafaf7;        /* warm cream */
+  --foreground: #1a1a1a;
+  --surface: #ffffff;
+  --surface-hover: #f3f1ec;
+  --surface-emphasis: #ebe9e3;
 
-  --card: #111114;
-  --card-foreground: #e7e7ea;
-  --popover: #16161a;
-  --popover-foreground: #e7e7ea;
+  --card: #ffffff;
+  --card-foreground: #1a1a1a;
+  --popover: #ffffff;
+  --popover-foreground: #1a1a1a;
 
   --primary: #0d9488;
-  --primary-foreground: #042f2e;
-  --secondary: #16161a;
-  --secondary-foreground: #e7e7ea;
+  --primary-foreground: #ffffff;
+  --secondary: #f3f1ec;
+  --secondary-foreground: #1a1a1a;
 
-  --muted: #16161a;
-  --muted-foreground: #9b9ba3;
-  --subtle-foreground: #6b6b73;
+  --muted: #f3f1ec;
+  --muted-foreground: #5a5a5a;
+  --subtle-foreground: #8a8a8a;
 
   --accent: #0d9488;
-  --accent-foreground: #042f2e;
-  --accent-dim: rgba(13, 148, 136, 0.14);
+  --accent-foreground: #ffffff;
+  --accent-dim: rgba(13, 148, 136, 0.10);
 
-  --destructive: #dc2626;
+  --destructive: #b91c1c;
 
-  --border: rgba(255, 255, 255, 0.06);
-  --border-strong: rgba(255, 255, 255, 0.12);
+  --border: rgba(0, 0, 0, 0.08);
+  --border-strong: rgba(0, 0, 0, 0.16);
   --border-accent: rgba(13, 148, 136, 0.40);
 
-  --input: rgba(255, 255, 255, 0.08);
+  --input: rgba(0, 0, 0, 0.06);
   --ring: rgba(13, 148, 136, 0.50);
 
-  /* Recharts palette — teal as primary, hairline-quiet alternates */
+  /* Recharts palette — kept identical across themes so charts stay legible. */
   --chart-1: #0d9488;
   --chart-2: #10b981;
   --chart-3: #2563eb;
@@ -110,13 +111,13 @@
 
   --radius: 0.5rem;
 
-  --sidebar: #0a0a0c;
-  --sidebar-foreground: #e7e7ea;
+  --sidebar: #fafaf7;
+  --sidebar-foreground: #1a1a1a;
   --sidebar-primary: #0d9488;
-  --sidebar-primary-foreground: #042f2e;
-  --sidebar-accent: #16161a;
-  --sidebar-accent-foreground: #e7e7ea;
-  --sidebar-border: rgba(255, 255, 255, 0.06);
+  --sidebar-primary-foreground: #ffffff;
+  --sidebar-accent: #f3f1ec;
+  --sidebar-accent-foreground: #1a1a1a;
+  --sidebar-border: rgba(0, 0, 0, 0.08);
   --sidebar-ring: rgba(13, 148, 136, 0.50);
 }
 
@@ -188,16 +189,22 @@
 }
 
 @layer base {
-  .dark ::-webkit-scrollbar {
+  ::-webkit-scrollbar {
     width: 8px;
     height: 8px;
   }
-  .dark ::-webkit-scrollbar-track {
+  ::-webkit-scrollbar-track {
     background: transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: rgba(0, 0, 0, 0.10);
+    border-radius: 4px;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: rgba(0, 0, 0, 0.20);
   }
   .dark ::-webkit-scrollbar-thumb {
     background: rgba(255, 255, 255, 0.06);
-    border-radius: 4px;
   }
   .dark ::-webkit-scrollbar-thumb:hover {
     background: rgba(255, 255, 255, 0.12);
@@ -243,7 +250,7 @@
 .rich-md ul { list-style: disc; padding-left: 1.25rem; margin: 0.5rem 0; }
 .rich-md ol { list-style: decimal; padding-left: 1.25rem; margin: 0.5rem 0; }
 .rich-md code {
-  background: rgba(0, 0, 0, 0.4);
+  background: var(--surface-hover);
   border: 1px solid var(--border);
   padding: 0.05rem 0.35rem;
   border-radius: 3px;
@@ -251,7 +258,7 @@
   font-family: var(--font-mono);
 }
 .rich-md pre {
-  background: rgba(0, 0, 0, 0.4);
+  background: var(--surface-hover);
   border: 1px solid var(--border);
   padding: 0.8rem 1rem;
   border-radius: 6px;
@@ -299,7 +306,7 @@
   padding: 0 4px;
   border: 1px solid var(--border);
   border-radius: 3px;
-  background: rgba(255, 255, 255, 0.02);
+  background: var(--surface);
   text-decoration: none;
   color: var(--muted-foreground);
   letter-spacing: 0;
