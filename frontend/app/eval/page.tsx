@@ -202,15 +202,15 @@ export default function EvalListPage() {
         {runs.length >= 2 && <LastRunDelta runs={runs} />}
         {runs.length > 0 && (
           <div className="border-t border-border">
-            <div className="grid grid-cols-[1.6fr_60px_80px_1fr_1fr_1fr_1fr_1fr_24px] gap-4 py-3 border-b border-border font-mono text-[10px] uppercase tracking-[0.14em] text-muted-foreground items-end">
+            <div className="grid grid-cols-[1.6fr_60px_80px_1fr_1fr_1fr_1fr_1fr_24px] gap-4 py-3 border-b border-border font-mono text-[11px] uppercase tracking-[0.08em] text-foreground/80 items-end">
               <div>Run</div>
-              <div className="text-right tabular-nums">N</div>
-              <div className="text-right tabular-nums">Pass</div>
-              <div>Faith</div>
-              <div>Relv</div>
-              <div>CtxP</div>
-              <div>Cite</div>
-              <div>ClmP</div>
+              <div className="text-right tabular-nums" title="Number of questions evaluated in this run">N</div>
+              <div className="text-right tabular-nums" title="Pass rate — fraction of questions whose failure_class = PASS">Pass</div>
+              <div className="cursor-help underline decoration-dotted decoration-foreground/30 underline-offset-2" title="Faithfulness — does every claim in the answer trace back to the retrieved context? (0–1)">Faith</div>
+              <div className="cursor-help underline decoration-dotted decoration-foreground/30 underline-offset-2" title="Answer Relevance — does the answer actually address the question? (0–1)">Relv</div>
+              <div className="cursor-help underline decoration-dotted decoration-foreground/30 underline-offset-2" title="Context Precision — did the retrieval layer fetch information needed to answer? (0–1)">CtxP</div>
+              <div className="cursor-help underline decoration-dotted decoration-foreground/30 underline-offset-2" title="Citation Integrity — do [doc_N] markers point to URLs that actually contain the cited claim? (0–1)">Cite</div>
+              <div className="cursor-help underline decoration-dotted decoration-foreground/30 underline-offset-2" title="Claim Precision — fraction of individual claims in the answer that are supported by a citation (0–1)">ClmP</div>
               <div />
             </div>
             {runs.map((r) => {
