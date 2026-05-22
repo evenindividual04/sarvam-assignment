@@ -317,6 +317,51 @@ def test_sessions_turn_detail_joins_claim_audit_and_probes(app_client):
     assert data["claim_audit"][0]["cited_doc_ids"] == ["doc_1"]
 
 
+def test_sessions_list_includes_first_query(app_client):
+    """GET /sessions surfaces the first turn's `query` so the sidebar can
+    render a human-readable title instead of a hash slug."""
+    client, mem_mod, _ = app_client
+
+    async def seed():
+        async with aiosqlite.connect(mem_mod.DB_PATH) as db:
+            await db.execute(
+                "INSERT INTO sessions (session_id, created_at, updated_at, turn_count) VALUES (?,?,?,?)",
+                ("sess-with-turn", "2026-01-01T00:00:00", "2026-01-01T00:00:00", 2),
+            )
+            # Two turns: the earliest one should be picked.
+            await db.execute(
+                """INSERT INTO turns (turn_id, session_id, query, search_queries, urls_opened,
+                   response, context_xml_sent, doc_map, state_trace, created_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                ("t-first", "sess-with-turn", "What is India's repo rate?",
+                 "[]", "[]", "A", "<ctx/>", "{}", "[]", "2026-01-01T00:00:00"),
+            )
+            await db.execute(
+                """INSERT INTO turns (turn_id, session_id, query, search_queries, urls_opened,
+                   response, context_xml_sent, doc_map, state_trace, created_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                ("t-second", "sess-with-turn", "Follow-up question",
+                 "[]", "[]", "A", "<ctx/>", "{}", "[]", "2026-01-01T00:05:00"),
+            )
+            # An empty session — should report null first_query.
+            await db.execute(
+                "INSERT INTO sessions (session_id, created_at, updated_at, turn_count) VALUES (?,?,?,?)",
+                ("sess-empty", "2026-01-01T00:00:00", "2026-01-01T00:00:00", 0),
+            )
+            await db.commit()
+
+    asyncio.run(seed())
+    r = client.get("/sessions")
+    assert r.status_code == 200
+    rows = {row["session_id"]: row for row in r.json()}
+
+    assert "sess-with-turn" in rows
+    assert rows["sess-with-turn"]["first_query"] == "What is India's repo rate?"
+
+    assert "sess-empty" in rows
+    assert rows["sess-empty"]["first_query"] is None
+
+
 # ── Phase 1.25: typed event taxonomy + SSE robustness ──────────────────────
 
 

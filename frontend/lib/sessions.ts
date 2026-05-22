@@ -65,14 +65,23 @@ export function groupSessionsByDate(
 /**
  * Human-friendly title for a session in the sidebar list.
  *
- * Today the backend list endpoint doesn't include the first query, so we
- * fall back to a short session-id slug. When `SessionListItem` gains a
- * `title` field, that takes precedence.
+ * Precedence:
+ *   1. Explicit `title` (if the backend ever stamps one)
+ *   2. Truncated `first_query` (the verbatim first user turn)
+ *   3. "Untitled session" when the session has no turns yet
+ *   4. Hash-slug fallback (`session_id.slice(0, 8)`) as last resort
  */
-export function sessionDisplayTitle(s: SessionListItem & { title?: string | null }): string {
+export function sessionDisplayTitle(
+  s: SessionListItem & { title?: string | null; first_query?: string | null },
+): string {
   const t = (s.title ?? "").trim();
   if (t) return truncateAtWord(t, 40);
+
+  const fq = (s.first_query ?? "").trim();
+  if (fq) return truncateAtWord(fq, 40);
+
   if (s.turn_count === 0) return "Untitled session";
+
   // Sessions land with cryptographically random IDs (uuid / s-<ts>-<rand>);
   // showing the first 8 chars in mono gives a scannable, copyable handle.
   return s.session_id.slice(0, 8);

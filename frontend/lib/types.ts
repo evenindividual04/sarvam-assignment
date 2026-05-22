@@ -231,6 +231,12 @@ export interface SessionListItem {
    * slug when absent. See `lib/sessions.ts::sessionDisplayTitle`.
    */
   title?: string | null;
+  /**
+   * Verbatim text of the session's first turn query. Used as the display
+   * title fallback when no explicit `title` has been stamped. Capped at
+   * 200 chars on the backend; frontend truncates further for layout.
+   */
+  first_query?: string | null;
   /** Optional URL count rolled up across all turns; rendered as metadata. */
   source_count?: number | null;
 }

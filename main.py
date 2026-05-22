@@ -714,12 +714,32 @@ async def settings_defaults():
 
 @app.get("/sessions")
 async def get_sessions():
+    # Join the first turn's `query` per session so the sidebar can render a
+    # human-friendly title instead of a hash slug. Uses a correlated subquery
+    # against `turns.created_at ASC LIMIT 1` to avoid N+1.
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         rows = await db.execute_fetchall(
-            "SELECT session_id, updated_at, turn_count FROM sessions ORDER BY updated_at DESC LIMIT 50"
+            """
+            SELECT s.session_id,
+                   s.updated_at,
+                   s.turn_count,
+                   (SELECT t.query FROM turns t
+                     WHERE t.session_id = s.session_id
+                     ORDER BY t.created_at ASC LIMIT 1) AS first_query
+              FROM sessions s
+             ORDER BY s.updated_at DESC
+             LIMIT 50
+            """
         )
-        return [dict(r) for r in rows]
+        out = []
+        for r in rows:
+            d = dict(r)
+            fq = d.get("first_query")
+            if isinstance(fq, str) and len(fq) > 200:
+                d["first_query"] = fq[:200]
+            out.append(d)
+        return out
 
 
 @app.get("/sessions/{session_id}/history")
