@@ -13,8 +13,8 @@ short_description: Web-grounded research with citation audit and conflict probe
 
 A web-grounded research agent that issues typed search queries, fetches and reranks sources, and synthesizes citation-traced answers — every claim audited against the snippet it cites at generation time. Conflicts between sources are surfaced as disagreements, not collapsed into a single take. Built in plain Python `asyncio` with no orchestration framework, in line with the assignment constraint.
 
-- **Demo video:** _[link to be added before submission]_
-- **Live frontend (Vercel):** https://frontend-a519j5gkh-evenindividual04s-projects.vercel.app
+- **Demo video:** https://www.loom.com/share/6c174a551046421db5b7eabd73394766
+- **Live frontend (Vercel):** https://sarvam-deep-research-agent.vercel.app
 - **Live backend (Hugging Face Spaces):** https://evenindividual00-sarvam-deep-research.hf.space
 - **Source:** https://github.com/evenindividual04/sarvam-assignment
 
@@ -29,7 +29,7 @@ A web-grounded research agent that issues typed search queries, fetches and rera
 3. [What's Different — Forensic Trail, Not Magic Show](#whats-different--forensic-trail-not-magic-show)
 4. [Example Conversations](#example-conversations)
 5. [Evaluation Methodology and Findings](#evaluation-methodology-and-findings)
-6. [Architecture and Implementation](#architecture-and-implementation)
+6. [Architecture at a glance](#architecture-at-a-glance)
 7. [Limitations](#limitations)
 8. [Future Improvements](#future-improvements)
 9. [Assumptions](#assumptions)
@@ -254,9 +254,11 @@ Captured live during the post-implementation smoke test on `2026-05-22`. The que
 
 ## Evaluation Methodology and Findings
 
+> This section is the executive summary. Full per-metric rubrics, prompt templates, bootstrap CI methodology, cross-family judge discipline, and reproducibility commands are in [`docs/EVAL_METHODOLOGY.md`](docs/EVAL_METHODOLOGY.md) &mdash; written specifically for assignment evaluation criterion #1 (*Soundness of chosen evaluation metrics and rationale*).
+
 ### Dataset
 
-53 questions across 5 languages (English, Hindi, Tamil, Bengali, Marathi) and 6 categories: `factual`, `multi_hop`, `comparison`, `insufficient_evidence`, `conflicting`, `multi_turn`. Multi-Indic questions share a `concept_id` with their English counterpart so we can compute cross-language consistency.
+76 questions across 5 languages (English, Hindi, Tamil, Bengali, Marathi) and 6 categories: `factual`, `multi_hop`, `comparison`, `insufficient_evidence`, `conflicting`, `multi_turn`. 11 adversarial questions tagged with `expected_failure_class`. Multi-Indic questions share a `concept_id` with their English counterpart so we can compute cross-language consistency.
 
 Dataset location: `eval/dataset.json`. Per-category and per-language drill-down helpers in `agent/eval_queries.py`.
 
@@ -346,274 +348,53 @@ Frontend: `cd frontend && npx tsc --noEmit` — clean (exit 0).
 
 ### Ablation: BM25 vs hybrid RRF
 
-`eval/ablation_report.py` produces head-to-head deltas between BM25-only and the hybrid path (BM25 ⊕ bge-small-en-v1.5 fused via Reciprocal Rank Fusion, k=60).
+`eval/ablation_report.py` produces head-to-head deltas between BM25-only and the hybrid path (BM25 &oplus; bge-small-en-v1.5 fused via Reciprocal Rank Fusion, k=60). Both legs share an `ablation_id` so per-question deltas are computable.
 
 ```bash
-python eval/eval_runner.py --ablate
-python scripts/plot_ablation.py
+python eval/eval_runner.py --ablate --cross-family-judge
 ```
 
-Both legs share an `ablation_id` so per-question deltas across all 8 metrics are computable. Expected directional signal (per V3.1 design): hybrid lifts Context Precision and Faithfulness on multi-hop and insufficient-evidence questions where keyword recall alone misses the relevant chunk. On factual / comparison questions with high-signal keywords, the legs should be approximately equal — by design.
+#### Measured results — n=13 stratified paired subset (run `2026-05-22`)
 
-![Hybrid RRF vs BM25-only — grouped bar chart of Faithfulness, Context Precision, Citation Integrity, Quote Grounding](docs/assets/ablation_chart.png)
+The full 76&times;2 ablation ran the BM25 leg to completion and 20 hybrid turns before free-tier quota constraints (Groq TPD + Cerebras throttling under sustained load) forced an early stop. Rather than report partial numbers from an iteration-biased English-only prefix, we ran a **stratified 13-question hybrid completion** covering the categories and languages the partial run missed: 4 conflicting + 4 multi_turn (English), 2 Hindi factual, 1 each Bengali / Tamil / Marathi factual. Numbers below are computed only on those 13 paired questions, with 95% bootstrap CIs (n_resamples=2000, seed=42).
 
-Caveat: the ablation needs `sqlite-vec` to actually load. If it can't, the hybrid leg silently degrades to BM25 and the delta will be ~0; the runner prints a warning in that case. The committed PNG was generated from an illustrative dataset where API keys weren't configured — re-run both commands in a configured environment to refresh.
+| Metric | BM25 (95% CI) | Hybrid (95% CI) | Paired &Delta; (95% CI) |
+|---|---|---|---|
+| **Faithfulness** | 0.455 [0.22, 0.69] | **0.748 [0.55, 0.92]** | **+0.293 [&minus;0.02, +0.62]** |
+| Context Precision | 0.677 [0.50, 0.85] | 0.738 [0.62, 0.87] | +0.062 [&minus;0.08, +0.20] |
+| Citation Integrity | 1.000 | 1.000 | 0.000 |
+| Claim Precision | 0.962 [0.88, 1.00] | 1.000 | +0.038 [+0.00, +0.12] |
+| Factual Accuracy | 1.000 | 1.000 | 0.000 |
+| Quote Grounding | 0.846 [0.62, 1.00] | 0.923 [0.77, 1.00] | +0.077 [&minus;0.15, +0.31] |
+| Numeric Grounding | 0.940 [0.84, 1.00] | 0.974 [0.95, 0.99] | +0.035 [&minus;0.04, +0.13] |
+
+#### How to read this
+
+- The **&plus;29pp lift on Faithfulness** is the headline. It lands exactly where the hybrid path is designed to help: multi-aspect questions where keyword-only BM25 misses semantically-relevant chunks (multi_turn, conflicting) and Indic queries where lexical retrieval underperforms because script-tokenization breaks BM25 term matching.
+- Deterministic anchors (**Citation Integrity, Factual Accuracy**) sit at ceiling regardless of retrieval mode &mdash; the pipeline's correctness gates (citation guard, claim verification) work; retrieval is what moves the metric needle.
+- The **paired faithfulness delta CI crosses zero** (&minus;0.02 to +0.62). Honest framing: strong directional signal, but n=13 means we cannot claim statistical significance at the 95% level. The lower CI bound is essentially "no effect possible"; the upper bound is "could be more than twice the point estimate." The point estimate is the most likely value, but a larger run is needed for a tight claim.
+- Why n=13 and not n=76: free-tier API quotas (Groq daily TPD on Llama-3.3-70B, Cerebras throttle limits) made the full 152-turn ablation unaffordable in one window. The eval harness supports the full run &mdash; rerun in an environment with sufficient quota to refresh.
+
+Raw data: `eval/results/ablation_final_n13.json` (paired deltas + bootstrap CIs); `eval/results/eval_judgeonly_20260522_142637.jsonl` (hybrid leg, 13 rejudged turns); `eval/results/eval_judgeonly_20260522_144325.jsonl` (BM25 leg, matched 13 rejudged turns).
+
+Caveat: the ablation needs `sqlite-vec` to actually load. If it can't, the hybrid leg silently degrades to BM25 and the delta will be ~0; the runner prints a warning in that case.
 
 ---
 
-## Architecture and Implementation
+## Architecture at a glance
 
-### Pipeline at a glance
+Five-phase pipeline; framework-free Python (assignment constraint):
 
 ```text
-User Query
-    |
-    v
-[VAGUENESS GATE]  Heuristic score (entity count + length + ambiguity flag + wh-breadth)
-                  Fires at most ONE clarifier when score ≥ 0.55 AND criteria exist
-    |
-    v
-[PLANNER]       Groq Llama 3.3 70B
-                → typed queries (primary | comparison | recency_check | contradiction_probe)
-                → confidence: low | medium | high
-                → success_criteria (drives the evidence ledger)
-    |
-    v               ┌─────────────────────────────────┐
-    |               | for each hop ∈ {1..MAX_HOPS}    |
-    |               |                                 |
-    v               v                                 |
-[SEARCHER]      Parallel AI → Tavily → Serper         |
-                Per-intent routing; circuit breakers  |
-    |                                                 |
-    v                                                 |
-[FETCHER]       httpx async, semaphore(3),            |
-                Trafilatura readability extract       |
-    |                                                 |
-    v                                                 |
-[CONTEXT]       BM25 → FlashRank rerank → 5-signal    |
-                Hybrid RRF + bge-small-en-v1.5 opt    |
-    |                                                 |
-    v                                                 |
-[EVIDENCE LEDGER]  hop_evidence event — mechanical    |
-                   extraction of grounded entities/   |
-                   numbers/criteria → real doc_ids    |
-                   + verbatim quotes. NOT LLM recap.  |
-    |                                                 |
-    v                                                 |
-[STOP-RAG GATE]    Groq, 4s timeout, JSON-strict.     |
-                   Useful=False OR confidence<0.5     |
-                   → emit terminator(EVIDENCE_SUFFI-  |
-                   CIENT or MARGINAL_GAIN_LOW),       |
-                   break hop loop. Degrades-to-       |
-                   continue on any failure.           |
-    |                                                 |
-    +-- continue? --→ next hop ──────────────────────┘
-    |
-    v
-[SOURCE ROLE]   Single batched Groq classifier over the URL pool:
-                {primary_source | secondary_analysis | statistical
-                 | news_event | official | encyclopedic | contradicting}
-                Composed with the existing V2.3 source-trust tier.
-    |
-    v
-[SOURCE CONTRIBUTION]  tokens_from_url / total_context_tokens (tiktoken cl100k_base).
-                       Emitted once per run for the inspector.
-    |
-    v
-[CONFLICT_CHECK]  Dedicated stage: detects cross-source contradictions.
-                  DRAGged-into-Conflict taxonomy: self | pair | conditional.
-                  Conditional contradictions carry a `qualifier` field.
-    |
-    v
-[SYNTHESIZER]   Gemini 2.5 Flash (default) | Sarvam-M (Indic) | OpenRouter DeepSeek R1 (fallback)
-                Streams [doc_N] markers; citation guard converts to [Title — domain](URL)
-                Stream is scrubbed of <think>...</think> blocks (per-turn stateful filter)
-    |
-    v
-[CLAIM VERIFIER]  Per-sentence: deterministic token+entity overlap → LLM fallback
-                  unsupported → [UNVERIFIED]   ambiguous_resolved → [AMBIGUOUS]
-    |
-    v
-[PERSISTENCE]   aiosqlite: sessions, turns, turn_context, claim_audit,
-                contradiction_probes (w/ dominant_kind), circuit_events,
-                eval_runs, FTS5 index
+User Query → [PLANNER] → [SEARCHER] → [FETCHER] → [CONTEXT] → [SYNTHESIZER] → Cited Answer
+               Groq      Parallel/    httpx +     BM25 +      Gemini /
+               Llama     Tavily/      Trafilatura FlashRank   Sarvam-M
+               3.3 70B   Serper       readability + RRF       (Indic)
 ```
 
-### Provider router
+Adaptive 2-hop loop with a value-based **Stop-RAG gate** (Park et al. 2025) + token-budget terminator. Per-hop **mechanical evidence ledger** (not LLM CoT). DRAGged 3-type conflict taxonomy. Stream is scrubbed of `<think>` blocks at three layers (regex / stateful / recursive).
 
-| Stage | Default | Alternatives |
-|---|---|---|
-| Planning + conflict detection | Groq Llama 3.3 70B | (Groq only — low-latency tier) |
-| **Stop-RAG hop gate** | Groq Llama 3.3 70B, `max_tokens=80`, 4 s timeout | Degrades-to-continue on any failure; `reason` is persisted but never streamed |
-| **Source-role classifier** | Groq Llama 3.3 70B, single batched call, 8 s timeout, in-memory cache | Degrades-to-`unclassified/0.0` on any failure; composed with the V2.3 source-trust tier (not replacing it) |
-| Search | Parallel AI | Tavily, Serper (auto fallback) |
-| Synthesis | Gemini 2.5 Flash | `SYNTH_PROVIDER=sarvam` → Sarvam-M / 30B (Indic-first, 64K–128K context, Apache-2.0 base); `SYNTH_PROVIDER=openrouter` → DeepSeek R1; Cerebras / Ollama as additional fallbacks |
-| Eval judge | GitHub Models GPT-4o-mini | Any OpenAI-compatible model from a different family than the generator |
-
-Five-step synthesis fallback chain (`Gemini → Sarvam → OpenRouter → Cerebras → Ollama`) with per-provider pre-flight key checks, breaker-aware skipping, and a structured `[synth] fallback succeeded: provider=X step=N` log line. Cerebras has an 8K context-cap guard that auto-skips when the prompt overflows. Ollama is the local last-resort.
-
-### Architectural tradeoffs
-
-Every notable decision was made against a real alternative.
-
-| Choice | Why we picked it | What we rejected |
-|---|---|---|
-| **SQLite + sqlite-vec** for persistence + vectors | Zero-ops embedded store, single-file DB, FTS5 + vector in one engine, runs locally and in a 200MB container. | **Pinecone / Weaviate / pgvector** — managed vector DBs add a network hop, a SaaS dependency, and free-tier quotas that interfere with eval re-runs. |
-| **Hand-rolled async state machine** in `agent/orchestrator.py` | Single async generator makes phase boundaries, cancellation, and SSE emission trivially traceable. Zero framework overhead. Maps 1:1 to the "no orchestration frameworks" constraint. | **LangGraph / CrewAI / LlamaIndex / Haystack** — opaque control flow, hidden retries, version churn, explicitly disallowed. |
-| **Parallel AI** as primary search provider | 16,000 free queries vs Tavily's 1,000/mo; structured AI-native excerpts mean we skip a separate fetch on most hits. | **Tavily** (smaller free tier, marginally higher agentic-benchmark score) and **Serper** (snippets only, kept as last-resort fallback). |
-| **FlashRank** cross-encoder for rerank | 4MB ONNX model, no PyTorch dependency, sub-100ms on CPU. HF Space deployable. | **BGE / ColBERT MaxSim / DeBERTa cross-encoders** — require PyTorch, GPU for latency, 400MB+ container. |
-| **GPT-4o-mini** judge via GitHub Models | Different family from generator (Gemini), free tier, JSON-strict output — avoids same-family score-inflation bias. | **Gemini judging Gemini** — anchor-bleed; judges score familiar style higher than substance. |
-| **Per-metric judge calls** (6+ separate calls) | Isolates failure modes — retrieval failure shouldn't tank faithfulness. Each judge has a narrow rubric. | **Single weighted aggregate** — opaque, hides which axis failed, tempts metric gaming. |
-| **Hard `MAX_HOPS=2` + Stop-RAG adaptive gate** | The hard cap is a safety net; the value-based gate (Park et al. 2025, [arXiv:2510.14337](https://arxiv.org/abs/2510.14337)) decides per-hop *whether another retrieval round would actually change the answer*. Logs the terminator reason (`EVIDENCE_SUFFICIENT` / `MARGINAL_GAIN_LOW` / `MAX_HOPS_REACHED` / `BUDGET_EXHAUSTED`) so the inspector renders *why* the loop stopped. | **Fixed-iteration baseline** — Park et al. show value-based stopping consistently beats fixed-iteration on multi-hop QA. **Unbounded ReAct** — token explosion, hallucination spirals on a free tier. |
-| **Mechanical evidence ledger** (per-hop `hop_evidence` event) | Each grounded row points to a real `doc_id` + verbatim quote; open criteria are a set-difference against `success_criteria`. Deterministic. Survives the assignment's "no hidden CoT streaming" rule trivially. | **LLM-narrated intermediate-answer feed-forward** — surfacing a model's prose recap of "what we found so far" risks hallucination compounding across hops and is harder to audit. |
-| **DRAGged 3-type conflict taxonomy** (`self` / `pair` / `conditional`) | Aligned with Cattan et al. (Google, [arXiv:2506.08500](https://arxiv.org/abs/2506.08500)). Conditional contradictions carry a `qualifier` (e.g. *"under the qualifier: year"*) so the agent can correctly route apparent disagreements that vanish when a temporal/regional context is applied. | **Free-form `has_conflict` boolean** — loses information; can't distinguish "agree under qualifier" from "actually disagree". |
-| **Bounded U-shape reordering** at injection | Top-1 first, top-2 last, rest in middle. Single-pass reorder, near-zero overhead. Liu et al. 2023. | **Full Lost-in-the-Middle grid search** — heavier instrumentation for marginal additional gain in a 6.4K window. |
-
-### Context engine pipeline
-
-```
-BM25 pre-filter (top 30 candidates)
-    ↓
-FlashRank cross-encoder rerank (top 10)
-    ↓
-5-signal scoring: BM25 relevance + recency + diversity + source trust + provider relevance
-    ↓
-Bounded U-shape reordering before injection (Lost-in-the-Middle mitigation)
-    ↓
-≤ 6,400 token web-context budget (40% of 16K total)
-```
-
-Three distinct roles with no overlap: **BM25 = keyword recall**, **FlashRank = semantic relevance**, **5-signal pass = editorial selection**. Hybrid RRF (BM25 + bge-small-en-v1.5 fused at k=60) auto-enables when `sqlite-vec` loads; falls back to lexical otherwise. The effective mode is logged at startup and stamped into every turn's `run_metadata.retrieval_mode`.
-
-### Context budget allocation
-
-Total **16,000 tokens** (`utils/token_counter.py`):
-
-| Slice | Share | Tokens |
-|---|---:|---:|
-| System instructions | 15% | 2,400 |
-| Conversation history (rolling summary + last 3 turns) | 25% | 4,000 |
-| Web context | 40% | 6,400 |
-| Reserved for generation | 20% | 3,200 |
-
-Two-tier conversation state: the last 3 turns verbatim, plus a Groq-generated rolling summary of older turns (fires at `turn_count > 5`, every 3 turns thereafter).
-
-### Database schema (selected tables)
-
-| Table | Purpose |
-|---|---|
-| `sessions` | session_id, created_at, last_active_at |
-| `turns` | query, response, search_queries (JSON), urls_opened (JSON), `context_xml_sent`, `doc_map`, prompt/completion tokens, latency, `run_metadata_json` |
-| `turn_context` | per-snippet audit trail of exactly what the LLM saw, including `provider_relevance` |
-| `claim_audit` | per-claim verification result with `verified | unverified | partial` |
-| `contradiction_probes` | conflict-check stage output per turn (incl. `dominant_kind ∈ {self, pair, conditional, none}` from the DRAGged taxonomy; idempotent `ALTER TABLE … ADD COLUMN` migration backfills `'none'` on pre-existing rows) |
-| `circuit_events` | breaker trips per provider |
-| `session_summaries` | rolling summaries |
-| `semantic_memory` | sqlite-vec embeddings of distilled facts from older turns (Phase 5 stretch) |
-| `fts_content` | FTS5 virtual table for BM25 over all past turns |
-| `eval_runs` | per-question scores, per-metric, per-judge |
-
-The three fields evaluators care most about are `turns.context_xml_sent` (faithfulness eval needs the exact XML), `turns.doc_map` (citation back-reference), and per-stage timings stored in `run_metadata_json`.
-
-### Streaming SSE event reference
-
-Events emitted from `main.py` `/research`. Each frame has both an SSE `event:` discriminator AND a `type` field embedded inside the JSON payload (belt-and-suspenders for L7 proxies that strip comment-prefix lines). Stage labels match the assignment spec verbatim.
-
-| Event (`type`) | Payload | Notes |
-|---|---|---|
-| `run_started` | `{turn_id, session_id, query}` | One-time, first event of the run |
-| `phase_started` | `{name, label, idx, total, hop?}` | One per phase boundary; `label` is the user-visible stage string |
-| `phase_progress` | `{name, current, total, failed?}` | Sub-phase counters (e.g. URL fetches) |
-| `phase_finished` | `{name, duration_ms, ...}` | One per phase boundary |
-| `search_query` | `{query, provider, hop}` | Each subquery dispatched |
-| `source_found` | `{url, title, domain, query}` | Each unique URL discovered |
-| `source_fetched` | `{url, status, latency_ms, bytes?, error?}` | After fetch attempt |
-| `context_selected` | `{url, score, snippet_preview, rank}` | Each chunk kept after 5-signal scoring |
-| `reasoning` | `{hop, phase: "intent"\|"observation", queries?, observation?}` | Planner-derived rationales (not model CoT) |
-| **`hop_evidence`** | `{hop, grounded: [{token, kind, doc_id, url, quote}], open: [{criterion, reason}]}` | Forensic per-hop ledger — mechanically grounded entities/numbers; open `success_criteria` after set-difference. Never a model prose recap. |
-| **`source_contribution`** | `{contributions: [{url, domain, title, tokens, share, citations}], total_tokens}` | Token-share per URL of the final context, computed with tiktoken cl100k_base |
-| **`source_role`** | `{roles: [{url, role, confidence}]}` | LLM-classified role per URL; degrades to `unclassified/0.0` on classifier failure |
-| **`terminator`** | `{reason, hop, detail?}` | Explicit hop-loop stop reason: `EVIDENCE_SUFFICIENT \| MARGINAL_GAIN_LOW \| MAX_HOPS_REACHED \| NO_NEW_QUERIES \| BUDGET_EXHAUSTED \| CRITERIA_SATISFIED` |
-| `clarification_offered` | `{kind, original_query, possible_interpretations, clarifying_question}` | Fires only when vagueness score ≥ 0.55 AND planner success_criteria are non-empty |
-| `evidence_gap` | `{query, intent, reason}` | A planner sub-query yielded no usable evidence |
-| `conflict_detected` | `{claim, position_a, position_b}` | DRAGged taxonomy applied at probe stage |
-| `uncertainty` | `{kind: "weak"\|"missing"\|"conflict", reason, follow_ups}` | Structured signal so the chat UI can surface "state uncertainty and propose next steps" |
-| `answer_delta` | `{text}` | Streamed answer text; scrubbed of `<think>…</think>` blocks |
-| `citation_resolved` | `{marker, url, title}` | As citation guard converts each `[doc_N]` |
-| `run_finished` | `{usage, total_latency_ms, cost_usd}` | One-time, last event before `done` |
-| `done` | full final payload incl. `answer`, `urls`, `doc_map`, `run_metadata` | Terminal |
-| `run_error` / `error` | `{phase, message, recoverable}` | Terminal-on-failure |
-
-The 5 user-facing phase labels are exactly: `"Planning"`, `"Searching the web"`, `"Fetching sources"`, `"Selecting relevant context"`, `"Generating answer with citations"` — all carried via `phase_started.label`.
-
-**No hidden chain-of-thought is streamed.** See the CoT-streaming compliance section below for the three-layer scrub that enforces this.
-
-### CoT-streaming compliance (assignment line 103)
-
-The assignment is explicit: *"Do not stream hidden chain-of-thought."* This is a hard requirement, not a preference. Our synthesizer talks to multiple LLMs (Gemini, Sarvam-M, DeepSeek R1, Cerebras) — at least two of those families occasionally emit `<think>...</think>` reasoning blocks mid-stream. We enforce the rule in three layers:
-
-1. **Regex pre-emit filter** (`main.py:_COT_PATTERNS`). Catches `<think>` / `<thinking>` / `<thought>` (and closing variants) plus provider envelope keys (`thought_summary`, `thought_tokens`, `reasoning_content`, `reasoning_tokens`, `redacted_thinking`).
-2. **Per-turn stateful scrubber** (`_drive`/`cot_state` in `main.py`). Tracks whether a `<think>` block opened in a *prior* chunk is still in flight. Body chunks between open and close get their text emptied; the chunk carrying `</think>` is trimmed up to and including the close tag. This is necessary because streaming chunks may split a block: chunk N has `<think>...`, chunks N+1..M have body text with no marker tokens, chunk M has `...</think>`.
-3. **Recursive payload scrub** (`_scrub_cot_recursive` in `main.py`). Walks every string leaf of the SSE payload — covers `done.data.answer` and any nested string field so single-frame full-text values cannot leak CoT even after the streaming layer already passed.
-
-Additionally, the Stop-RAG gate's LLM `reason` field is persisted to `run_metadata.stop_rag_decisions` (for the trace inspector) but **scrubbed from the SSE wire copy** of the `done` event. Asserted by `tests/test_stop_rag.py::test_reason_not_in_sse_payload`, which walks every yielded event for the sentinel reason string and requires zero hits.
-
-Lock-in: `tests/test_cot_scrub.py` — **17 tests** covering pattern coverage, inline scrub, mid-stream open-only, close-only-after-open, idempotency, done-event payload, nested lists, and envelope contains-check.
-
-### Runtime failure budget
-
-Per-stage budgets enforced by `utils/failure_policy.py`; degrade gracefully instead of crashing a turn:
-
-| Policy key | Default | Behavior on breach |
-|---|---:|---|
-| `FAILURE_POLICY_PLAN_TIMEOUT_S` | 25 | Fallback to direct-query planning (single PRIMARY query) |
-| `FAILURE_POLICY_SEARCH_TIMEOUT_S` | 45 | Continue with empty results; downstream stages adapt |
-| `FAILURE_POLICY_FETCH_TIMEOUT_S` | 60 | Continue with partial extracted content |
-| `FAILURE_POLICY_SELECT_TIMEOUT_S` | 20 | Fallback to heuristic selector |
-| `FAILURE_POLICY_SYNTH_TIMEOUT_S` | 90 | Bounded fallback response with proposed follow-up queries |
-| `FAILURE_POLICY_MAX_TOTAL_TURN_TIME_S` | 240 | Tag `budget_breach` in run metadata; stop extra work |
-| `FAILURE_POLICY_MAX_HOPS` | 2 | Hard cap on adaptive 2-hop retrieval |
-
-Per-provider circuit breakers (V2.5) sit inside Tenacity retry boundaries — one Tenacity-exhausted call counts as one logical failure. Thresholds: search providers 4 failures / 60s, LLM providers 5 / 60s, judge 3 / 60s.
-
-### Project structure
-
-```
-.
-├── agent/                          # Core pipeline
-│   ├── orchestrator.py             #   state machine: PLANNING → ... → DONE/CANCELLED
-│   ├── search.py                   #   multi-Indic language detection, provider chain
-│   ├── extractor.py                #   httpx + Trafilatura
-│   ├── context_engine.py           #   BM25 + FlashRank + 5-signal + optional hybrid RRF
-│   ├── synthesizer.py              #   streaming wrapper
-│   ├── citation_guard.py           #   [doc_N] → [Title — domain](URL)
-│   ├── claim_verifier.py           #   per-sentence verification (V2.4)
-│   ├── embedder.py                 #   bge-small-en-v1.5 (V3.1, optional)
-│   ├── memory.py                   #   aiosqlite schema, migrations, FTS5
-│   ├── eval_queries.py             #   per-language, per-category drill-down
-│   └── models.py                   #   dataclasses + Pydantic
-├── utils/                          # Cross-cutting
-│   ├── provider_router.py          #   Gemini / Groq / Sarvam / OpenRouter / GitHub Models
-│   ├── circuit_breaker.py          #   V2.5
-│   ├── cancellation.py             #   V2.6 token registry
-│   ├── source_trust.py             #   V2.3 tier table
-│   ├── prompt_registry.py          #   versioned prompts
-│   ├── failure_policy.py           #   per-stage timeouts + breaker thresholds
-│   ├── cost_model.py               #   per-model token cost lookup
-│   └── token_counter.py            #   tiktoken + ContextBudget
-├── eval/
-│   ├── dataset.json                #   53 questions, 5 languages, 6 categories
-│   ├── eval_runner.py              #   single-mode + --ablate + --cross-family-judge
-│   ├── judge.py                    #   9 metrics
-│   └── ablation_report.py
-├── frontend/                       # Next.js 16 App Router, Tailwind, shadcn/ui
-│   ├── app/                        #   chat / sessions / eval / drill-down
-│   └── components/
-├── main.py                         # FastAPI: /research SSE, /sessions, /eval/*, /health
-├── docs/DEPLOY.md                  # 30-min VPC deployment guide
-├── legacy/                         # Decommissioned Streamlit V1
-└── tests/                          # 187 passing
-```
+**For the full breakdown** — pipeline diagram, provider router table, architectural tradeoffs, context engine, context budget allocation, database schema, the 20-event SSE reference, CoT-streaming compliance, runtime failure budget, project structure — see [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md). FastAPI endpoint reference is in [`docs/API.md`](docs/API.md).
 
 ---
 
@@ -680,50 +461,9 @@ For the PDF submission packet:
 
 ## Related Work
 
-Each item below is referenced by a specific design decision in the codebase.
+Each architectural decision traces to a published paper or system. Full citations + bibtex + how-each-influenced-our-design notes in [`docs/RELATED_WORK.md`](docs/RELATED_WORK.md).
 
-- **Huang et al. (2025), "Deep Research Agents: A Systematic Examination And Roadmap"** ([arXiv 2506.18096](https://arxiv.org/abs/2506.18096)). The canonical DR-agent survey. We adopt its vocabulary throughout and use its taxonomy for the orchestrator's phase structure.
-- **Du et al. (2025), "DeepResearch Bench"** ([arXiv 2506.11763](https://arxiv.org/abs/2506.11763)). Defines RACE and FACT metric families. Our 6-metric judge maps cleanly: Faithfulness ↔ RACE.Faithfulness, Citation Integrity ↔ FACT.Citation_Accuracy, Context Precision ↔ RACE.Comprehensiveness.
-- **OpenAI BrowseComp / BrowseComp-ZH** ([blog](https://openai.com/index/browsecomp)). Inspires our 53-question multilingual dataset and the factual / multi-hop / comparison / insufficient-evidence / conflicting category mix.
-- **Liu et al. (2023), "Lost in the Middle"** ([arXiv 2307.03172](https://arxiv.org/abs/2307.03172)). Drives our final-stage snippet reordering (top-1 first, top-2 last, rest in middle) before the synthesis prompt.
-- **Jina AI, "node-DeepResearch"** ([blog](https://jina.ai/news/a-practical-guide-to-implementing-deepsearch-deepresearch/)). Token-budget terminator: bound a ReAct loop on cumulative token spend, not just hop count. We adopt this alongside `MAX_HOPS=2`.
-- **Shao et al. (2024), STORM** ([NAACL 2024](https://arxiv.org/abs/2402.14207)). Multi-perspective question generation. Cited as planner future direction.
-- **Alibaba, Tongyi DeepResearch / IterResearch** ([repo](https://github.com/Alibaba-NLP/DeepResearch)). Heavy-mode test-time scaling. Cited as future work.
-- **Vectara (2025), chunking + metadata enrichment** ([blog](https://www.vectara.com/blog/)). Drives snippet-XML expansion to carry `retrieved_at`, rank, and `relevance_score` alongside the URL/title/domain triple.
-- **Park, Cho, Lee (2025), "Stop-RAG: Value-Based Retrieval Control for Iterative RAG"** ([arXiv 2510.14337](https://arxiv.org/abs/2510.14337), NeurIPS 2025 MTI-LLM Workshop). The adaptive hop gate. We approximate the value function with a single fast Groq call returning `{another_hop_useful, confidence}`; their paper documents the gain over fixed-iteration RAG that motivates the design.
-- **Cattan et al. (Google, 2025), "(D)RAGged Into Conflict: Detecting and Addressing Conflicting Sources in Generative QA"** ([arXiv 2506.08500](https://arxiv.org/abs/2506.08500)). The 3-type conflict taxonomy (`self` / `pair` / `conditional`) and the use of a `qualifier` field on conditional contradictions.
-- **Krishna et al. (2025), "Fact, Fetch, and Reason: A Unified Evaluation of RAG (FRAMES)"** ([arXiv 2409.12941](https://arxiv.org/abs/2409.12941), NAACL 2025). Our 6-metric judge mirrors FRAMES's four dimensions (factuality / retrieval / reasoning / attribution).
-- **Gao, Yen, Yu, Chen (2023), ALCE** ([arXiv 2305.14627](https://arxiv.org/abs/2305.14627), EMNLP 2023). Quote-then-cite + claim-anchored grounding. Drives the `[doc_N]` post-processing and per-claim verification pattern.
-- **Min et al. (2023), FActScore** ([arXiv 2305.14251](https://arxiv.org/abs/2305.14251), EMNLP 2023). Decompose-then-verify on atomic facts. The conceptual basis for our deterministic + LLM-fallback `claim_verifier`.
-- **Owoicho et al. (2023), "Ask-to-Clarify"** ([arXiv 2509.15061](https://arxiv.org/abs/2509.15061)). Clarification-utility prediction. Our vagueness gate is the heuristic cousin: cheaper, less precise, but sufficient for "fire at most one clarifier only when it's worth asking".
-- **Zheng et al. (2023), "Judging LLM-as-a-Judge"** ([arXiv 2306.05685](https://arxiv.org/abs/2306.05685)). Documents same-family score-inflation bias. Calibrates the projection prior in `eval/results/JUDGE_FAMILY_COMPARISON.md`.
-- **Panickssery et al. (2024), "LLM Evaluators Recognize and Favor Their Own Generations"** ([arXiv 2404.13076](https://arxiv.org/abs/2404.13076)). Second source for the cross-family judge discipline.
-
-```bibtex
-@misc{huang2025deepresearch,
-  title  = {Deep Research Agents: A Systematic Examination And Roadmap},
-  author = {Huang et al.},
-  year   = {2025},
-  eprint = {2506.18096},
-  archivePrefix = {arXiv}
-}
-
-@misc{du2025deepresearchbench,
-  title  = {DeepResearch Bench: A Comprehensive Benchmark for Deep Research Agents},
-  author = {Du et al.},
-  year   = {2025},
-  eprint = {2506.11763},
-  archivePrefix = {arXiv}
-}
-
-@inproceedings{liu2023lostinmiddle,
-  title  = {Lost in the Middle: How Language Models Use Long Contexts},
-  author = {Liu, Nelson F. and others},
-  year   = {2023},
-  eprint = {2307.03172},
-  archivePrefix = {arXiv}
-}
-```
+Key influences: **Huang et al. 2025** (DR-agent taxonomy), **Park et al. 2025** (Stop-RAG value gate), **Cattan et al. 2025** (DRAGged conflict taxonomy), **Liu et al. 2023** (Lost-in-the-Middle reordering), **Zheng et al. 2023** + **Panickssery et al. 2024** (cross-family judge discipline), **Krishna et al. 2025** (FRAMES 4-dimension metric coverage).
 
 ---
 
