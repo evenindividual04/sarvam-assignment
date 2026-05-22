@@ -38,19 +38,35 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
   // Phase 2: opt-in plan-approval gate. Persisted to localStorage so a user
   // who turns it on stays on it across page reloads — but only for THIS
   // browser; the request itself is stateless.
-  const [approvePlan, setApprovePlan] = useState<boolean>(() => {
-    if (typeof window === "undefined") return false;
-    return window.localStorage.getItem("dra:approvePlanFirst") === "1";
-  });
+  //
+  // CRITICAL: Both server and client MUST start with the same initial
+  // value or React throws hydration error #418 ("text content does not
+  // match"). Reading localStorage inside useState's initializer produces
+  // a mismatch when the user previously toggled this on (server returns
+  // false, client returns true). Instead we start with `false`
+  // unconditionally and rehydrate from localStorage in a useEffect,
+  // which runs only on the client after hydration completes.
+  const [approvePlan, setApprovePlan] = useState<boolean>(false);
+  const [hydrated, setHydrated] = useState(false);
   const ref = useRef<HTMLTextAreaElement | null>(null);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
+    const stored = window.localStorage.getItem("dra:approvePlanFirst") === "1";
+    if (stored) setApprovePlan(true);
+    setHydrated(true);
+  }, []);
+
+  useEffect(() => {
+    // Skip the first persistence pass before hydration completes — we
+    // don't want to overwrite the user's stored choice with the initial
+    // `false` before we've read it.
+    if (typeof window === "undefined" || !hydrated) return;
     window.localStorage.setItem(
       "dra:approvePlanFirst",
       approvePlan ? "1" : "0",
     );
-  }, [approvePlan]);
+  }, [approvePlan, hydrated]);
 
   useEffect(() => {
     if (autoFocus) ref.current?.focus();

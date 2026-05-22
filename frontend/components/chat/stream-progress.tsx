@@ -204,9 +204,9 @@ export function StreamProgress({ events, status, error }: StreamProgressProps) {
         {/* Phase 1.25: terminal cost/token pill */}
         {phaseExtras.runFinished && (
           <div className="mt-3 pt-3 border-t border-border font-mono text-[10px] text-muted-foreground">
-            Generated in {(phaseExtras.runFinished.total_latency_ms / 1000).toFixed(2)}s ·{" "}
-            {phaseExtras.runFinished.total_tokens.toLocaleString()} tokens · $
-            {phaseExtras.runFinished.cost_usd.toFixed(4)}
+            Generated in {((phaseExtras.runFinished.total_latency_ms ?? 0) / 1000).toFixed(2)}s ·{" "}
+            {(phaseExtras.runFinished.total_tokens ?? 0).toLocaleString()} tokens · $
+            {(phaseExtras.runFinished.cost_usd ?? 0).toFixed(4)}
           </div>
         )}
       </div>
