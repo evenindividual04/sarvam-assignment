@@ -271,7 +271,21 @@ export function useSseResearch(): UseSseResearchReturn {
             }
           }
 
-          if (ev.step === "generating" && typeof ev.data === "string") {
+          // Synthesis text streaming. The orchestrator emits the same chunk
+          // twice: once as a legacy `generating` frame with `data = string`,
+          // and once as a typed `answer_delta` frame with `data = {text}`.
+          // Consume EITHER shape (not both — otherwise the text doubles).
+          // Defaulting to the typed shape when present makes us robust to a
+          // proxy that strips the legacy frame.
+          if (ev.type === "answer_delta" && ev.data && typeof ev.data === "object") {
+            const txt = (ev.data as { text?: string }).text;
+            if (typeof txt === "string" && txt.length > 0) {
+              setCurrentText((prev) => prev + txt);
+            }
+          } else if (
+            ev.step === "generating" &&
+            typeof ev.data === "string"
+          ) {
             setCurrentText((prev) => prev + ev.data);
           }
 
@@ -546,6 +560,12 @@ export function useSseResearch(): UseSseResearchReturn {
           if (ev.step === "error") {
             if (ev.label === "cancelled") {
               setStatus("cancelled");
+            } else if (ev.label === "approval_timeout") {
+              setStatus("error");
+              setError(
+                "Plan approval timed out (no response within 5 minutes). Re-submit the query to try again.",
+              );
+              setApprovalPending(null);
             } else {
               setStatus("error");
               setError(
@@ -559,14 +579,38 @@ export function useSseResearch(): UseSseResearchReturn {
           setEvents((prev) => [...prev, ev]);
         }
       }
+      // Reader exited cleanly via `done: true` but the server never emitted
+      // `{step:"done"}` (or `{step:"error"}`). Without this guard the row
+      // stays stuck in `"streaming"` forever — the spinner keeps spinning,
+      // the Cancel button keeps showing, and the user can't submit again.
+      // Treat a silent close as an error so the UI surfaces a regenerate
+      // affordance and `inFlight` releases.
+      if (abortRef.current === ac) {
+        setStatus((s) =>
+          s === "done" || s === "error" || s === "cancelled" ? s : "error",
+        );
+        setError((prev) =>
+          prev ?? "Stream closed unexpectedly before completion.",
+        );
+      }
     } catch (e: unknown) {
+      // Critical: a new start() may have replaced abortRef.current by the
+      // time this catch runs (e.g. clarification "pick interpretation"
+      // cancels the current turn AND immediately starts a new one). If our
+      // controller is no longer the active one, the abort belongs to a
+      // superseded turn — don't touch state, the new turn owns it now.
+      const stillCurrent = abortRef.current === ac;
       // AbortController.abort() → DOMException name 'AbortError'.
       if (e instanceof DOMException && e.name === "AbortError") {
-        setStatus((s) => (s === "cancelled" || s === "done" ? s : "cancelled"));
+        if (stillCurrent) {
+          setStatus((s) => (s === "cancelled" || s === "done" ? s : "cancelled"));
+        }
         return;
       }
-      setStatus("error");
-      setError(e instanceof Error ? e.message : "Unknown error");
+      if (stillCurrent) {
+        setStatus("error");
+        setError(e instanceof Error ? e.message : "Unknown error");
+      }
     }
     },
     [reset],

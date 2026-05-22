@@ -98,7 +98,7 @@ export function ClarificationPanel({
       </ul>
 
       <p className="mt-3 font-mono text-[10px] uppercase tracking-[0.12em] text-subtle-foreground">
-        Clicking a refinement starts a new turn with that query. The current turn keeps running.
+        Clicking a refinement cancels the current turn and starts a new one with the selected query.
       </p>
     </div>
   );

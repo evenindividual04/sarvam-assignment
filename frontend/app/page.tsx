@@ -279,6 +279,11 @@ export default function ChatPage() {
     options: { approvalRequired: boolean } = { approvalRequired: false },
   ) => {
     if (!sessionId) return;
+    // Double-submit guard. ChatInput already disables Send while busy, but
+    // suggestion chips on the empty state and the follow-up handler bypass
+    // that. A rapid double-click would otherwise push two rows and orphan
+    // the first reader (its AbortController gets replaced).
+    if (sse.status === "streaming") return;
     setRows((prev) => [
       ...prev,
       { query, events: [], status: "streaming", liveText: "" },
