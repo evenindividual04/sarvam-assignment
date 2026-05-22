@@ -156,6 +156,11 @@ def _has_required_key(name: str) -> bool:
         # Keyless provider (e.g. Ollama). Probe always runs; failure mode is
         # surfaced by the probe itself ("down" = server unreachable).
         return True
+    # Providers with multi-key fallback envs: accept either form as "configured".
+    if name == "groq" and os.environ.get("GROQ_API_KEYS"):
+        return True
+    if name == "gemini" and os.environ.get("GEMINI_API_KEYS"):
+        return True
     return bool(os.environ.get(env_var))
 
 
@@ -237,7 +242,12 @@ async def _probe_sarvam(c: httpx.AsyncClient) -> None:
 
 
 async def _probe_gemini(c: httpx.AsyncClient) -> None:
-    key = os.environ["GEMINI_API_KEY"]
+    # Pull from the rotator so the probe drains a key from the same pool as
+    # synthesis — gives quota-balanced telemetry across multi-key setups.
+    from utils.provider_router import _GEMINI_ROTATOR
+    key = _GEMINI_ROTATOR.next_key() or os.environ.get("GEMINI_API_KEY", "")
+    if not key:
+        raise RuntimeError("No GEMINI_API_KEY / GEMINI_API_KEYS configured")
     r = await c.post(
         f"https://generativelanguage.googleapis.com/v1beta/"
         f"models/gemini-2.5-flash:generateContent?key={key}",

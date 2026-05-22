@@ -30,6 +30,48 @@ _GROQ_ROTATOR = KeyRotator(
     "groq", legacy_var="GROQ_API_KEY", multi_var="GROQ_API_KEYS"
 )
 
+# Same pattern for Gemini — shared by synth + structured-output planner +
+# health probe so they all draw from the same throttle-aware key pool.
+_GEMINI_ROTATOR = KeyRotator(
+    "gemini", legacy_var="GEMINI_API_KEY", multi_var="GEMINI_API_KEYS"
+)
+
+
+def _gemini_429_retry_after_s(exc: Exception) -> float | None:
+    """Extract Retry-After from a Gemini ClientError-style exception. Lenient
+    across SDK versions: checks ``response.headers`` and a few common attrs."""
+    ra = _extract_retry_after_s(exc)
+    if ra is not None:
+        return ra
+    # google-genai sometimes exposes the status payload as ``e.details`` or
+    # ``e.args[0]`` dict. Best-effort only — never raise from this helper.
+    try:
+        details = getattr(exc, "details", None) or getattr(exc, "args", [None])[0]
+        if isinstance(details, dict):
+            for k in ("retry_after", "retryAfter", "Retry-After"):
+                v = details.get(k) if hasattr(details, "get") else None
+                if v is not None:
+                    return float(v)
+    except Exception:
+        return None
+    return None
+
+
+def _is_gemini_429(exc: Exception) -> bool:
+    """Detect 429 across google-genai SDK versions. Checks ``.code``,
+    ``.status_code``, ``response.status_code``, and message text."""
+    for attr in ("code", "status_code"):
+        v = getattr(exc, attr, None)
+        if v == 429:
+            return True
+    resp = getattr(exc, "response", None)
+    if resp is not None and getattr(resp, "status_code", None) == 429:
+        return True
+    msg = str(exc).lower()
+    if "429" in msg or "resource_exhausted" in msg or "rate limit" in msg:
+        return True
+    return False
+
 
 def _extract_retry_after_s(exc: Exception) -> float | None:
     """Pull a Retry-After (seconds) value from an SDK exception when present."""
@@ -292,9 +334,9 @@ async def _plan_with_gemini_structured(prompt: str) -> str:
     from google import genai
     from google.genai import types
 
-    api_key = os.environ.get("GEMINI_API_KEY", "")
+    api_key = _GEMINI_ROTATOR.next_key()
     if not api_key:
-        raise RuntimeError("GEMINI_API_KEY not set")
+        raise RuntimeError("No GEMINI_API_KEY / GEMINI_API_KEYS configured")
     client = genai.Client(api_key=api_key)
     config = types.GenerateContentConfig(
         response_mime_type="application/json",
@@ -302,11 +344,17 @@ async def _plan_with_gemini_structured(prompt: str) -> str:
         max_output_tokens=600,
         temperature=0.3,
     )
-    resp = await client.aio.models.generate_content(
-        model=os.environ.get("GEMINI_MODEL", "gemini-2.5-flash"),
-        contents=prompt,
-        config=config,
-    )
+    try:
+        resp = await client.aio.models.generate_content(
+            model=os.environ.get("GEMINI_MODEL", "gemini-2.5-flash"),
+            contents=prompt,
+            config=config,
+        )
+    except Exception as e:
+        if _is_gemini_429(e):
+            _GEMINI_ROTATOR.mark_throttled(api_key, retry_after_s=_gemini_429_retry_after_s(e))
+        raise
+    _GEMINI_ROTATOR.mark_success(api_key)
     return (resp.text or "").strip()
 
 
@@ -365,7 +413,7 @@ async def plan(query: str, prior_summary: str = "No prior context.") -> PlannerO
                 raw = None
 
     # ── Try Gemini structured-output mode (opt-in only) ───────────────────
-    if raw is None and pref == "gemini" and os.environ.get("GEMINI_API_KEY"):
+    if raw is None and pref == "gemini" and _GEMINI_ROTATOR.has_keys():
         try:
             raw = await _plan_with_gemini_structured(prompt)
             chosen = "gemini"
@@ -566,7 +614,13 @@ Answer the research question using only the documents above. Cite every factual 
             "cerebras": "CEREBRAS_API_KEY",
             "ollama": None,
         }[name]
-        if key_env is not None and not os.environ.get(key_env):
+        # Gemini may use either GEMINI_API_KEY (legacy single) or GEMINI_API_KEYS
+        # (multi-key). Defer to the rotator so multi-key-only setups still pass.
+        if name == "gemini":
+            if not _GEMINI_ROTATOR.has_keys():
+                logger.debug("Skipping gemini: no keys configured")
+                continue
+        elif key_env is not None and not os.environ.get(key_env):
             logger.debug("Skipping %s: %s not set", name, key_env)
             continue
         try:
@@ -599,7 +653,10 @@ async def _synthesize_gemini(user_prompt: str) -> AsyncIterator[tuple[str, int, 
     from google import genai
     from google.genai import types
 
-    client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
+    api_key = _GEMINI_ROTATOR.next_key()
+    if not api_key:
+        raise RuntimeError("No GEMINI_API_KEY / GEMINI_API_KEYS configured")
+    client = genai.Client(api_key=api_key)
     config = types.GenerateContentConfig(
         system_instruction=SYNTHESIS_SYSTEM_PROMPT,
         max_output_tokens=1500,
@@ -638,10 +695,15 @@ async def _synthesize_gemini(user_prompt: str) -> AsyncIterator[tuple[str, int, 
                 prompt_tokens=prompt_tokens,
                 completion_tokens=completion_tokens,
             )
+            _GEMINI_ROTATOR.mark_success(api_key)
             yield ("", prompt_tokens, completion_tokens)
             return
         except Exception as e:
             last_err = e
+            if _is_gemini_429(e):
+                _GEMINI_ROTATOR.mark_throttled(
+                    api_key, retry_after_s=_gemini_429_retry_after_s(e)
+                )
             if "not found" in str(e).lower() or "404" in str(e):
                 logger.warning("Gemini model unavailable (%s): %s", model_name, e)
                 continue

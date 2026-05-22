@@ -58,7 +58,8 @@ Set every env var as an HF Spaces **Secret** (Settings → Variables and secrets
 | Secret name | Purpose |
 |-------------|---------|
 | `PARALLEL_API_KEY` | Primary search provider (16k free queries) |
-| `GEMINI_API_KEY` | Synthesis (Gemini 2.5 Flash) |
+| `GEMINI_API_KEY` | Synthesis (Gemini 2.5 Flash), single-key mode |
+| `GEMINI_API_KEYS` | **OR** multi-key mode: `AIzaSy_xxx,AIzaSy_yyy` — round-robin across N keys gives N× the 1500/day quota; takes precedence over `GEMINI_API_KEY` if both set |
 | `GROQ_API_KEY` | Planning + conflict probe (single-key mode) |
 | `GROQ_API_KEYS` | **OR** multi-key mode: `gsk_aaa,gsk_bbb,gsk_ccc` (preferred for eval ablations; takes precedence over `GROQ_API_KEY` if both set) |
 | `GITHUB_TOKEN` | GitHub Models eval judge (GPT-4o-mini, different family from generator) |

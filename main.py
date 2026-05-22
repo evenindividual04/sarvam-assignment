@@ -558,11 +558,12 @@ async def health_providers(force: bool = False):
     """
     from utils.provider_health import get_health
     from utils import provider_usage
-    from utils.provider_router import _GROQ_ROTATOR
+    from utils.provider_router import _GROQ_ROTATOR, _GEMINI_ROTATOR
     snap = await get_health(force=force)
     out = snap.to_dict()
     out["usage_today"] = await provider_usage.snapshot()
     out["groq_key_rotator"] = _GROQ_ROTATOR.snapshot()
+    out["gemini_key_rotator"] = _GEMINI_ROTATOR.snapshot()
     return out
 
 
