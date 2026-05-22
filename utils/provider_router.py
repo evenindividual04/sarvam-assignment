@@ -567,7 +567,29 @@ def _sanitize_conflict_string(s: str, max_chars: int = 300) -> str:
     return flattened
 
 
-def _build_disagreement_block(conflict_result: object | None) -> str:
+def _expand_doc_id(
+    doc_id: str,
+    doc_map: dict[str, tuple[str, str, str]] | None,
+) -> str:
+    """Expand a single `doc_N` id to `[Title — domain](URL)` if the doc_map
+    can resolve it, else fall back to the raw `[doc_N]` marker so the
+    post-processor can still try later. Used to pre-fill citation cells
+    in the disagreement table so the synthesizer has nothing to write
+    incorrectly — it just copies the cell verbatim. Eliminates the class
+    of bugs where the LLM forgot the closing `]` or wrote the title as
+    inline text without a marker."""
+    if not doc_id:
+        return ""
+    if doc_map and doc_id in doc_map:
+        title, url, domain = doc_map[doc_id]
+        return f"[{title} — {domain}]({url})"
+    return f"[{doc_id}]"
+
+
+def _build_disagreement_block(
+    conflict_result: object | None,
+    doc_map: dict[str, tuple[str, str, str]] | None = None,
+) -> str:
     """V2.2 + B4 + DRAGged: enumerate non-temporal contradictions for the
     synthesizer and demand a structured Markdown disagreement matrix.
     Heading + column labels are chosen based on the DRAGged-into-Conflict
@@ -651,32 +673,38 @@ def _build_disagreement_block(conflict_result: object | None) -> str:
         for c, s_claim, s_pos_a, s_pos_b in rows:
             first_a = c.doc_ids_a[0] if c.doc_ids_a else ""
             first_b = c.doc_ids_b[0] if c.doc_ids_b else ""
+            # Pre-expand citations on the backend. The LLM used to be
+            # asked to write `[doc_N]` in cells which the post-processor
+            # would expand — but the LLM occasionally hallucinated the
+            # title or forgot the closing bracket, leaving cells like
+            # "[Title with no closing". Pre-expanding eliminates the
+            # LLM-correctness step entirely; it just copies the cell.
+            cite_a = _expand_doc_id(first_a, doc_map)
+            cite_b = _expand_doc_id(first_b, doc_map)
             if k == "conditional":
                 qualifier = _sanitize_conflict_string(
                     getattr(c, "qualifier", "") or "—"
                 )
                 lines.append(
-                    f"| {s_claim}: A={s_pos_a} / B={s_pos_b} "
-                    f"| [{first_a}] | [{first_b}] | {qualifier} |"
+                    f"| {s_claim} | {s_pos_a} {cite_a} "
+                    f"| {s_pos_b} {cite_b} | {qualifier} |"
                 )
             elif k == "self":
-                # First-mention / Second-mention — same source on both sides,
-                # so emit the single doc_id reference in each cell.
-                source_marker = f"[{first_a or first_b}]"
+                # Same source on both sides; show the two paraphrases with
+                # the shared citation appended to each.
+                cite = cite_a or cite_b
                 lines.append(
-                    f"| {s_claim}: first={s_pos_a} / then={s_pos_b} "
-                    f"| {source_marker} | {source_marker} |"
+                    f"| {s_claim} | {s_pos_a} {cite} | {s_pos_b} {cite} |"
                 )
             else:
                 lines.append(
-                    f"| {s_claim}: A={s_pos_a} / B={s_pos_b} "
-                    f"| [{first_a}] | [{first_b}] |"
+                    f"| {s_claim} | {s_pos_a} {cite_a} | {s_pos_b} {cite_b} |"
                 )
         lines.append("")
-    lines.append("Cite each source using a bare [doc_N] marker inside the table")
-    lines.append("cells — the post-processor expands them to [Title — domain](URL).")
-    lines.append("The table is REQUIRED whenever this block is present; rendering")
-    lines.append("only prose without the table is a failure.")
+    lines.append("The citation links inside each cell are PRE-EXPANDED — copy")
+    lines.append("them verbatim. Do NOT rewrite them as [doc_N] markers or strip")
+    lines.append("the URLs. The table is REQUIRED whenever this block is present;")
+    lines.append("rendering only prose without the table is a failure.")
     lines.append("</cross_source_disagreement>")
     return "\n".join(lines)
 
@@ -703,7 +731,7 @@ async def synthesize(
     if conflict_note:
         conflict_instruction = f"\n\nCONFLICT DETECTED: {conflict_note}\nYou MUST present both sides explicitly."
 
-    disagreement_block = _build_disagreement_block(conflict_result)
+    disagreement_block = _build_disagreement_block(conflict_result, doc_map)
     if disagreement_block:
         disagreement_block = "\n\n" + disagreement_block
 

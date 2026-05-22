@@ -117,3 +117,57 @@ def test_has_disagreement_matrix_false_on_wrong_columns():
 def test_has_disagreement_matrix_handles_empty():
     assert has_disagreement_matrix("") is False
     assert has_disagreement_matrix(None) is False  # type: ignore[arg-type]
+
+
+def test_disagreement_block_pre_expands_citations_when_doc_map_present():
+    """When a doc_map is provided, table cells must contain fully-formed
+    Markdown links — not bare `[doc_N]` markers. This prevents the
+    synthesizer from skipping the closing bracket or writing the title
+    as inline text without a marker (the bug seen in the LLM-safety
+    demo screenshot)."""
+    doc_map = {
+        "doc_1": ("RBI Bulletin May 2026", "https://rbi.org.in/bulletin", "rbi.org.in"),
+        "doc_2": ("Reuters India Rate Cut", "https://reuters.com/rate-cut", "reuters.com"),
+        "doc_3": ("Stats India GDP Q1", "https://mospi.gov.in/gdp", "mospi.gov.in"),
+        "doc_4": ("World Bank India FY26", "https://worldbank.org/india", "worldbank.org"),
+    }
+    block = _build_disagreement_block(_two_real_contradictions(), doc_map)
+    # Expanded form must appear with title, em-dash separator, domain,
+    # closing `]`, and bracketed URL — exactly the cell content the
+    # synthesizer must copy verbatim.
+    assert "[RBI Bulletin May 2026 — rbi.org.in](https://rbi.org.in/bulletin)" in block
+    assert "[Reuters India Rate Cut — reuters.com](https://reuters.com/rate-cut)" in block
+    # Inside the actual table rows (lines starting with `| `), bare
+    # `[doc_N]` markers must NOT appear when doc_map can resolve them —
+    # otherwise we're trusting the LLM to expand them again, which is the
+    # bug class we're fixing. (Bare markers ARE allowed in the
+    # enumeration block above the table, hence the per-row check.)
+    table_rows = [
+        line for line in block.splitlines()
+        if line.startswith("| ") and "Claim" not in line and "---" not in line
+    ]
+    assert table_rows, "expected at least one table row"
+    for row in table_rows:
+        assert "[doc_1]" not in row, f"raw [doc_1] survived in table row: {row}"
+        assert "[doc_2]" not in row, f"raw [doc_2] survived in table row: {row}"
+
+
+def test_disagreement_block_falls_back_to_raw_marker_when_doc_id_missing():
+    """If a doc_id isn't in doc_map (e.g. mid-flight context-bundle
+    mismatch), fall back to the raw `[doc_N]` marker so post-processing
+    can still try. Don't drop the citation entirely."""
+    doc_map = {"doc_1": ("Known", "https://known.example", "known.example")}
+    contradictions = ConflictResult(
+        has_conflict=True,
+        contradictions=[
+            ClaimContradiction(
+                claim="x",
+                doc_ids_a=["doc_1"], position_a="A",
+                doc_ids_b=["doc_99"], position_b="B",
+                is_temporal_evolution=False, confidence=0.9,
+            )
+        ],
+    )
+    block = _build_disagreement_block(contradictions, doc_map)
+    assert "[Known — known.example](https://known.example)" in block
+    assert "[doc_99]" in block  # fallback for unmapped id
