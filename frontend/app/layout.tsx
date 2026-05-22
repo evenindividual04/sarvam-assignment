@@ -65,7 +65,13 @@ export default function RootLayout({
             <Sidebar />
             <div className="flex-1 flex flex-col min-w-0 min-h-0">
               <MobileNav />
-              <main className="flex-1 flex flex-col min-w-0 min-h-0 overflow-hidden">{children}</main>
+              {/* `overflow-y-auto` lets non-chat pages (settings, status,
+                  sessions, eval drill-downs) scroll their own content when
+                  it exceeds viewport height. The chat page still owns its
+                  own inner `flex-1 overflow-y-auto` scroller for the
+                  message list, so this outer scroll only kicks in when the
+                  outer page itself overflows — no nested-scroll issue. */}
+              <main className="flex-1 flex flex-col min-w-0 min-h-0 overflow-y-auto">{children}</main>
             </div>
           </div>
           <Toaster position="bottom-right" />
