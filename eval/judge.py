@@ -1,12 +1,16 @@
 """
-5 metric judge functions using GPT-4o-mini via GitHub Models.
-Each is a separate call — no anchor bleed between metrics.
+Metric judge functions. Each is a separate LLM call — no anchor bleed.
 All return typed dataclasses. All wrapped in retry.
+
+Default judge provider is Groq Llama-3.3-70B (cross-family vs the Gemini
+generator). Override via JUDGE_PROVIDER (groq|github) + JUDGE_MODEL env vars.
 """
 from __future__ import annotations
 
 import json
 import logging
+import math
+import os
 import re
 from dataclasses import dataclass, field
 from typing import Optional
@@ -14,6 +18,253 @@ from typing import Optional
 from tenacity import retry, stop_after_attempt, wait_exponential
 
 logger = logging.getLogger(__name__)
+
+
+# ── Tier C: cross-family judge rotation ─────────────────────────────────────
+
+# Per-run counter for GitHub Models calls used during cross-family judging.
+# Reset by `reset_cross_family_counter()` at the start of each eval run.
+_GITHUB_CROSS_FAMILY_CALLS: int = 0
+
+
+def reset_cross_family_counter() -> None:
+    global _GITHUB_CROSS_FAMILY_CALLS
+    _GITHUB_CROSS_FAMILY_CALLS = 0
+
+
+def get_cross_family_call_count() -> int:
+    return _GITHUB_CROSS_FAMILY_CALLS
+
+
+def _cross_family_quota_budget() -> int:
+    """GitHub Models cap is 150/day; default to 140 to leave a buffer."""
+    try:
+        return int(os.environ.get("CROSS_FAMILY_QUOTA_BUDGET", "140"))
+    except ValueError:
+        return 140
+
+
+async def _judge_with_provider(prompt: str, provider: str) -> str:
+    """Direct judge call against a specific provider, bypassing JUDGE_PROVIDER env.
+
+    Used by `judge_with_dual_family` to compare primary vs secondary judges.
+    Raises on any error so the caller can decide whether to log + skip.
+    """
+    from openai import AsyncOpenAI
+    from utils.provider_router import (
+        _GROQ_ROTATOR,
+        _JUDGE_PROVIDERS,
+        _extract_retry_after_s,
+    )
+
+    cfg = _JUDGE_PROVIDERS.get(provider)
+    if cfg is None:
+        raise ValueError(f"unknown judge provider: {provider}")
+    key_env = cfg["api_key_env"]
+    is_groq = provider == "groq"
+    api_key: Optional[str] = None
+    if is_groq:
+        api_key = _GROQ_ROTATOR.next_key()
+        if not api_key:
+            raise RuntimeError("No GROQ_API_KEY / GROQ_API_KEYS configured")
+    else:
+        if not os.environ.get(key_env):
+            raise RuntimeError(f"{key_env} not set")
+        api_key = os.environ[key_env]
+    client = AsyncOpenAI(
+        api_key=api_key,
+        base_url=cfg["base_url"],
+        timeout=60.0,
+    )
+    try:
+        resp = await client.chat.completions.create(
+            model=cfg["default_model"],
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=400,
+            temperature=0.0,
+        )
+    except Exception as e:
+        if is_groq and api_key:
+            status = getattr(e, "status_code", None) or getattr(
+                getattr(e, "response", None), "status_code", None
+            )
+            if status == 429:
+                _GROQ_ROTATOR.mark_throttled(
+                    api_key, retry_after_s=_extract_retry_after_s(e)
+                )
+        raise
+    if is_groq and api_key:
+        _GROQ_ROTATOR.mark_success(api_key)
+    return (resp.choices[0].message.content or "").strip()
+
+
+async def judge_with_dual_family(prompt: str, metric_name: str) -> dict:
+    """Run BOTH Groq Llama (primary) and GitHub GPT-4o-mini (secondary) judges
+    and return their scores with the absolute delta.
+
+    The score is extracted from the parsed JSON via the metric's known key:
+      faithfulness         → "faithfulness_score"
+      answer_relevance     → "answer_relevance_score"
+      context_precision    → "context_precision_score"
+
+    Quota guard: counts GitHub calls and short-circuits the secondary leg once
+    `CROSS_FAMILY_QUOTA_BUDGET` (default 140) is reached. Returns secondary=None
+    in that case + sets the global counter so the runner can flip the
+    truncation flag in the summary.
+
+    Returns:
+      {"primary_score": float | None,
+       "secondary_score": float | None,
+       "agreement_delta": float | None}
+    """
+    global _GITHUB_CROSS_FAMILY_CALLS
+
+    score_key = f"{metric_name}_score"
+    primary_provider = os.environ.get("JUDGE_PROVIDER", "groq").lower()
+    secondary_provider = "github" if primary_provider == "groq" else "groq"
+
+    primary_score: Optional[float] = None
+    secondary_score: Optional[float] = None
+
+    # Primary
+    try:
+        raw = await _judge_with_provider(prompt, primary_provider)
+        data = _parse_json(raw)
+        primary_score = float(data.get(score_key, 0.5))
+    except Exception as e:
+        logger.warning("dual-family primary judge failed: %s", e)
+
+    # Secondary — gated by quota when it's GitHub Models
+    if secondary_provider == "github":
+        if _GITHUB_CROSS_FAMILY_CALLS >= _cross_family_quota_budget():
+            logger.warning(
+                "cross-family quota guard tripped at %d calls; skipping secondary",
+                _GITHUB_CROSS_FAMILY_CALLS,
+            )
+            return {
+                "primary_score": primary_score,
+                "secondary_score": None,
+                "agreement_delta": None,
+            }
+        _GITHUB_CROSS_FAMILY_CALLS += 1
+
+    try:
+        raw2 = await _judge_with_provider(prompt, secondary_provider)
+        data2 = _parse_json(raw2)
+        secondary_score = float(data2.get(score_key, 0.5))
+    except Exception as e:
+        logger.warning("dual-family secondary judge failed: %s", e)
+        secondary_score = None
+
+    delta = (
+        abs(primary_score - secondary_score)
+        if primary_score is not None and secondary_score is not None
+        else None
+    )
+    return {
+        "primary_score": primary_score,
+        "secondary_score": secondary_score,
+        "agreement_delta": delta,
+    }
+
+
+def _bucket_score(score: float) -> int:
+    """Bucket a [0,1] score into 3 ordinal categories for Cohen's κ.
+
+    0 → [0.0, 0.4),  1 → [0.4, 0.7),  2 → [0.7, 1.0]
+    """
+    if score < 0.4:
+        return 0
+    if score < 0.7:
+        return 1
+    return 2
+
+
+def cohens_kappa_bucketed(
+    primary: list[float], secondary: list[float]
+) -> Optional[float]:
+    """Cohen's κ for two raters on 3-bucket categorization.
+
+    κ = (po - pe) / (1 - pe)
+    where po is observed agreement and pe is expected agreement by chance.
+    Returns None when pe == 1 (degenerate single-bucket data) or when inputs
+    don't line up.
+    """
+    if not primary or len(primary) != len(secondary):
+        return None
+    a = [_bucket_score(s) for s in primary]
+    b = [_bucket_score(s) for s in secondary]
+    n = len(a)
+    po = sum(1 for i in range(n) if a[i] == b[i]) / n
+    # Marginal probabilities per bucket
+    buckets = (0, 1, 2)
+    pa = {k: a.count(k) / n for k in buckets}
+    pb = {k: b.count(k) / n for k in buckets}
+    pe = sum(pa[k] * pb[k] for k in buckets)
+    if pe >= 1.0:
+        return None
+    return (po - pe) / (1 - pe)
+
+
+def build_faithfulness_prompt(context_xml: str, answer: str) -> str:
+    return f"""The user query and/or agent answer may be in Hindi. Evaluate based on
+semantic correctness regardless of language; treat Devanagari and Latin script claims equivalently.
+
+CONTEXT:
+{context_xml[:3000]}
+
+ANSWER:
+{answer}
+
+Extract every factual claim from the answer. For each, determine:
+SUPPORTED: explicitly in context | UNSUPPORTED: not in context (hallucination)
+
+JSON only: {{"faithfulness_score": float, "supported_count": int, "unsupported_count": int, "unsupported_claims": [str], "reasoning": str}}"""
+
+
+def build_relevance_prompt(query: str, answer: str) -> str:
+    return f"""The user query and/or agent answer may be in Hindi. Evaluate based on
+semantic correctness regardless of language.
+
+QUESTION: {query}
+
+ANSWER:
+{answer}
+
+Score 0.0-1.0: Does the answer directly address the question?
+0.0=off-topic | 0.5=partial | 1.0=complete
+
+JSON only: {{"answer_relevance_score": float, "reasoning": str}}"""
+
+
+def build_context_precision_prompt(query: str, context_xml: str) -> str:
+    return f"""The user query and/or context may be in Hindi. Evaluate based on
+semantic correctness regardless of language.
+
+QUESTION: {query}
+
+CONTEXT:
+{context_xml[:3000]}
+
+Score 0.0-1.0: Does the context contain sufficient information to fully answer the question?
+0.0=none | 0.5=partial | 1.0=complete
+
+JSON only: {{"context_precision_score": float, "reasoning": str}}"""
+
+
+def pearson_correlation(xs: list[float], ys: list[float]) -> Optional[float]:
+    """Manual Pearson r — no scipy. Returns None on degenerate inputs."""
+    n = len(xs)
+    if n < 2 or n != len(ys):
+        return None
+    mx = sum(xs) / n
+    my = sum(ys) / n
+    num = sum((xs[i] - mx) * (ys[i] - my) for i in range(n))
+    dx = math.sqrt(sum((x - mx) ** 2 for x in xs))
+    dy = math.sqrt(sum((y - my) ** 2 for y in ys))
+    if dx == 0 or dy == 0:
+        return None
+    return num / (dx * dy)
 
 
 @dataclass
@@ -262,6 +513,36 @@ async def judge_claim_precision(turn_id: str) -> ClaimPrecisionResult:
         claim_precision_score=score,
         reasoning=f"Verified {supported}/{total} claims ({det} deterministic, {llm} LLM-resolved, {skip} skipped).",
     )
+
+
+def score_uncertainty_handling(
+    category: str,
+    answer: str,
+    uncertainty_kind: Optional[str],
+    follow_up_queries: Optional[list[str]],
+) -> Optional[float]:
+    """Deterministic uncertainty-handling score (Phase 1.5).
+
+    Only meaningful for `insufficient_evidence` questions. For other
+    categories returns None so the aggregator skips them.
+
+    Score is in [0.0, 1.0]:
+      * 0.5 for tagging the turn with a non-"none" `uncertainty_kind`
+      * +0.3 for an [UNCERTAINTY] block actually rendered in the answer
+      * +0.2 for ≥3 non-empty `follow_up_queries`
+    Cheap and anchor-free; complements the LLM-based judges.
+    """
+    if (category or "").lower() != "insufficient_evidence":
+        return None
+    score = 0.0
+    if uncertainty_kind and uncertainty_kind != "none":
+        score += 0.5
+    if "[UNCERTAINTY]" in (answer or ""):
+        score += 0.3
+    fu = [q for q in (follow_up_queries or []) if q and q.strip()]
+    if len(fu) >= 3:
+        score += 0.2
+    return min(1.0, score)
 
 
 def classify_failure(r: dict) -> str:

@@ -127,6 +127,22 @@ async def get_run_summary(run_at: str) -> dict:
         )
         summary_row = dict(summary_row[0]) if summary_row else {}
 
+        # Tier A (Phase 1+): per-turn quality means promoted from `eval_runs`
+        # columns. Wrapped in try/except so older DBs without these columns
+        # still render the dashboard (they'll just see "—").
+        per_turn_quality: dict = {}
+        try:
+            ptq = await db.execute_fetchall(
+                "SELECT AVG(quote_grounding_ratio)  AS mean_quote_grounding_ratio, "
+                "       AVG(numeric_grounding_ratio) AS mean_numeric_grounding_ratio, "
+                "       AVG(criteria_coverage_ratio) AS mean_criteria_coverage_ratio "
+                "FROM eval_runs WHERE run_at = ?",
+                (run_at,),
+            )
+            per_turn_quality = dict(ptq[0]) if ptq else {}
+        except Exception:
+            per_turn_quality = {}
+
     flagged = [r for r in cl_rows if r.get("flagged_inconsistent")]
     mean_jaccard = (
         sum(r["jaccard_score"] for r in cl_rows) / len(cl_rows)
@@ -147,6 +163,7 @@ async def get_run_summary(run_at: str) -> dict:
             "correlation": summary_row.get("calibration_correlation"),
         },
         "run_summary": summary_row,
+        "per_turn_quality": per_turn_quality,
     }
 
 

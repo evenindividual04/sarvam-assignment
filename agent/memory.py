@@ -326,6 +326,17 @@ async def init_db() -> None:
             ("eval_factual_accuracy", "ALTER TABLE eval_runs ADD COLUMN factual_accuracy_score REAL"),
             ("eval_ablation_id", "ALTER TABLE eval_runs ADD COLUMN ablation_id TEXT"),
             ("eval_calibration_correlation", "ALTER TABLE eval_runs ADD COLUMN calibration_correlation REAL"),
+            ("turn_context_provider_relevance", "ALTER TABLE turn_context ADD COLUMN provider_relevance REAL"),
+            ("turn_context_provider_relevance_source", "ALTER TABLE turn_context ADD COLUMN provider_relevance_source TEXT"),
+            # Tier A Phase 1+: promote per-turn quality + routing fields from
+            # run_metadata into first-class eval_runs columns for dashboard queries.
+            ("eval_quote_grounding_ratio", "ALTER TABLE eval_runs ADD COLUMN quote_grounding_ratio REAL"),
+            ("eval_numeric_grounding_ratio", "ALTER TABLE eval_runs ADD COLUMN numeric_grounding_ratio REAL"),
+            ("eval_criteria_coverage_ratio", "ALTER TABLE eval_runs ADD COLUMN criteria_coverage_ratio REAL"),
+            ("eval_terminator_fired", "ALTER TABLE eval_runs ADD COLUMN terminator_fired TEXT"),
+            ("eval_planner_provider", "ALTER TABLE eval_runs ADD COLUMN planner_provider TEXT"),
+            ("eval_reranker_used", "ALTER TABLE eval_runs ADD COLUMN reranker_used TEXT"),
+            ("eval_language_method", "ALTER TABLE eval_runs ADD COLUMN language_method TEXT"),
         ]:
             try:
                 await db.execute(ddl)
@@ -407,8 +418,10 @@ async def save_turn_context(turn_id: str, snippets: list[ContextSnippet]) -> Non
         await db.executemany(
             """
             INSERT INTO turn_context
-            (turn_id, doc_id, url, title, domain, snippet, bm25_score, recency_score, final_score, retrieved_at, trust_score)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            (turn_id, doc_id, url, title, domain, snippet, bm25_score, recency_score,
+             final_score, retrieved_at, trust_score,
+             provider_relevance, provider_relevance_source)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             [
                 (
@@ -423,6 +436,8 @@ async def save_turn_context(turn_id: str, snippets: list[ContextSnippet]) -> Non
                     s.final_score,
                     s.retrieved_at,
                     s.trust_score,
+                    s.provider_relevance,
+                    s.provider_relevance_source,
                 )
                 for s in snippets
             ],
