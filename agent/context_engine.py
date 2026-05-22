@@ -933,24 +933,43 @@ async def probe_contradictions(chunks: list[ContextSnippet], query: str) -> Conf
         contradictions = [
             ClaimContradiction(**c) for c in (data.get("contradictions") or [])
         ]
+        # Mechanical kind correction. The LLM occasionally labels a
+        # contradiction `pair` when in fact doc_ids_a and doc_ids_b
+        # reference the SAME source (e.g. two chunks of the same Wikipedia
+        # page that quote different historical values). Per DRAGged-into-
+        # Conflict (arXiv:2506.08500) this is a `self` (internal)
+        # contradiction, not a pair. Detecting it from the doc_ids is
+        # deterministic — we don't need the model to get it right.
+        for c in contradictions:
+            a = set(c.doc_ids_a or [])
+            b = set(c.doc_ids_b or [])
+            if a and b and a == b and c.kind != "self":
+                c.kind = "self"
+
         # Derive dominant_kind: trust the model's top-level verdict if it
         # matches a known label; otherwise fall back to severity-ranked
         # aggregation over per-contradiction kinds.
         dominant_raw = data.get("dominant_kind")
         valid_kinds = {"self", "pair", "conditional", "none"}
-        if dominant_raw in valid_kinds:
+        # severity: self > pair > conditional > none
+        kinds = {c.kind for c in contradictions}
+        if "self" in kinds:
+            inferred_kind = "self"
+        elif "pair" in kinds:
+            inferred_kind = "pair"
+        elif "conditional" in kinds:
+            inferred_kind = "conditional"
+        else:
+            inferred_kind = "none"
+        # Trust the model only if its top-level verdict is BOTH valid and
+        # not weaker than the inferred kind. Severity-ranked. Prevents a
+        # case where the model says dominant_kind="pair" but we just
+        # corrected every contradiction to `self`.
+        rank = {"self": 3, "pair": 2, "conditional": 1, "none": 0}
+        if dominant_raw in valid_kinds and rank.get(dominant_raw, 0) >= rank[inferred_kind]:
             dominant_kind = dominant_raw
         else:
-            # severity: self > pair > conditional > none
-            kinds = {c.kind for c in contradictions}
-            if "self" in kinds:
-                dominant_kind = "self"
-            elif "pair" in kinds:
-                dominant_kind = "pair"
-            elif "conditional" in kinds:
-                dominant_kind = "conditional"
-            else:
-                dominant_kind = "none"
+            dominant_kind = inferred_kind
         result = ConflictResult(
             has_conflict=bool(data.get("has_conflict", False)),
             conflict_summary=data.get("conflict_summary"),

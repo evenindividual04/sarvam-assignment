@@ -568,21 +568,35 @@ def _sanitize_conflict_string(s: str, max_chars: int = 300) -> str:
 
 
 def _build_disagreement_block(conflict_result: object | None) -> str:
-    """V2.2 + B4: enumerate non-temporal contradictions for the synthesizer
-    and demand a structured Markdown disagreement matrix. The block embeds a
-    pre-rendered Markdown skeleton (one row per contradiction) so the model
-    has the exact table shape and citation format to emit verbatim.
+    """V2.2 + B4 + DRAGged: enumerate non-temporal contradictions for the
+    synthesizer and demand a structured Markdown disagreement matrix.
+    Heading + column labels are chosen based on the DRAGged-into-Conflict
+    `kind` taxonomy (Cattan et al. 2025, arXiv:2506.08500):
+
+      - self        → "Internal contradiction within a source" + columns
+                      "First mention / Second mention" — the *same* source
+                      contradicts itself.
+      - pair        → "Sources disagree on this" + "Source A / Source B" —
+                      the canonical two-source disagreement.
+      - conditional → "Sources agree under qualifier" + "Source A /
+                      Source B / Qualifier" — sources only disagree when
+                      a qualifier (year, region, sub-domain) is missing.
+
+    When contradictions are mixed-kind we group by kind and emit one
+    sub-table per group, so a `pair` and a `self` finding don't get
+    incorrectly merged under one generic heading.
     """
     if conflict_result is None or not conflict_result.has_conflict:
         return ""
     real = [c for c in conflict_result.contradictions if not c.is_temporal_evolution]
     if not real:
         return ""
+
     lines = [
         "<cross_source_disagreement>",
         "The retrieval found conflicting claims you MUST present neutrally:",
     ]
-    # FIX 2: sanitize attacker-influenced LLM output before interpolation.
+    # Sanitize attacker-influenced LLM output before interpolation.
     sanitized: list[tuple[object, str, str, str]] = []
     for c in real:
         sanitized.append(
@@ -600,23 +614,65 @@ def _build_disagreement_block(conflict_result: object | None) -> str:
             f'- On "{s_claim}": [{ids_a}] state "{s_pos_a}", '
             f'while [{ids_b}] states "{s_pos_b}".'
         )
-    lines.append('  Do NOT pick a winner. Use the phrasing "Sources disagree."')
+    lines.append(
+        '  Do NOT pick a winner. Use phrasing appropriate to the contradiction kind '
+        '(see the table headings below).'
+    )
     lines.append("")
     lines.append("MANDATORY OUTPUT FORMAT — render the disagreement as a Markdown")
     lines.append("table inside the answer (verbatim shape, one row per conflict):")
     lines.append("")
-    lines.append("**Sources disagree on this:**")
-    lines.append("")
-    lines.append("| Claim | Source A | Source B |")
-    lines.append("|---|---|---|")
-    for c, s_claim, s_pos_a, s_pos_b in sanitized:
-        first_a = c.doc_ids_a[0] if c.doc_ids_a else ""
-        first_b = c.doc_ids_b[0] if c.doc_ids_b else ""
-        lines.append(
-            f"| {s_claim}: A={s_pos_a} / B={s_pos_b} "
-            f"| [{first_a}] | [{first_b}] |"
-        )
-    lines.append("")
+
+    # Group sanitized contradictions by kind. Defaults to "pair" for legacy
+    # rows whose kind wasn't populated by the probe.
+    by_kind: dict[str, list[tuple[object, str, str, str]]] = {}
+    for c, sc, sa, sb in sanitized:
+        k = getattr(c, "kind", None) or "pair"
+        by_kind.setdefault(k, []).append((c, sc, sa, sb))
+
+    _HEADINGS = {
+        "self": "**Internal contradiction within a source:**",
+        "pair": "**Sources disagree on this:**",
+        "conditional": "**Sources agree under qualifier:**",
+    }
+    _COL_HEADERS = {
+        "self": "| Claim | First mention | Second mention |\n|---|---|---|",
+        "pair": "| Claim | Source A | Source B |\n|---|---|---|",
+        "conditional": "| Claim | Source A | Source B | Qualifier |\n|---|---|---|---|",
+    }
+    # Stable kind order matching severity (self first, then pair, then conditional).
+    for k in ("self", "pair", "conditional"):
+        rows = by_kind.get(k)
+        if not rows:
+            continue
+        lines.append(_HEADINGS.get(k, _HEADINGS["pair"]))
+        lines.append("")
+        lines.append(_COL_HEADERS.get(k, _COL_HEADERS["pair"]))
+        for c, s_claim, s_pos_a, s_pos_b in rows:
+            first_a = c.doc_ids_a[0] if c.doc_ids_a else ""
+            first_b = c.doc_ids_b[0] if c.doc_ids_b else ""
+            if k == "conditional":
+                qualifier = _sanitize_conflict_string(
+                    getattr(c, "qualifier", "") or "—"
+                )
+                lines.append(
+                    f"| {s_claim}: A={s_pos_a} / B={s_pos_b} "
+                    f"| [{first_a}] | [{first_b}] | {qualifier} |"
+                )
+            elif k == "self":
+                # First-mention / Second-mention — same source on both sides,
+                # so emit the single doc_id reference in each cell.
+                source_marker = f"[{first_a or first_b}]"
+                lines.append(
+                    f"| {s_claim}: first={s_pos_a} / then={s_pos_b} "
+                    f"| {source_marker} | {source_marker} |"
+                )
+            else:
+                lines.append(
+                    f"| {s_claim}: A={s_pos_a} / B={s_pos_b} "
+                    f"| [{first_a}] | [{first_b}] |"
+                )
+        lines.append("")
     lines.append("Cite each source using a bare [doc_N] marker inside the table")
     lines.append("cells — the post-processor expands them to [Title — domain](URL).")
     lines.append("The table is REQUIRED whenever this block is present; rendering")
