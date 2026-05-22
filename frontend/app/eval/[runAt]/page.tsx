@@ -56,11 +56,16 @@ export default function RunSummaryPage({ params }: PageProps) {
       )
     : [];
 
-  const passPct = summary
-    ? summary.pass_rate <= 1
-      ? summary.pass_rate * 100
-      : summary.pass_rate
-    : 0;
+  // pass_rate can be null on pre-V2.4 runs (no claim_precision tier yet) —
+  // treat null/undefined/NaN as 0 so the hero number renders cleanly rather
+  // than throwing TypeError: Cannot read properties of null (reading toFixed).
+  const passPctRaw = summary?.pass_rate;
+  const passPct =
+    passPctRaw === null || passPctRaw === undefined || Number.isNaN(passPctRaw)
+      ? 0
+      : passPctRaw <= 1
+        ? passPctRaw * 100
+        : passPctRaw;
 
   return (
     <div className="px-8 md:px-12 py-12 max-w-[1280px] mx-auto w-full">
@@ -516,7 +521,11 @@ function CrossLanguageCard({ summary }: { summary: EvalSummary }) {
             <div className="text-foreground">{r.concept_id}</div>
             <div className="text-right text-muted-foreground tabular-nums">{r.en_question_id}</div>
             <div className="text-right text-muted-foreground tabular-nums">{r.hi_question_id}</div>
-            <div className="text-right text-foreground tabular-nums">{r.jaccard_score.toFixed(2)}</div>
+            <div className="text-right text-foreground tabular-nums">
+              {r.jaccard_score === null || r.jaccard_score === undefined
+                ? "—"
+                : r.jaccard_score.toFixed(2)}
+            </div>
             <div className="text-right">
               {r.flagged_inconsistent ? (
                 <span className="text-[#dc2626]">⚠</span>
@@ -531,8 +540,12 @@ function CrossLanguageCard({ summary }: { summary: EvalSummary }) {
   );
 }
 
-function Metric({ label, value }: { label: string; value: number | undefined }) {
-  const v = value === undefined || Number.isNaN(value) ? undefined : value;
+function Metric({ label, value }: { label: string; value: number | null | undefined }) {
+  // Same null-aware treatment as MetricBar: pre-V2.4 runs return null for
+  // metrics that didn't exist on that run. Render "—" instead of crashing.
+  const missing =
+    value === null || value === undefined || Number.isNaN(value);
+  const v = missing ? undefined : (value as number);
   const norm = v === undefined ? 0 : v <= 1 ? v : v / 100;
   return (
     <div>
@@ -540,7 +553,7 @@ function Metric({ label, value }: { label: string; value: number | undefined }) 
         {label}
       </div>
       <div className="font-mono tabular-nums text-3xl text-foreground leading-none">
-        {v === undefined ? "—" : norm.toFixed(2)}
+        {missing ? "—" : norm.toFixed(2)}
       </div>
       <div className="mt-2 h-[2px] w-full bg-border">
         <div

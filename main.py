@@ -666,6 +666,48 @@ async def health():
     return {"status": "ok", "version": "v2"}
 
 
+@app.get("/health/storage")
+async def health_storage():
+    """Persistent-storage diagnostic. Returns the resolved DB path, whether
+    the file exists, its size on disk, basic table-row counts, and the
+    effective mount root (parent of DB_PATH). Use this to confirm that a
+    Hugging Face Spaces persistent /data mount is wired up correctly:
+    set DB_PATH=/data/research.db and this endpoint should report
+    db_path=/data/research.db with persistent=true and the size growing
+    across container restarts.
+    """
+    from agent.memory import DB_PATH
+    db_path = os.path.realpath(DB_PATH)
+    db_dir = os.path.dirname(db_path)
+    exists = os.path.exists(db_path)
+    size_bytes = os.path.getsize(db_path) if exists else 0
+    # Heuristic: a /data mount on HF Spaces shows up as a directory the user
+    # mounted explicitly. Anything else is considered ephemeral container fs.
+    persistent = db_dir.startswith("/data") or db_dir.startswith("/persistent")
+    counts: dict[str, int | str] = {}
+    if exists:
+        try:
+            async with aiosqlite.connect(db_path) as db:
+                for table in ("sessions", "turns", "eval_runs", "contradiction_probes"):
+                    try:
+                        row = await db.execute_fetchall(
+                            f"SELECT COUNT(*) AS n FROM {table}"
+                        )
+                        counts[table] = int(row[0][0]) if row else 0
+                    except Exception as e:
+                        counts[table] = f"error: {e.__class__.__name__}"
+        except Exception as e:
+            counts["_open_error"] = f"{e.__class__.__name__}: {e}"
+    return {
+        "db_path": db_path,
+        "db_dir": db_dir,
+        "exists": exists,
+        "size_bytes": size_bytes,
+        "persistent": persistent,
+        "row_counts": counts,
+    }
+
+
 @app.get("/health/providers")
 async def health_providers(force: bool = False):
     """Per-provider reachability snapshot + today's usage counters. Cached
