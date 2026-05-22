@@ -1973,6 +1973,29 @@ class ResearchOrchestrator:
                 logger.error("Synthesis failed: %s", e, extra={"component": "orchestrator", "turn_id": turn_id})
                 run_metadata["fallback_path_taken"].append("synthesize_error")
                 full_answer = f"Synthesis error: {e}. Retrieved {len(selected)} context chunks."
+            # Empty-answer guard. The synthesizer occasionally returns 0
+            # chunks WITHOUT raising — model returns 200 OK + empty content,
+            # or every chunk is filtered by an upstream guard before reaching
+            # us. Without a fallback message, full_answer stays "" and the
+            # weak-signal block ("What I'd search next") becomes the entire
+            # visible answer — which is what the user reports.
+            if not full_answer.strip():
+                logger.warning(
+                    "Synthesizer returned empty answer; emitting fallback",
+                    extra={"component": "orchestrator", "turn_id": turn_id},
+                )
+                run_metadata["fallback_path_taken"].append("synthesize_empty")
+                run_metadata.setdefault("timeout_hits", []).append(
+                    "synthesize_empty"
+                )
+                _n_ctx = len(selected) if selected else 0
+                full_answer = (
+                    "The agent retrieved "
+                    f"{_n_ctx} source chunk(s) but the synthesizer returned no "
+                    "answer text. This usually means the model rejected the "
+                    "request (rate limit, content filter, or provider error). "
+                    "Suggested next steps are below."
+                )
             stage_ms["synthesize_ms"] += int((time.time() - t0) * 1000)
             yield _phase_finished_event(
                 "generating", stage_ms["synthesize_ms"],
@@ -2283,7 +2306,12 @@ class ResearchOrchestrator:
                             state_holder["final_context_bundle"] = context_bundle
                             state_holder["selected_snippets"] = selected
 
-                            # Re-synthesize with the merged context.
+                            # Re-synthesize with the merged context. Keep the
+                            # pre-refinement answer around so we can fall back
+                            # to it if the refined pass returns empty (an
+                            # empty refined answer is strictly worse than the
+                            # original, no matter how weak the original was).
+                            _pre_refine_answer = full_answer
                             full_answer = ""
                             async for _tc, _pt, _ct in stream_synthesis(
                                 query=query,
@@ -2301,6 +2329,16 @@ class ResearchOrchestrator:
                                     prompt_tokens += _pt
                                 if _ct:
                                     completion_tokens += _ct
+                            if not full_answer.strip():
+                                logger.warning(
+                                    "Refinement (NEEDS_MORE_EVIDENCE) returned "
+                                    "empty; keeping pre-refinement answer.",
+                                    extra={"component": "orchestrator", "turn_id": turn_id},
+                                )
+                                run_metadata["fallback_path_taken"].append(
+                                    "refinement_empty_kept_original"
+                                )
+                                full_answer = _pre_refine_answer
                             # Re-verify + re-guard.
                             snippet_lookup = {s.doc_id: s.text for s in (selected or [])}
                             if snippet_lookup and context_bundle.doc_map:
@@ -2345,6 +2383,9 @@ class ResearchOrchestrator:
                                     "the heading `**Sources disagree on this:**`. "
                                     "Use bare [doc_N] markers in the Source cells."
                                 )
+                            # See NEEDS_MORE_EVIDENCE branch above for why we
+                            # stash the pre-refinement answer.
+                            _pre_refine_answer = full_answer
                             full_answer = ""
                             async for _tc, _pt, _ct in stream_synthesis(
                                 query=_rephrase_query,
@@ -2362,6 +2403,16 @@ class ResearchOrchestrator:
                                     prompt_tokens += _pt
                                 if _ct:
                                     completion_tokens += _ct
+                            if not full_answer.strip():
+                                logger.warning(
+                                    "Refinement (NEEDS_REPHRASE) returned empty; "
+                                    "keeping pre-refinement answer.",
+                                    extra={"component": "orchestrator", "turn_id": turn_id},
+                                )
+                                run_metadata["fallback_path_taken"].append(
+                                    "rephrase_empty_kept_original"
+                                )
+                                full_answer = _pre_refine_answer
                             snippet_lookup = {s.doc_id: s.text for s in (selected or [])}
                             if snippet_lookup and context_bundle.doc_map:
                                 claim_score, claim_records, full_answer = await verify_claims(
