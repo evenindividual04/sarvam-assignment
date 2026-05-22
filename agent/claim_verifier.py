@@ -243,17 +243,29 @@ def _append_unverified_markers(
     parsed_claims: list[tuple[str, tuple[str, ...], tuple[int, int]]],
     records: list[ClaimRecord],
 ) -> str:
-    """Append `[UNVERIFIED]` after the citation block for unsupported claims. Idempotent."""
+    """Append confidence markers after each citation block. Idempotent.
+
+    - ``unsupported``         → `[UNVERIFIED]` (loud — failed both tiers)
+    - ``ambiguous_resolved``  → `[AMBIGUOUS]`  (quiet — LLM-tier resolved a mid-band claim)
+    - ``supported``           → no marker (deterministic-tier pass)
+    """
     # Pair parsed claims with records by index; mutate from the END so earlier offsets stay valid.
     mutated = answer
     for (_, _, (_, citation_end)), record in reversed(list(zip(parsed_claims, records))):
-        if record.status != "unsupported":
+        if record.status == "unsupported":
+            marker = "[UNVERIFIED]"
+        elif record.status == "ambiguous_resolved":
+            marker = "[AMBIGUOUS]"
+        else:
             continue
-        # Check idempotency: already marked?
+        # Check idempotency: already marked with this marker (or a stronger one)?
         tail = mutated[citation_end:citation_end + 20]
-        if tail.lstrip().startswith("[UNVERIFIED]"):
+        if tail.lstrip().startswith(marker):
             continue
-        mutated = mutated[:citation_end] + " [UNVERIFIED]" + mutated[citation_end:]
+        # If [UNVERIFIED] already present, don't add a weaker [AMBIGUOUS] on top.
+        if marker == "[AMBIGUOUS]" and tail.lstrip().startswith("[UNVERIFIED]"):
+            continue
+        mutated = mutated[:citation_end] + f" {marker}" + mutated[citation_end:]
     return mutated
 
 
