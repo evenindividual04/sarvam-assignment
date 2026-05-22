@@ -426,15 +426,33 @@ def _compute_criteria_coverage(
 ) -> list[bool]:
     """Heuristic per-criterion coverage check against the synthesized answer.
 
-    A criterion is "covered" if either (a) its lowercased text appears
-    verbatim in the answer, or (b) >= 60% of its word tokens overlap the
-    answer's tokens. Pure function: no I/O, no mutation of caller state.
+    A criterion is "covered" if any of:
+      (a) Its lowercased text appears verbatim in the answer.
+      (b) ≥60% of its alphanumeric word tokens overlap the answer's tokens.
+      (c) **Cross-script fallback**: when the answer is mostly non-ASCII
+          (Devanagari, CJK, Arabic, etc.) but the criterion is English,
+          token-overlap returns 0 because the writing systems don't share
+          glyphs. In that case we degrade gracefully and treat the
+          criterion as covered if the answer contains AT LEAST one
+          script-agnostic anchor from the criterion — a number, year,
+          percentage, URL, or capitalized proper noun. This matches the
+          common case where the English criterion was "name the current
+          exchange rate with a date" and the Hindi answer correctly cites
+          93.977 and the date — the language differs, the facts match.
+
+    Pure function: no I/O, no mutation of caller state.
     """
     if not plan_success_criteria:
         return []
     import re as _re_crit
-    ans_lc = (full_answer or "").lower()
+    ans = full_answer or ""
+    ans_lc = ans.lower()
     ans_tokens = set(_re_crit.findall(r"\w+", ans_lc))
+
+    # Detect cross-script answer: > 30 % non-ASCII chars in a non-empty answer.
+    non_ascii = sum(1 for ch in ans if ord(ch) > 127)
+    cross_script = bool(ans) and (non_ascii / max(1, len(ans))) > 0.30
+
     coverage: list[bool] = []
     for crit in plan_success_criteria:
         if not crit or not isinstance(crit, str):
@@ -449,7 +467,23 @@ def _compute_criteria_coverage(
             coverage.append(False)
             continue
         overlap = len(ctoks & ans_tokens) / max(1, len(ctoks))
-        coverage.append(overlap >= 0.6)
+        if overlap >= 0.6:
+            coverage.append(True)
+            continue
+        if cross_script:
+            # Script-agnostic anchors: numbers, years, percentages, URLs,
+            # capitalized proper nouns (cap-word>=3 chars in the criterion
+            # that also appears verbatim — case-sensitive — in the answer).
+            crit_numbers = set(_re_crit.findall(r"\d[\d.,/%-]*\d|\d", crit))
+            crit_caps = set(_re_crit.findall(r"\b[A-Z][a-zA-Z]{2,}\b", crit))
+            anchors = crit_numbers | crit_caps
+            if anchors and any(a in ans for a in anchors):
+                coverage.append(True)
+                continue
+            # No script-agnostic anchor → conservative "uncertain": we don't
+            # claim coverage but we also don't penalize the model for the
+            # script gap. Return False (caller surfaces as "X / N").
+        coverage.append(False)
     return coverage
 
 
@@ -1973,6 +2007,31 @@ class ResearchOrchestrator:
                 logger.error("Synthesis failed: %s", e, extra={"component": "orchestrator", "turn_id": turn_id})
                 run_metadata["fallback_path_taken"].append("synthesize_error")
                 full_answer = f"Synthesis error: {e}. Retrieved {len(selected)} context chunks."
+            # Token-count backfill. Some providers (notably Sarvam-M and
+            # certain Cerebras streaming paths) don't include `usage` in
+            # chunked responses, so hop_completion_tokens stays at 0 even
+            # though we have an answer. Estimate from text length via
+            # tiktoken so the trace inspector doesn't render "0 tokens"
+            # next to a 2000-character response.
+            if hop_completion_tokens == 0 and full_answer.strip():
+                try:
+                    from utils.token_counter import count_tokens as _ct_count
+                    hop_completion_tokens = _ct_count(full_answer)
+                    run_metadata.setdefault("token_count_source", "estimated_tiktoken")
+                except Exception:
+                    pass
+            if hop_prompt_tokens == 0:
+                try:
+                    from utils.token_counter import count_tokens as _ct_count
+                    # Best-effort prompt-side estimate: query + context XML.
+                    _prompt_proxy = (
+                        (query or "")
+                        + " "
+                        + (context_bundle.xml if context_bundle else "")
+                    )
+                    hop_prompt_tokens = _ct_count(_prompt_proxy)
+                except Exception:
+                    pass
             # Empty-answer guard. The synthesizer occasionally returns 0
             # chunks WITHOUT raising — model returns 200 OK + empty content,
             # or every chunk is filtered by an upstream guard before reaching

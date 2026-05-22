@@ -219,7 +219,69 @@ def convert_citations(answer: str, doc_map: dict[str, tuple[str, str, str]]) -> 
         return ", ".join(to_link(doc_id) for doc_id in ids)
 
     answer = _GROUPED_DOC_PATTERN.sub(replace_grouped, answer)
-    return _DOC_PATTERN.sub(replace, answer)
+    answer = _DOC_PATTERN.sub(replace, answer)
+    return _dedupe_sources_block(answer)
+
+
+# Heading markers that delimit the final "Sources" list — same-URL duplicates
+# inside this block should collapse so the reader doesn't see the same link
+# repeated 4× when the synthesizer cited two chunks from the same page.
+_SOURCES_HEADING_RE = re.compile(
+    r"(?im)^\s*(?:#+\s*)?(?:sources|sources?:|स्रोत|स्रोत:|स्रोत-)\s*$"
+)
+_URL_IN_LINE_RE = re.compile(r"https?://[^\s)\]]+")
+
+
+def _dedupe_sources_block(answer: str) -> str:
+    """Collapse duplicate-URL bullet lines inside a trailing Sources section.
+
+    Catches the common synthesizer pattern where every [doc_N] chunk is
+    listed as its own bullet even when multiple chunks come from the same
+    page. We only dedupe inside the *last* Sources heading downward — not
+    the body — so legitimate in-prose repetitions stay untouched.
+
+    First-occurrence wins. Lines without a URL pass through unchanged.
+    No-op if there's no Sources heading.
+    """
+    if not answer:
+        return answer
+    # Find the LAST sources heading; only dedupe below it.
+    last = None
+    for m in _SOURCES_HEADING_RE.finditer(answer):
+        last = m
+    if last is None:
+        return answer
+    head, tail = answer[: last.end()], answer[last.end():]
+    lines = tail.split("\n")
+    seen: set[str] = set()
+    out_lines: list[str] = []
+    for line in lines:
+        urls_in_line = _URL_IN_LINE_RE.findall(line)
+        if urls_in_line:
+            # Normalise each URL the same way the in-pool check does
+            # (strip query, drop scheme case, trim trailing slash) so
+            # http://x.com/page and https://x.com/page/ collapse together.
+            norm_urls = {_normalize_for_dedupe(u) for u in urls_in_line}
+            if norm_urls and norm_urls.issubset(seen):
+                continue
+            seen.update(norm_urls)
+        out_lines.append(line)
+    return head + "\n".join(out_lines)
+
+
+def _normalize_for_dedupe(url: str) -> str:
+    """Light URL normalisation for dedup — preserves path but ignores
+    scheme case, www prefix, trailing slash, and URL fragment."""
+    u = url.strip()
+    u = u.split("#", 1)[0]
+    if u.endswith("/"):
+        u = u[:-1]
+    u_low = u.lower()
+    if u_low.startswith("https://www."):
+        u = "https://" + u[12:]
+    elif u_low.startswith("http://www."):
+        u = "http://" + u[11:]
+    return u.lower()
 
 
 # B5: quote-anchored citation popovers.
