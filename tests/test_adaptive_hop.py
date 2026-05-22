@@ -231,6 +231,20 @@ def _install_common_mocks(monkeypatch, probe: _GateProbe, *, selected_tokens_per
     # Citation guard: trivial verify (it's instance method; orchestrator uses self._guard.verify)
     # CitationGuard.verify already works on string + doc_map; leave it.
 
+    # STOP-RAG gate (agent.stopping.decide_continue) and refinement classifier
+    # (agent.refinement_check.classify_answer) both call provider_router.call
+    # _groq under the hood. Without stubbing the boundary, adaptive-hop tests
+    # hit real Groq endpoints; whether the call beats the 4 s stop-RAG
+    # timeout decides whether the hop loop continues, which makes the suite
+    # order-dependent. Stub call_groq to raise so both helpers take their
+    # documented "degrade-to-safer" path — orchestrator's own terminators
+    # (MAX_HOPS, DIFFICULTY_EASY, TOKEN_BUDGET) then drive the gating logic
+    # that this test file is actually asserting.
+    async def _groq_unavailable(_prompt, max_tokens: int = 200):
+        raise RuntimeError("call_groq stubbed in adaptive_hop tests")
+
+    monkeypatch.setattr("utils.provider_router.call_groq", _groq_unavailable)
+
 
 def _patch_plan(monkeypatch, probe: _GateProbe, *, plan_outputs: list[PlannerOutput]):
     """Mock provider_router.plan with a sequence of planner outputs."""
