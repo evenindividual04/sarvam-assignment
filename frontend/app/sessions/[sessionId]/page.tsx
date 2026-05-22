@@ -1,7 +1,9 @@
 "use client";
 
-import { use, useEffect, useState } from "react";
+import { use, useEffect, useRef, useState } from "react";
+import { useSearchParams } from "next/navigation";
 import Link from "next/link";
+import { toast } from "sonner";
 import { getSessionHistory, getTurnDetail } from "@/lib/api";
 import type { Turn, TurnDetail } from "@/lib/types";
 import { RichMarkdown } from "@/lib/markdown";
@@ -13,6 +15,8 @@ import {
   type TraceInspectorData,
 } from "@/components/trace/trace-inspector";
 import { formatDateTime, formatMs } from "@/lib/format";
+import { ErrorPanel } from "@/components/shell/error-panel";
+import { Skeleton } from "@/components/ui/skeleton";
 
 interface PageProps {
   params: Promise<{ sessionId: string }>;
@@ -21,6 +25,9 @@ interface PageProps {
 export default function SessionDetailPage({ params }: PageProps) {
   const { sessionId } = use(params);
   const decodedSessionId = decodeURIComponent(sessionId);
+  const searchParams = useSearchParams();
+  const focusTurnId = searchParams.get("turn");
+  const turnRefs = useRef<Map<string, HTMLElement>>(new Map());
 
   const [turns, setTurns] = useState<Turn[]>([]);
   const [loading, setLoading] = useState(true);
@@ -39,6 +46,33 @@ export default function SessionDetailPage({ params }: PageProps) {
       alive = false;
     };
   }, [decodedSessionId]);
+
+  // Deep-link to a specific turn via `?turn=<turn_id>`. Scrolls into view
+  // and adds a brief teal ring as a "you are here" cue. Fires when turns
+  // load OR the focus param changes (e.g. user clicks Copy-link in another
+  // tab, returns here with the param).
+  useEffect(() => {
+    if (!focusTurnId || turns.length === 0) return;
+    const el = turnRefs.current.get(focusTurnId);
+    if (!el) return;
+    el.scrollIntoView({ behavior: "smooth", block: "center" });
+    el.classList.add("ring-2", "ring-accent");
+    const t = setTimeout(() => {
+      el.classList.remove("ring-2", "ring-accent");
+    }, 2400);
+    return () => clearTimeout(t);
+  }, [focusTurnId, turns]);
+
+  const copyTurnLink = async (turnId: string) => {
+    try {
+      const origin = typeof window !== "undefined" ? window.location.origin : "";
+      const url = `${origin}/sessions/${encodeURIComponent(decodedSessionId)}?turn=${encodeURIComponent(turnId)}`;
+      await navigator.clipboard.writeText(url);
+      toast.success("Turn link copied");
+    } catch {
+      toast.error("Couldn't copy link");
+    }
+  };
 
   const openTrace = async (turn: Turn) => {
     setTraceData(turnToTraceData(turn));
@@ -74,16 +108,26 @@ export default function SessionDetailPage({ params }: PageProps) {
 
       <div className="mt-10">
         {loading && (
-          <div className="font-mono text-[11px] uppercase tracking-[0.12em] text-subtle-foreground">
-            loading…
+          <div className="space-y-3">
+            {Array.from({ length: 3 }).map((_, i) => (
+              <Skeleton key={i} className="h-32 w-full" />
+            ))}
           </div>
         )}
-        {err && (
-          <div className="font-mono text-[11px] uppercase tracking-[0.12em] text-subtle-foreground">
-            {err.includes("404")
-              ? "session not found."
-              : "backend unreachable."}
-          </div>
+        {err && !loading && (
+          err.includes("404") ? (
+            <div className="font-mono text-[11px] uppercase tracking-[0.12em] text-subtle-foreground">
+              session not found.
+            </div>
+          ) : (
+            <ErrorPanel detail={err} onRetry={() => {
+              setErr(null); setLoading(true);
+              getSessionHistory(decodedSessionId)
+                .then((ts) => setTurns(ts))
+                .catch((e) => setErr(e instanceof Error ? e.message : "error"))
+                .finally(() => setLoading(false));
+            }} />
+          )
         )}
       </div>
 
@@ -91,7 +135,10 @@ export default function SessionDetailPage({ params }: PageProps) {
         {turns.map((t, i) => (
           <article
             key={t.turn_id}
-            className="border border-border rounded-[8px] bg-surface p-6"
+            ref={(el) => {
+              if (el) turnRefs.current.set(t.turn_id, el);
+            }}
+            className="border border-border rounded-[8px] bg-surface p-6 transition-shadow"
           >
             <header className="flex items-baseline justify-between font-mono text-[10px] uppercase tracking-[0.14em] text-muted-foreground mb-4">
               <span>
@@ -104,7 +151,16 @@ export default function SessionDetailPage({ params }: PageProps) {
                   {formatDateTime(t.created_at)}
                 </span>
               </span>
-              <span className="tabular-nums">{formatMs(t.latency_ms)}</span>
+              <span className="flex items-center gap-3">
+                <button
+                  onClick={() => copyTurnLink(t.turn_id)}
+                  className="normal-case tracking-normal hover:text-foreground transition-colors"
+                  title="Copy shareable link to this turn"
+                >
+                  ⧉ Link
+                </button>
+                <span className="tabular-nums">{formatMs(t.latency_ms)}</span>
+              </span>
             </header>
 
             <div className="mb-5">

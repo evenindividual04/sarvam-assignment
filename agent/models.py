@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Literal, Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 # ── Plain dataclasses ──────────────────────────────────────────────────────
@@ -23,6 +23,14 @@ class SearchResult:
     retrieved_at: str
     raw_content: Optional[str] = None    # populated by Parallel/Tavily; skips Trafilatura
     intent_origin: Optional[str] = None  # V2.1: intent of the query that produced this result
+    relevance: Optional[float] = None    # normalized to [0,1]; see `relevance_source` for provenance
+    relevance_source: Optional[str] = None
+    # "provider" → field surfaced directly by the provider (e.g. Tavily `score`); an
+    #              absolute relevance estimate, can be compared across queries.
+    # "rank"     → derived from result array position (Parallel + Serper, which do not
+    #              expose a per-result score). Relative within the query only.
+    # None       → no signal available (extremely rare; only when provider response is
+    #              malformed and rank fallback also fails).
 
 
 @dataclass
@@ -42,6 +50,12 @@ class ContextSnippet:
     intent_origin: Optional[str] = None  # V2.1: provenance from the originating typed query
     trust_score: float = 0.7  # V2.3: deterministic source trust prior in [0.45, 1.00]
     trust_tier: str = "unknown"
+    # Provider-side relevance carried from `SearchResult` so the selector can
+    # use it as an additional signal alongside BM25 / FlashRank / recency /
+    # trust. Source: `"provider"` (absolute, Tavily score) or `"rank"` (relative
+    # to the query, Parallel/Serper).
+    provider_relevance: Optional[float] = None
+    provider_relevance_source: Optional[str] = None
 
 
 @dataclass
@@ -106,6 +120,35 @@ class ExecutionEvent:
     step: str           # planning | searching | fetching | selecting | generating | done | error
     label: str          # human-readable streaming label
     data: Any = None    # step-specific payload
+    # Phase 1.25: typed-event discriminator. When set, the SSE layer uses this
+    # as the `event:` field. Old emit sites leave it None (back-compat); new
+    # sites set one of the constants in EVENT_TYPES below.
+    event_type: str | None = None
+
+
+# Phase 1.25: typed-event discriminators (AG-UI / Vercel AI SDK 5 inspired).
+EVT_RUN_STARTED = "run_started"
+EVT_PHASE_STARTED = "phase_started"
+EVT_PHASE_PROGRESS = "phase_progress"
+EVT_PHASE_FINISHED = "phase_finished"
+EVT_SEARCH_QUERY = "search_query"
+EVT_SOURCE_FOUND = "source_found"
+EVT_SOURCE_FETCHED = "source_fetched"
+EVT_CONTEXT_SELECTED = "context_selected"
+EVT_CONFLICT_DETECTED = "conflict_detected"
+EVT_ANSWER_DELTA = "answer_delta"
+EVT_CITATION_RESOLVED = "citation_resolved"
+EVT_RUN_FINISHED = "run_finished"
+EVT_RUN_ERROR = "run_error"
+# Phase 1.5: structured uncertainty signal (weak / missing / conflict).
+EVT_UNCERTAINTY = "uncertainty"
+# Phase 1.875: plan-level clarification (ambiguity_flag) + per-sub-query
+# evidence-gap notifications surfaced after SELECTING.
+EVT_CLARIFICATION_OFFERED = "clarification_offered"
+EVT_EVIDENCE_GAP = "evidence_gap"
+# Phase 2: human-in-the-loop plan approval gate. Emitted between PLANNING and
+# SEARCHING when the request opts in via `approval_required=True`.
+EVT_PLAN_APPROVAL = "plan_approval"
 
 
 @dataclass
@@ -136,6 +179,15 @@ class PlannerOutput(BaseModel):
     strategy: str
     queries: list[TypedQuery]
     confidence: Literal["low", "medium", "high"] = "medium"  # V3.2 adaptive 2-hop gate
+    # Phase 1.875: enriched plan-level metadata. All optional with defaults
+    # so older serialized planner outputs (without these fields) still parse.
+    time_sensitivity: Literal["live", "recent", "static"] = "static"
+    expected_source_types: list[Literal["news", "academic", "official", "wiki", "forum"]] = Field(
+        default_factory=list
+    )
+    difficulty: Literal["easy", "medium", "hard"] = "medium"
+    ambiguity_flag: bool = False
+    success_criteria: list[str] = Field(default_factory=list)  # 1-3 short bullets
 
 
 class ClaimContradiction(BaseModel):

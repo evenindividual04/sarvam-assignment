@@ -43,9 +43,16 @@ class ContextBudget:
     history_pct: float = 0.25      # 4,000 — rolling summary + recent turns
     web_context_pct: float = 0.40  # 6,400 — selected web snippets
     output_pct: float = 0.20       # 3,200 — reserved for generation
+    # Explicit override for the web-context allocation in absolute tokens.
+    # When set (non-None), bypasses the percentage-derived computation. Used
+    # by the orchestrator to expand to 24K for ``difficulty == "hard"`` when
+    # the synthesizer is Gemini (1M context window).
+    web_context_override: int | None = None
 
     @property
     def web_context_budget(self) -> int:
+        if self.web_context_override is not None:
+            return int(self.web_context_override)
         return int(self.total_tokens * self.web_context_pct)  # 6,400
 
     @property

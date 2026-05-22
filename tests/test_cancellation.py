@@ -139,3 +139,51 @@ async def test_cancellation_during_synth_halts_stream():
             if len(collected) == 2:
                 tok.cancel()
         assert collected == ["chunk0", "chunk1"]
+
+
+# ── Phase 2: extended CancellationToken (approval gate) ──────────────────
+
+
+@pytest.mark.asyncio
+async def test_wait_for_approval_normal_path():
+    """Approval event fires before timeout → returns (True, payload)."""
+    tok = CancellationToken()
+
+    async def approver():
+        await asyncio.sleep(0.05)
+        tok.approved_payload = {"sub_queries": ["edited q"]}
+        tok.approval_event.set()
+
+    asyncio.create_task(approver())
+    approved, payload = await tok.wait_for_approval(timeout=1.0)
+    assert approved is True
+    assert payload == {"sub_queries": ["edited q"]}
+    assert tok.approval_status == "approved"
+
+
+@pytest.mark.asyncio
+async def test_wait_for_approval_timeout():
+    """Approval never fires → returns (False, None) and status=timeout."""
+    tok = CancellationToken()
+    approved, payload = await tok.wait_for_approval(timeout=0.05)
+    assert approved is False
+    assert payload is None
+    assert tok.approval_status == "timeout"
+    assert tok.is_set() is False
+
+
+@pytest.mark.asyncio
+async def test_wait_for_approval_cancellation_interrupts():
+    """cancel() during wait_for_approval → returns (False, None), token set."""
+    tok = CancellationToken()
+
+    async def canceller():
+        await asyncio.sleep(0.05)
+        tok.cancel()
+
+    asyncio.create_task(canceller())
+    approved, payload = await tok.wait_for_approval(timeout=1.0)
+    assert approved is False
+    assert payload is None
+    assert tok.is_set() is True
+    assert tok.approval_status == "cancelled"

@@ -160,6 +160,143 @@ def test_selection_allows_3_per_domain_for_contradiction_probe_chunks():
     assert len(selected_plain) == 2
 
 
+# ── Goal 2: Cerebras-first planner with Groq fallback ────────────────────
+
+
+def test_planner_uses_cerebras_when_available(monkeypatch):
+    monkeypatch.setenv("CEREBRAS_API_KEY", "ck_test")
+    monkeypatch.setenv("GROQ_API_KEY", "gk_test")
+    called: list[str] = []
+
+    async def fake_cerebras(prompt: str) -> str:
+        called.append("cerebras")
+        return '{"strategy":"s","queries":[{"text":"q","intent":"primary"}]}'
+
+    async def fake_groq(prompt: str) -> str:
+        called.append("groq")
+        return '{"strategy":"unused","queries":[{"text":"q","intent":"primary"}]}'
+
+    monkeypatch.setattr(provider_router, "_plan_with_cerebras", fake_cerebras)
+    monkeypatch.setattr(provider_router, "_plan_with_groq", fake_groq)
+
+    async def _run():
+        out = await provider_router.plan("what is x")
+        return out, provider_router.get_last_planner_provider()
+
+    out, prov = asyncio.run(_run())
+    assert called == ["cerebras"]
+    assert out.strategy == "s"
+    assert prov == "cerebras"
+
+
+def test_planner_falls_back_to_groq_on_cerebras_error(monkeypatch):
+    monkeypatch.setenv("CEREBRAS_API_KEY", "ck_test")
+    monkeypatch.setenv("GROQ_API_KEY", "gk_test")
+    called: list[str] = []
+
+    async def fake_cerebras(prompt: str) -> str:
+        called.append("cerebras")
+        raise RuntimeError("cerebras down")
+
+    async def fake_groq(prompt: str) -> str:
+        called.append("groq")
+        return '{"strategy":"groq-strat","queries":[{"text":"q","intent":"primary"}]}'
+
+    monkeypatch.setattr(provider_router, "_plan_with_cerebras", fake_cerebras)
+    monkeypatch.setattr(provider_router, "_plan_with_groq", fake_groq)
+
+    async def _run():
+        out = await provider_router.plan("what is x")
+        return out, provider_router.get_last_planner_provider()
+
+    out, prov = asyncio.run(_run())
+    assert called == ["cerebras", "groq"]
+    assert out.strategy == "groq-strat"
+    assert prov == "fallback"
+
+
+def test_planner_uses_groq_when_cerebras_disabled(monkeypatch):
+    monkeypatch.setenv("CEREBRAS_API_KEY", "ck_test")
+    monkeypatch.setenv("GROQ_API_KEY", "gk_test")
+    monkeypatch.setenv("PLANNER_PROVIDER", "groq")
+    called: list[str] = []
+
+    async def fake_cerebras(prompt: str) -> str:
+        called.append("cerebras")
+        return "ignored"
+
+    async def fake_groq(prompt: str) -> str:
+        called.append("groq")
+        return '{"strategy":"groq-only","queries":[{"text":"q","intent":"primary"}]}'
+
+    monkeypatch.setattr(provider_router, "_plan_with_cerebras", fake_cerebras)
+    monkeypatch.setattr(provider_router, "_plan_with_groq", fake_groq)
+
+    async def _run():
+        out = await provider_router.plan("x")
+        return out, provider_router.get_last_planner_provider()
+
+    out, prov = asyncio.run(_run())
+    assert called == ["groq"]
+    assert out.strategy == "groq-only"
+    assert prov == "groq"
+
+
+def test_planner_uses_groq_when_no_cerebras_key(monkeypatch):
+    monkeypatch.delenv("CEREBRAS_API_KEY", raising=False)
+    monkeypatch.setenv("GROQ_API_KEY", "gk_test")
+    called: list[str] = []
+
+    async def fake_cerebras(prompt: str) -> str:
+        called.append("cerebras")
+        return "ignored"
+
+    async def fake_groq(prompt: str) -> str:
+        called.append("groq")
+        return '{"strategy":"no-cere","queries":[{"text":"q","intent":"primary"}]}'
+
+    monkeypatch.setattr(provider_router, "_plan_with_cerebras", fake_cerebras)
+    monkeypatch.setattr(provider_router, "_plan_with_groq", fake_groq)
+
+    async def _run():
+        out = await provider_router.plan("x")
+        return out, provider_router.get_last_planner_provider()
+
+    out, prov = asyncio.run(_run())
+    assert called == ["groq"]
+    assert out.strategy == "no-cere"
+    assert prov == "groq"
+
+
+def test_planner_gemini_structured_output_path(monkeypatch):
+    """Goal 4: PLANNER_PROVIDER=gemini → structured-output path used directly."""
+    monkeypatch.setenv("PLANNER_PROVIDER", "gemini")
+    monkeypatch.setenv("GEMINI_API_KEY", "gem_test")
+    monkeypatch.setenv("GROQ_API_KEY", "gk_test")
+    called: list[str] = []
+
+    async def fake_gemini(prompt: str) -> str:
+        called.append("gemini")
+        # Schema-mode Gemini returns clean JSON without preamble.
+        return '{"strategy":"gem-strat","queries":[{"text":"q","intent":"primary"}]}'
+
+    async def fake_groq(prompt: str) -> str:
+        called.append("groq")
+        return "should-not-be-called"
+
+    monkeypatch.setattr(provider_router, "_plan_with_gemini_structured", fake_gemini)
+    monkeypatch.setattr(provider_router, "_plan_with_groq", fake_groq)
+
+    async def _run():
+        out = await provider_router.plan("x")
+        return out, provider_router.get_last_planner_provider()
+
+    out, prov = asyncio.run(_run())
+    assert called == ["gemini"]
+    assert out.strategy == "gem-strat"
+    assert prov == "gemini"
+
+
 def test_planner_output_persisted_to_run_metadata_json(monkeypatch):
     """Smoke check: parse_planner_output round-trips through the typed schema
     and would serialize cleanly into run_metadata['planner_output']."""

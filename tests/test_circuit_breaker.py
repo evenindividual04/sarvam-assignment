@@ -324,6 +324,11 @@ async def test_synthesize_falls_back_to_openrouter_when_gemini_breaker_open(monk
     monkeypatch.setattr(provider_router, "_synthesize_gemini", fake_gemini)
     monkeypatch.setattr(provider_router, "_synthesize_openrouter", fake_openrouter)
     monkeypatch.setenv("OPENROUTER_API_KEY", "fake")
+    # V3.9: ensure providers BETWEEN gemini and openrouter in the chain are
+    # skipped via missing-key pre-flight, so we still land on openrouter
+    # under this test's hypothesis.
+    monkeypatch.delenv("SARVAM_API_KEY", raising=False)
+    monkeypatch.delenv("CEREBRAS_API_KEY", raising=False)
 
     chunks = []
     async for c in provider_router.synthesize(
@@ -362,6 +367,12 @@ async def test_synthesize_returns_error_string_when_both_open(monkeypatch):
     monkeypatch.setattr(provider_router, "_synthesize_gemini", fake_gemini)
     monkeypatch.setattr(provider_router, "_synthesize_openrouter", fake_openrouter)
     monkeypatch.setenv("OPENROUTER_API_KEY", "fake")
+    # V3.9: exhaust the rest of the chain so the error string is the final
+    # outcome — sarvam, cerebras, ollama all need to be unavailable too.
+    monkeypatch.delenv("SARVAM_API_KEY", raising=False)
+    monkeypatch.delenv("CEREBRAS_API_KEY", raising=False)
+    # Ollama has no key, so kill its base URL to force an unreachable error.
+    monkeypatch.setenv("OLLAMA_BASE_URL", "http://127.0.0.1:1/v1")
 
     chunks = []
     async for c in provider_router.synthesize(

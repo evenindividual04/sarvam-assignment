@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import re
 from dataclasses import dataclass
 from typing import Optional
@@ -48,7 +49,10 @@ class ClaimRecord:
     doc_ids: tuple[str, ...]
     overlap: float
     entity_match: float
-    method: str  # "deterministic" | "llm" | "skip"
+    # ``method`` discriminates which path resolved the claim. ``llm`` is kept
+    # as a back-compat synonym for ``llm_gpt4o`` so existing tests/callers that
+    # only check membership-in-{"llm","deterministic","skip"} keep working.
+    method: str  # "deterministic" | "llm" | "llm_deepseek" | "llm_gpt4o" | "skip"
     score: float
     status: str  # "supported" | "unsupported" | "ambiguous_resolved"
 
@@ -67,26 +71,8 @@ def _score_pair(claim: str, snippet: str) -> tuple[float, float, float, frozense
     return overlap, entity_match, score, frozenset(claim_entities)
 
 
-async def _llm_verify(claim: str, snippet: str) -> Optional[bool]:
-    """Tier-2 LLM fallback. Returns supported bool, or None on parse/timeout failure."""
-    from utils.provider_router import judge
-
-    prompt = (
-        f"CLAIM: {claim}\n"
-        f"EVIDENCE SNIPPET: {snippet[:1500]}\n"
-        "Does the snippet explicitly support this exact claim "
-        "(entities, numbers, dates must match)?\n"
-        'JSON only: {"supported": bool, "reasoning": str}'
-    )
-    try:
-        raw = await asyncio.wait_for(judge(prompt), timeout=_LLM_TIMEOUT_S)
-    except asyncio.TimeoutError:
-        logger.warning("Claim verifier LLM timeout", extra={"component": "claim_verifier"})
-        return None
-    except Exception as e:
-        logger.warning("Claim verifier LLM error: %s", e, extra={"component": "claim_verifier"})
-        return None
-
+def _parse_supported_json(raw: str) -> Optional[bool]:
+    """Extract ``supported`` from a JSON-ish LLM verifier response, or None on parse failure."""
     try:
         start = raw.find("{")
         end = raw.rfind("}") + 1
@@ -96,6 +82,77 @@ async def _llm_verify(claim: str, snippet: str) -> Optional[bool]:
         return parsed.supported
     except Exception:
         return None
+
+
+async def _llm_verify(claim: str, snippet: str) -> tuple[Optional[bool], str]:
+    """Tier-2 LLM verification.
+
+    Provider preference (CLAIM_VERIFIER_PROVIDER env, default ``auto``):
+      - ``auto``: DeepSeek R1 via OpenRouter when OPENROUTER_API_KEY is set,
+        else GPT-4o-mini via GitHub Models judge().
+      - ``deepseek``: force DeepSeek R1.
+      - ``gpt4o``: force GPT-4o-mini.
+
+    Returns ``(supported_or_None, method)`` where ``method`` is one of
+    ``"llm_deepseek"`` | ``"llm_gpt4o"``. ``supported=None`` on parse/timeout
+    failure — the caller maps that to "unsupported" for safety.
+    """
+    pref = os.environ.get("CLAIM_VERIFIER_PROVIDER", "auto").lower().strip()
+    have_openrouter = bool(os.environ.get("OPENROUTER_API_KEY"))
+
+    use_deepseek = (
+        pref == "deepseek"
+        or (pref == "auto" and have_openrouter)
+    )
+    # Back-compat: when no DeepSeek is involved at all (auto + no key, or
+    # explicit "gpt4o"/"llm"/"judge" alias), report the legacy ``"llm"`` method
+    # label so pre-existing tests/consumers asserting on equality keep working.
+    legacy_label = pref == "auto" and not have_openrouter
+
+    if use_deepseek:
+        from utils.provider_router import _claim_verify_with_deepseek
+        try:
+            raw = await asyncio.wait_for(
+                _claim_verify_with_deepseek(claim, snippet), timeout=_LLM_TIMEOUT_S
+            )
+            return _parse_supported_json(raw), "llm_deepseek"
+        except asyncio.TimeoutError:
+            logger.warning(
+                "Claim verifier DeepSeek timeout", extra={"component": "claim_verifier"}
+            )
+            if pref == "deepseek":
+                return None, "llm_deepseek"
+            # auto: fall through to gpt4o
+        except Exception as e:
+            logger.warning(
+                "Claim verifier DeepSeek error (%s); falling back to GPT-4o-mini",
+                e, extra={"component": "claim_verifier"},
+            )
+            if pref == "deepseek":
+                return None, "llm_deepseek"
+            # auto: fall through
+
+    # GPT-4o-mini path (explicit, or auto-fallback from DeepSeek failure, or no OpenRouter key)
+    from utils.provider_router import judge
+
+    prompt = (
+        f"CLAIM: {claim}\n"
+        f"EVIDENCE SNIPPET: {snippet[:1500]}\n"
+        "Does the snippet explicitly support this exact claim "
+        "(entities, numbers, dates must match)?\n"
+        'JSON only: {"supported": bool, "reasoning": str}'
+    )
+    method = "llm" if legacy_label else "llm_gpt4o"
+    try:
+        raw = await asyncio.wait_for(judge(prompt), timeout=_LLM_TIMEOUT_S)
+    except asyncio.TimeoutError:
+        logger.warning("Claim verifier LLM timeout", extra={"component": "claim_verifier"})
+        return None, method
+    except Exception as e:
+        logger.warning("Claim verifier LLM error: %s", e, extra={"component": "claim_verifier"})
+        return None, method
+
+    return _parse_supported_json(raw), method
 
 
 async def _classify_claim(
@@ -157,7 +214,7 @@ async def _classify_claim(
         )
 
     # Escalate to LLM
-    supported = await _llm_verify(claim, best_snippet)
+    supported, method = await _llm_verify(claim, best_snippet)
     if supported is None:
         # Timeout or parse failure → unsupported for safety
         return ClaimRecord(
@@ -165,7 +222,7 @@ async def _classify_claim(
             doc_ids=doc_ids,
             overlap=best_overlap,
             entity_match=best_entity,
-            method="llm",
+            method=method,
             score=best_score,
             status="unsupported",
         )
@@ -175,7 +232,7 @@ async def _classify_claim(
         doc_ids=doc_ids,
         overlap=best_overlap,
         entity_match=best_entity,
-        method="llm",
+        method=method,
         score=best_score,
         status="ambiguous_resolved" if supported else "unsupported",
     )

@@ -25,7 +25,14 @@ from eval.judge import (  # noqa: E402
     judge_cross_language_consistency,
     judge_factual_accuracy,
 )
-from eval.eval_runner import _compute_calibration, _pearson, _percentile  # noqa: E402
+from eval.eval_runner import (  # noqa: E402
+    _compute_aggregates,
+    _compute_calibration,
+    _criteria_coverage_ratio,
+    _pearson,
+    _percentile,
+    _write_markdown_report,
+)
 from utils.cost_model import cost_for  # noqa: E402
 
 
@@ -203,9 +210,14 @@ def test_failure_taxonomy_retrieval_failure():
 # ── Cost model ──────────────────────────────────────────────────────────────
 
 
-def test_cost_for_zero_on_free_tier_model():
-    assert cost_for("gemini-2.5-flash", 10_000, 5_000) == 0.0
-    assert cost_for("groq-llama-3.3-70b", 1_000_000, 1_000_000) == 0.0
+def test_cost_for_uses_published_rates():
+    # Gemini 2.5 Flash: $0.075/$0.30 per 1M → 10k prompt + 5k completion
+    # = 10_000/1e6 * 0.075 + 5_000/1e6 * 0.30 = 0.000750 + 0.001500 = 0.00225
+    assert cost_for("gemini-2.5-flash", 10_000, 5_000) == pytest.approx(0.00225)
+    # Groq Llama 3.3 70B: $0.59/$0.79 per 1M → 1M + 1M = 1.38
+    assert cost_for("groq-llama-3.3-70b", 1_000_000, 1_000_000) == pytest.approx(1.38)
+    # Sarvam still free during preview.
+    assert cost_for("sarvam-m", 10_000, 5_000) == 0.0
 
 
 def test_cost_for_unknown_model_returns_zero():
@@ -338,3 +350,222 @@ async def _ablation_tagging_roundtrip(tmp_path, monkeypatch):
         )
         out = await cursor.fetchall()
     assert sorted(out) == [("bm25", 3), ("hybrid", 3)]
+
+
+# ── Tier A: Phase 1+ metrics promotion ────────────────────────────────────
+
+
+def test_criteria_coverage_ratio_helper():
+    assert _criteria_coverage_ratio([True, True, False, False]) == 0.5
+    assert _criteria_coverage_ratio([True, True, True]) == 1.0
+    assert _criteria_coverage_ratio([]) is None
+    assert _criteria_coverage_ratio(None) is None
+
+
+def test_persist_includes_phase_1_metrics(tmp_path, monkeypatch):
+    """_persist_eval_run should write the new Phase 1+ columns."""
+    asyncio.run(_persist_phase1_roundtrip(tmp_path, monkeypatch))
+
+
+async def _persist_phase1_roundtrip(tmp_path, monkeypatch):
+    import aiosqlite
+
+    test_db = tmp_path / "p1.db"
+    monkeypatch.setenv("DB_PATH", str(test_db))
+    import importlib
+    import agent.memory as memory
+    importlib.reload(memory)
+    import eval.eval_runner as runner
+    importlib.reload(runner)
+    await memory.init_db()
+
+    result = {
+        "run_id": str(uuid.uuid4()),
+        "run_at": "2026-05-22T00:00:00+00:00",
+        "question_id": "Q-1",
+        "question": "q?",
+        "category": "factual",
+        "agent_answer": "ans",
+        "faithfulness_score": 0.9,
+        "answer_relevance_score": 0.8,
+        "context_precision_score": 0.85,
+        "citation_integrity_score": 1.0,
+        "claim_precision_score": 0.95,
+        "claim_precision_reasoning": "",
+        "failure_class": "PASS",
+        "latency_ms": 1234,
+        "turn_id": None,
+        "language": "en",
+        "retrieval_mode": "hybrid",
+        "factual_accuracy_score": 1.0,
+        "ablation_id": None,
+        "calibration_correlation": None,
+        # Tier A fields:
+        "quote_grounding_ratio": 0.85,
+        "numeric_grounding_ratio": 0.75,
+        "criteria_coverage_ratio": 0.6,
+        "terminator_fired": "MAX_HOPS_REACHED",
+        "planner_provider": "cerebras",
+        "reranker_used": "cohere",
+        "language_detection": {"lang": "en", "method": "fasttext"},
+    }
+    await runner._persist_eval_run(result)
+
+    async with aiosqlite.connect(memory.DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        rows = await db.execute_fetchall(
+            "SELECT quote_grounding_ratio, numeric_grounding_ratio, "
+            "criteria_coverage_ratio, terminator_fired, planner_provider, "
+            "reranker_used, language_method FROM eval_runs WHERE run_id = ?",
+            (result["run_id"],),
+        )
+        assert rows, "row should be persisted"
+        row = dict(rows[0])
+    assert row["quote_grounding_ratio"] == 0.85
+    assert row["numeric_grounding_ratio"] == 0.75
+    assert row["criteria_coverage_ratio"] == 0.6
+    assert row["terminator_fired"] == "MAX_HOPS_REACHED"
+    assert row["planner_provider"] == "cerebras"
+    assert row["reranker_used"] == "cohere"
+    assert row["language_method"] == "fasttext"
+
+
+def test_aggregate_includes_phase_1_metrics():
+    """Mean/P50/P95 should be computed for the new ratio metrics."""
+    results = [
+        {
+            "failure_class": "PASS",
+            "category": "factual",
+            "latency_ms": 100 + 10 * i,
+            "quote_grounding_ratio": 0.8 + 0.01 * i,
+            "numeric_grounding_ratio": 0.5 + 0.02 * i,
+            "criteria_coverage_ratio": 0.6 + 0.01 * i,
+            "planner_provider": "cerebras" if i % 2 == 0 else "groq",
+            "terminator_fired": "MAX_HOPS_REACHED" if i == 0 else None,
+            "reranker_used": "cohere",
+            "synth_provider_chain": ["gemini", "sarvam"],
+            "language_detection": {"method": "script" if i < 2 else "fasttext"},
+            "evidence_gap_count": i,
+            "extraction_fallbacks": {"tavily": 1} if i == 0 else {},
+            "context_fallbacks": {"compress_history": 1} if i == 1 else {},
+        }
+        for i in range(5)
+    ]
+    agg = _compute_aggregates(results)
+    overall = agg["overall"]
+    assert overall["mean_quote_grounding_ratio"] is not None
+    assert overall["mean_numeric_grounding_ratio"] is not None
+    assert overall["mean_criteria_coverage_ratio"] is not None
+    assert overall["p50_quote_grounding_ratio"] is not None
+    assert overall["p95_numeric_grounding_ratio"] is not None
+    # Routing distributions.
+    assert overall["planner_provider_distribution"] == {"cerebras": 3, "groq": 2}
+    assert overall["reranker_used_distribution"] == {"cohere": 5}
+    assert overall["terminator_fired_distribution"] == {"MAX_HOPS_REACHED": 1}
+    assert overall["synth_chain_primary_distribution"] == {"gemini": 5}
+    assert overall["language_detection_method_distribution"] == {"script": 2, "fasttext": 3}
+    # Evidence-quality counters.
+    assert overall["total_evidence_gaps"] == sum(range(5))
+    assert overall["turns_with_extraction_fallbacks"] == 1
+    assert overall["turns_with_context_fallbacks"] == 1
+
+
+def test_markdown_report_renders_routing_distribution(tmp_path):
+    """Markdown report must include the Routing distribution + Per-turn quality sections."""
+    results = [
+        {
+            "run_id": str(uuid.uuid4()),
+            "question_id": f"Q-{i}",
+            "question": "q?",
+            "category": "factual",
+            "language": "en",
+            "failure_class": "PASS",
+            "agent_answer": "ans",
+            "faithfulness_score": 0.9,
+            "answer_relevance_score": 0.9,
+            "context_precision_score": 0.9,
+            "citation_integrity_score": 1.0,
+            "claim_precision_score": 0.9,
+            "latency_ms": 100,
+            "quote_grounding_ratio": 0.8,
+            "numeric_grounding_ratio": 0.7,
+            "criteria_coverage_ratio": 0.6,
+            "planner_provider": "cerebras",
+            "reranker_used": "cohere",
+            "synth_provider_chain": ["gemini"],
+            "terminator_fired": "MAX_HOPS_REACHED",
+            "language_detection": {"method": "fasttext"},
+            "evidence_gap_count": 0,
+            "extraction_fallbacks": {},
+            "context_fallbacks": {},
+        }
+        for i in range(3)
+    ]
+    taxonomy = Counter(r["failure_class"] for r in results)
+    agg = _compute_aggregates(results)
+    out = tmp_path / "report.md"
+    _write_markdown_report(
+        out,
+        run_at_iso="2026-05-22T00:00:00+00:00",
+        retrieval_mode="hybrid",
+        ablation_id=None,
+        results=results,
+        agg=agg,
+        taxonomy=taxonomy,
+        calibration={"correlation": None, "buckets": {}, "n_paired": 0},
+        cl_rows=[],
+    )
+    text = out.read_text()
+    assert "## Per-turn quality metrics (Phase 1+)" in text
+    assert "## Routing distribution" in text
+    assert "Planner provider" in text
+    assert "Synth chain primary" in text
+    assert "Reranker used" in text
+    assert "Language detection" in text
+    assert "## Evidence quality" in text
+    assert "cerebras: 3" in text
+    assert "gemini: 3" in text
+
+
+# ── Tier C: cross-family judge sampling + aggregates ────────────────────────
+
+
+def test_eval_runner_cross_family_flag_samples_correctly():
+    """Deterministic seed=42 → exactly N IDs picked, stable across calls."""
+    from eval.eval_runner import _select_cross_family_sample
+
+    questions = [{"id": f"Q-{i}"} for i in range(76)]
+    s1 = _select_cross_family_sample(questions, sample_size=20)
+    s2 = _select_cross_family_sample(questions, sample_size=20)
+    assert len(s1) == 20
+    assert s1 == s2  # deterministic
+    # Smaller dataset → caps at len(questions)
+    small = [{"id": f"Q-{i}"} for i in range(5)]
+    assert len(_select_cross_family_sample(small, sample_size=20)) == 5
+
+
+def test_eval_runner_cross_family_aggregates_present_in_summary():
+    """Cross-family summary dict has the three required agreement metrics."""
+    from eval.judge import (
+        cohens_kappa_bucketed,
+        pearson_correlation,
+    )
+
+    primary = [0.8, 0.5, 0.3, 0.9, 0.7, 0.4]
+    secondary = [0.75, 0.55, 0.35, 0.85, 0.65, 0.45]
+    pearson = pearson_correlation(primary, secondary)
+    kappa = cohens_kappa_bucketed(primary, secondary)
+    deltas = [abs(p - s) for p, s in zip(primary, secondary)]
+    mad = sum(deltas) / len(deltas)
+
+    summary = {
+        "inter_rater_agreement_pearson": pearson,
+        "mean_abs_delta": mad,
+        "cohens_kappa_bucketed": kappa,
+        "cross_family_sample_size": 6,
+        "cross_family_judging_truncated": False,
+    }
+    assert summary["inter_rater_agreement_pearson"] is not None
+    assert summary["mean_abs_delta"] is not None
+    assert summary["cohens_kappa_bucketed"] is not None
+    assert summary["cross_family_judging_truncated"] is False

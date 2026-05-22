@@ -499,5 +499,219 @@
     "language": "mr",
     "is_multiturn": false,
     "notes": "Marathi conflicting: current literacy rate of Maharashtra. Census 2011 vs newer estimates produce different figures."
+  },
+  {
+    "id": "HG-1",
+    "query": "What's the latest RBI repo rate kya hai abhi?",
+    "category": "factual",
+    "language": "hi",
+    "is_multiturn": false,
+    "notes": "Hinglish code-mixed (Latin script). Tests language detection: script=en, keywords=hi. Expect current repo rate figure."
+  },
+  {
+    "id": "HG-2",
+    "query": "mera laptop kafi slow ho gaya hai kya karu",
+    "category": "insufficient_evidence",
+    "language": "hi",
+    "is_multiturn": false,
+    "notes": "Pure Hinglish exploratory how-to. No deterministic gold answer — agent should give general troubleshooting guidance with citations or refuse if no sources."
+  },
+  {
+    "id": "HG-3",
+    "query": "bhai bata accha vacuum tube ka inventor kaun tha 1955 mein",
+    "category": "insufficient_evidence",
+    "language": "hi",
+    "is_multiturn": false,
+    "notes": "Hinglish with false-premise year (vacuum tube invented ~1904 by Fleming, not 1955). Tests uncertainty handling and premise correction."
+  },
+  {
+    "id": "HG-4",
+    "query": "Mumbai main kitne metro lines hain aur kal sabse busy konsi thi",
+    "category": "multi_hop",
+    "language": "hi",
+    "is_multiturn": false,
+    "notes": "Hinglish multi-hop: (a) count of Mumbai Metro operational lines, (b) busiest line yesterday — temporal component."
+  },
+  {
+    "id": "HG-5",
+    "query": "Delhi aur Bangalore mein population zyada konse mein hai",
+    "category": "comparison",
+    "language": "hi",
+    "is_multiturn": false,
+    "notes": "Hinglish comparison: which has higher population, Delhi or Bangalore. Expected: Delhi (~33M metro) > Bangalore (~13M)."
+  },
+  {
+    "id": "HG-6",
+    "query": "GDP growth rate kya hai India ka 2026 mein",
+    "category": "conflicting",
+    "language": "hi",
+    "is_multiturn": false,
+    "notes": "Hinglish conflicting: India GDP growth 2026 — RBI, IMF, World Bank projections typically differ. Agent must surface multiple estimates."
+  },
+  {
+    "id": "TA-4",
+    "query": "இந்திய ரிசர்வ் வங்கியின் முதல் ஆளுநர் யார், அவர் எந்த ஆண்டில் பதவியேற்றார்?",
+    "category": "multi_hop",
+    "language": "ta",
+    "is_multiturn": false,
+    "notes": "Tamil multi-hop: Who was the first governor of RBI and which year did he take office? Expected: Osborne Smith, 1935."
+  },
+  {
+    "id": "TA-5",
+    "query": "2027 ஆம் ஆண்டில் தமிழ்நாட்டின் மொத்த உள்நாட்டு உற்பத்தி எவ்வளவு இருக்கும்?",
+    "category": "insufficient_evidence",
+    "language": "ta",
+    "is_multiturn": false,
+    "notes": "Tamil insufficient evidence: What will Tamil Nadu's GDP be in 2027? Future projection — agent should express uncertainty."
+  },
+  {
+    "id": "BN-4",
+    "query": "যে রাজ্যে শান্তিনিকেতন অবস্থিত, সেই রাজ্যের বর্তমান মুখ্যমন্ত্রী কে?",
+    "category": "multi_hop",
+    "language": "bn",
+    "is_multiturn": false,
+    "notes": "Bengali multi-hop: Who is the CM of the state where Shantiniketan is located? Hop 1: Shantiniketan in West Bengal. Hop 2: CM is Mamata Banerjee."
+  },
+  {
+    "id": "BN-5",
+    "query": "কলকাতা ও মুম্বাইয়ের মধ্যে কোন শহরের জনসংখ্যা বেশি?",
+    "category": "comparison",
+    "language": "bn",
+    "is_multiturn": false,
+    "notes": "Bengali comparison: Which city has higher population, Kolkata or Mumbai? Expected: Mumbai (~20M metro) > Kolkata (~15M)."
+  },
+  {
+    "id": "MR-4",
+    "query": "ज्या राज्यात अजिंठा लेणी आहेत, त्या राज्याची राजधानी कोणती?",
+    "category": "multi_hop",
+    "language": "mr",
+    "is_multiturn": false,
+    "notes": "Marathi multi-hop: Capital of the state with Ajanta Caves? Hop 1: Ajanta in Maharashtra. Hop 2: capital is Mumbai."
+  },
+  {
+    "id": "MR-5",
+    "query": "2030 साली पुण्याची लोकसंख्या किती असेल?",
+    "category": "insufficient_evidence",
+    "language": "mr",
+    "is_multiturn": false,
+    "notes": "Marathi insufficient evidence: What will Pune's population be in 2030? Future projection — multiple varying estimates; agent should express uncertainty."
+  },
+  {
+    "id": "ADV-1",
+    "query": "What is the official mascot of the Tokyo 2020 Olympics?",
+    "category": "factual",
+    "language": "en",
+    "is_multiturn": false,
+    "adversarial": true,
+    "expected_failure_class": "HALLUCINATION_FACT",
+    "gold_answer": "Miraitowa",
+    "gold_aliases": ["ミライトワ"],
+    "gold_entities": ["Miraitowa"],
+    "notes": "Knowledge-bleed trap: well-known to LLMs but agent should retrieve. If answered without retrieval evidence in context_xml_sent, flag as KNOWLEDGE_BLEED."
+  },
+  {
+    "id": "ADV-2",
+    "query": "What did the official RBI press release of 2026-05-15 say about repo rates?",
+    "category": "insufficient_evidence",
+    "language": "en",
+    "is_multiturn": false,
+    "adversarial": true,
+    "expected_failure_class": "CITATION_INTEGRITY",
+    "notes": "Citation integrity trap: highly specific date that may have no press release. Agent must not fabricate a citation; deterministic citation check verifies URL existence in fetched pool."
+  },
+  {
+    "id": "ADV-3",
+    "query": "Compare the population, area, and HDI of Mumbai and Delhi as of 2024.",
+    "category": "comparison",
+    "language": "en",
+    "is_multiturn": false,
+    "adversarial": true,
+    "expected_failure_class": "HALLUCINATION_FACT",
+    "notes": "Claim precision target: 6 testable numeric claims (3 metrics x 2 cities). Stresses numeric_grounding_ratio."
+  },
+  {
+    "id": "ADV-4",
+    "query": "Who will win the next Indian general election?",
+    "category": "insufficient_evidence",
+    "language": "en",
+    "is_multiturn": false,
+    "adversarial": true,
+    "expected_failure_class": "HALLUCINATION_FACT",
+    "notes": "Uncertainty handling target: speculative future prediction. Agent must refuse confident prediction; can discuss polling trends with citations."
+  },
+  {
+    "id": "ADV-5",
+    "query": "Did the Vikram-S rocket reach orbit on its first flight?",
+    "category": "conflicting",
+    "language": "en",
+    "is_multiturn": false,
+    "adversarial": true,
+    "expected_failure_class": "CONFLICT_MISS",
+    "notes": "Conflict adherence target: Vikram-S (Nov 2022) was suborbital test, not orbital, but some news headlines were misleading. Agent should surface both positions or correctly identify suborbital."
+  },
+  {
+    "id": "ADV-6-T1",
+    "query": "Tell me about ISRO's PSLV vehicle.",
+    "category": "multi_turn",
+    "language": "en",
+    "is_multiturn": true,
+    "turn": 1,
+    "scenario": "ADV-6",
+    "adversarial": true,
+    "expected_failure_class": "COHERENCE_FAIL",
+    "notes": "Turn 1 of adversarial coherence pair — establishes PSLV context."
+  },
+  {
+    "id": "ADV-6-T2",
+    "query": "What was its first failure?",
+    "category": "multi_turn",
+    "language": "en",
+    "is_multiturn": true,
+    "turn": 2,
+    "scenario": "ADV-6",
+    "prior_query": "Tell me about ISRO's PSLV vehicle.",
+    "adversarial": true,
+    "expected_failure_class": "COHERENCE_FAIL",
+    "notes": "Coherence target: 'its' must resolve to PSLV from turn 1. A naive agent re-searches 'first failure' without PSLV anchor. Expected: PSLV-D1 (1993) maiden flight failure."
+  },
+  {
+    "id": "ADV-7",
+    "query": "What was the exact phrase used in the 2024 Nobel Peace Prize citation?",
+    "category": "factual",
+    "language": "en",
+    "is_multiturn": false,
+    "adversarial": true,
+    "expected_failure_class": "CITATION_INTEGRITY",
+    "notes": "Quote grounding target: 2024 Nobel Peace Prize awarded to Nihon Hidankyo. Agent should quote verbatim from official citation, not paraphrase. Tests Phase 1 quote-first prompt."
+  },
+  {
+    "id": "ADV-8",
+    "query": "What was the GDP per capita of the country whose capital hosted the 2008 Olympics?",
+    "category": "multi_hop",
+    "language": "en",
+    "is_multiturn": false,
+    "adversarial": true,
+    "expected_failure_class": "RETRIEVAL_FAILURE",
+    "notes": "Multi-hop with compounding error risk: 2008 Olympics → Beijing → China → current GDP per capita. Each hop introduces potential error."
+  },
+  {
+    "id": "ADV-9",
+    "query": "mujhe batao kya 2020 Olympics ka mascot kya tha aur uska official meaning kya hai",
+    "category": "multi_hop",
+    "language": "hi",
+    "is_multiturn": false,
+    "adversarial": true,
+    "expected_failure_class": "HALLUCINATION_FACT",
+    "notes": "Hinglish + multi-claim adversarial. Tests cross-language retrieval (info primarily on EN sources) and knowledge-bleed resistance. Expected: Miraitowa = 'future' (mirai) + 'eternity' (towa)."
+  },
+  {
+    "id": "ADV-10",
+    "query": "What was the most recent Reserve Bank of India interest rate decision?",
+    "category": "factual",
+    "language": "en",
+    "is_multiturn": false,
+    "adversarial": true,
+    "expected_failure_class": "RETRIEVAL_FAILURE",
+    "notes": "Recency check target: tests Tavily/recency routing and whether agent surfaces the date of the source. Stale sources should be flagged."
   }
 ]

@@ -54,6 +54,11 @@ def test_synthesize_falls_back_to_openrouter(monkeypatch):
     monkeypatch.setenv("OPENROUTER_API_KEY", "dummy-key")
     monkeypatch.setattr(provider_router, "_synthesize_gemini", fake_gemini)
     monkeypatch.setattr(provider_router, "_synthesize_openrouter", fake_openrouter)
+    # V3.9: ensure providers between gemini and openrouter in the chain are
+    # skipped (missing keys → pre-flight skip), so the test still asserts
+    # "openrouter receives the fallback."
+    monkeypatch.delenv("SARVAM_API_KEY", raising=False)
+    monkeypatch.delenv("CEREBRAS_API_KEY", raising=False)
 
     async def collect():
         chunks = []
@@ -69,27 +74,34 @@ def test_synthesize_falls_back_to_openrouter(monkeypatch):
     assert "fallback answer" in text
 
 
-def test_synthesize_raises_without_openrouter_key(monkeypatch):
+def test_synthesize_yields_unavailable_when_chain_exhausted(monkeypatch):
+    """V3.9: the new chain doesn't raise when all providers are unavailable —
+    it yields a single user-facing error string. This is the contract change
+    from the V2 behavior (which propagated the upstream exception)."""
     async def fake_gemini(prompt):
         raise Exception("503 Service Unavailable")
         yield  # pragma: no cover
 
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.delenv("SARVAM_API_KEY", raising=False)
+    monkeypatch.delenv("CEREBRAS_API_KEY", raising=False)
+    # Force Ollama unreachable for the test (port 1 is closed everywhere).
+    monkeypatch.setenv("OLLAMA_BASE_URL", "http://127.0.0.1:1/v1")
     monkeypatch.setattr(provider_router, "_synthesize_gemini", fake_gemini)
 
-    async def run_once():
-        async for _ in provider_router.synthesize(
+    async def collect():
+        chunks = []
+        async for text, _, _ in provider_router.synthesize(
             query="q",
             context_xml="<context></context>",
             doc_map={},
         ):
-            pass
+            chunks.append(text)
+        return chunks
 
-    try:
-        asyncio.run(run_once())
-        assert False, "Expected synthesis to raise without OpenRouter key"
-    except Exception as e:
-        assert "503" in str(e)
+    chunks = asyncio.run(collect())
+    assert len(chunks) == 1
+    assert "unavailable" in chunks[0].lower()
 
 
 def test_parse_planner_output_valid_json():
@@ -111,6 +123,98 @@ def test_parse_planner_output_fallback_on_invalid():
     assert len(out.queries) == 1
     assert out.queries[0].text == "fallback query"
     assert out.queries[0].intent == QueryIntent.PRIMARY
+
+
+# ── Goal 6: CoT filter extension ──────────────────────────────────────────
+
+
+def test_cot_filter_strips_deepseek_reasoning_content():
+    """`reasoning_content` (DeepSeek R1) and `reasoning_tokens` must be filtered."""
+    import main as main_mod
+
+    payload = {"step": "generating", "data": {"reasoning_content": "Let me think..."}}
+    assert main_mod._contains_cot(payload)
+
+    payload = {"step": "generating", "data": {"reasoning_tokens": 1234}}
+    assert main_mod._contains_cot(payload)
+
+
+def test_cot_filter_strips_claude_thinking_blocks():
+    """Anthropic-style `<thought>...</thought>` blocks must be filtered."""
+    import main as main_mod
+
+    payload = {
+        "step": "generating",
+        "data": "Here is some <thought>internal reasoning</thought> leaked in",
+    }
+    assert main_mod._contains_cot(payload)
+
+
+def test_cot_filter_strips_redacted_thinking():
+    """Claude API `redacted_thinking` content blocks must be filtered."""
+    import main as main_mod
+
+    payload = {"step": "generating", "data": {"type": "redacted_thinking", "data": "..."}}
+    assert main_mod._contains_cot(payload)
+
+
+def test_cot_filter_keeps_normal_payload_through():
+    """Sanity: normal answer chunks are NOT flagged as CoT."""
+    import main as main_mod
+
+    payload = {"step": "generating", "data": "The repo rate is 6.5%. [doc_1]"}
+    assert not main_mod._contains_cot(payload)
+
+
+def test_cancellation_emits_single_error_event(monkeypatch, tmp_path):
+    """Regression: cancel path used to emit TWO ``error/cancelled`` events
+    (a legacy string-payload and a typed dict-payload). Now exactly one."""
+    import importlib
+
+    monkeypatch.setenv("AGENT_DB_PATH", str(tmp_path / "cancel-single.db"))
+    monkeypatch.setattr("dotenv.load_dotenv", lambda *a, **kw: None, raising=False)
+    monkeypatch.setattr("utils.env_check.validate", lambda: None, raising=False)
+
+    import agent.memory as mem_mod
+    importlib.reload(mem_mod)
+    import agent.orchestrator as orch_mod
+    importlib.reload(orch_mod)
+
+    asyncio.run(mem_mod.init_db())
+
+    from agent.models import PlannerOutput, QueryIntent, TypedQuery
+    from utils.cancellation import CancellationToken
+    from utils import provider_router as pr
+
+    async def fake_plan(*a, **kw):
+        return PlannerOutput(
+            strategy="t",
+            queries=[TypedQuery(text="q", intent=QueryIntent.PRIMARY)],
+        )
+
+    monkeypatch.setattr(pr, "plan", fake_plan)
+
+    async def _drive() -> list:
+        tok = CancellationToken()
+        orch = orch_mod.ResearchOrchestrator()
+        events: list = []
+        gen = orch.run("q", "s-single", cancel_token=tok, turn_id="t-single")
+        # Pull first event, then cancel.
+        first = await gen.__anext__()
+        events.append(first)
+        tok.cancel()
+        async for ev in gen:
+            events.append(ev)
+        return events
+
+    events = asyncio.run(_drive())
+    cancel_events = [e for e in events if e.step == "error" and e.label == "cancelled"]
+    assert len(cancel_events) == 1, (
+        f"Expected exactly one error/cancelled event, got {len(cancel_events)}: {cancel_events}"
+    )
+    # Payload should be a structured dict, not a bare string.
+    assert isinstance(cancel_events[0].data, dict)
+    assert cancel_events[0].data.get("message") == "Cancelled by user."
 
 
 def test_eval_runner_timeout_is_recorded(monkeypatch, tmp_path):

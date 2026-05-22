@@ -38,3 +38,31 @@ async def embed_batch(texts: list[str]) -> list[list[float]]:
     if not texts:
         return []
     return await asyncio.to_thread(_embed_sync, texts)
+
+
+def is_warm() -> bool:
+    """True if the model has been instantiated (and ONNX session initialized)."""
+    return _model is not None
+
+
+async def warm() -> None:
+    """Pre-warm the embedding model + ONNX session so the *first* user query
+    doesn't pay the 2-4s cold-start. Called from `main.py:lifespan` as a
+    background task immediately after `init_db()`.
+
+    The Dockerfile also runs the model load at build time so the bge-small-en-v1.5
+    weights (~30MB) are baked into the image layer; this function just warms
+    the in-process ONNX session against those already-cached weights, which is
+    sub-second on HF Spaces.
+    """
+    if is_warm():
+        return
+    try:
+        await asyncio.to_thread(_embed_sync, ["warmup"])
+        logger.info("Embedding model warm; subsequent queries skip cold-start.",
+                    extra={"component": "embedder"})
+    except Exception as exc:  # pragma: no cover — best-effort
+        logger.warning(
+            "Embedding warmup failed (will retry on first query): %s",
+            exc, extra={"component": "embedder"},
+        )

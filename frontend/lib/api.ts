@@ -4,6 +4,7 @@ import type {
   EvalRun,
   EvalSummary,
   SessionListItem,
+  StreamLabelsResponse,
   Turn,
   TurnDetail,
 } from "./types";
@@ -34,6 +35,36 @@ async function getJson<T>(path: string, init?: RequestInit): Promise<T> {
 
 export async function getHealth(): Promise<{ status: string; version?: string }> {
   return getJson("/health");
+}
+
+export interface ProviderProbe {
+  name: string;
+  role: string;
+  status: "ok" | "degraded" | "down" | "missing_key";
+  latency_ms: number | null;
+  detail: string;
+}
+
+export interface ProviderUsageRow {
+  provider: string;
+  usage_date: string;
+  requests: number;
+  prompt_tokens: number;
+  completion_tokens: number;
+  request_limit?: number | null;
+  token_limit?: number | null;
+}
+
+export interface ProviderHealth {
+  checked_at: number;
+  overall: "ok" | "degraded" | "down";
+  providers: ProviderProbe[];
+  cache_ttl_s: number;
+  usage_today?: ProviderUsageRow[];
+}
+
+export async function getProviderHealth(force = false): Promise<ProviderHealth> {
+  return getJson(`/health/providers${force ? "?force=1" : ""}`);
 }
 
 export async function getSettingsDefaults(): Promise<DefaultsResponse> {
@@ -78,12 +109,53 @@ export async function getQuestionDetail(
   );
 }
 
-export async function cancelResearch(turnId: string): Promise<void> {
+// Phase 1.25: fetch the canonical phase label dictionary so the pipeline
+// component doesn't duplicate the Python STREAM_LABELS constant. Cached on
+// the module so a single network round-trip per page load suffices.
+let _labelsCache: StreamLabelsResponse | null = null;
+export async function getStreamLabels(): Promise<StreamLabelsResponse> {
+  if (_labelsCache) return _labelsCache;
+  _labelsCache = await getJson<StreamLabelsResponse>("/stream/labels");
+  return _labelsCache;
+}
+
+// S1 fix: session_id is required by the backend to prove the caller owns the
+// turn. Without it the backend returns 404 (anti-enumeration).
+export async function cancelResearch(turnId: string, sessionId: string): Promise<void> {
   await fetch(`${BACKEND}/research/cancel/${encodeURIComponent(turnId)}`, {
     method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ session_id: sessionId }),
   }).catch(() => {
     /* fire-and-forget */
   });
+}
+
+// Phase 2: resolve a paused plan-approval gate. Pass null to accept the plan
+// as-is, or an array of edited sub_queries (length-capped at 6 server-side).
+// S1 fix: sessionId required for ownership verification.
+export async function approveResearchPlan(
+  turnId: string,
+  sessionId: string,
+  editedSubQueries: string[] | null,
+): Promise<{ approved: boolean; edited: boolean; sub_queries: string[] | null }> {
+  const res = await fetch(
+    `${BACKEND}/research/approve/${encodeURIComponent(turnId)}`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sub_queries: editedSubQueries, session_id: sessionId }),
+    },
+  );
+  if (!res.ok) {
+    const text = await res.text().catch(() => res.statusText);
+    throw new ApiError(res.status, text || res.statusText);
+  }
+  return (await res.json()) as {
+    approved: boolean;
+    edited: boolean;
+    sub_queries: string[] | null;
+  };
 }
 
 export { ApiError };

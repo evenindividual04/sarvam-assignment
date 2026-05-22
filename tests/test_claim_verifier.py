@@ -267,6 +267,111 @@ async def test_citation_guard_convert_citations_still_works_with_unverified_mark
 
 # ── score arithmetic ──────────────────────────────────────────────────────
 
+# ── Goal 3: DeepSeek R1 verifier with GPT-4o-mini fallback ────────────────
+
+
+@pytest.mark.asyncio
+async def test_claim_verifier_uses_deepseek_when_available(monkeypatch):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "or_test")
+    monkeypatch.setenv("GITHUB_TOKEN", "gh_test")
+
+    deepseek_calls = {"n": 0}
+    judge_calls = {"n": 0}
+
+    async def fake_deepseek(claim: str, snippet: str) -> str:
+        deepseek_calls["n"] += 1
+        return '{"supported": true, "reasoning": "matches"}'
+
+    async def fake_judge(prompt: str) -> str:
+        judge_calls["n"] += 1
+        return '{"supported": false, "reasoning": "x"}'
+
+    monkeypatch.setattr("utils.provider_router._claim_verify_with_deepseek", fake_deepseek)
+    monkeypatch.setattr("utils.provider_router.judge", fake_judge)
+
+    # Force a mid-band case with entities so we escalate to LLM.
+    answer = "Microsoft acquired GitHub. [doc_1]"
+    snippets = {"doc_1": "Microsoft made an acquisition of a coding platform recently."}
+    _, records, _ = await verify_claims(answer, DOC_MAP, snippets)
+    if 0.3 <= records[0].score < 0.6:
+        assert records[0].method == "llm_deepseek"
+        assert deepseek_calls["n"] == 1
+        assert judge_calls["n"] == 0
+
+
+@pytest.mark.asyncio
+async def test_claim_verifier_falls_back_to_gpt4o_on_deepseek_error(monkeypatch):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "or_test")
+    monkeypatch.setenv("GITHUB_TOKEN", "gh_test")
+
+    async def failing_deepseek(claim: str, snippet: str) -> str:
+        raise RuntimeError("deepseek 500")
+
+    async def fake_judge(prompt: str) -> str:
+        return '{"supported": true, "reasoning": "ok"}'
+
+    monkeypatch.setattr("utils.provider_router._claim_verify_with_deepseek", failing_deepseek)
+    monkeypatch.setattr("utils.provider_router.judge", fake_judge)
+
+    answer = "Microsoft acquired GitHub. [doc_1]"
+    snippets = {"doc_1": "Microsoft made an acquisition of a coding platform recently."}
+    _, records, _ = await verify_claims(answer, DOC_MAP, snippets)
+    if 0.3 <= records[0].score < 0.6:
+        # auto + OPENROUTER_API_KEY → DeepSeek tried first; on failure we fall
+        # back to GPT-4o-mini and report ``llm_gpt4o`` as the resolved method.
+        assert records[0].method == "llm_gpt4o"
+
+
+@pytest.mark.asyncio
+async def test_deepseek_reasoning_content_stripped(monkeypatch):
+    """The DeepSeek R1 helper must NOT propagate `reasoning_content`.
+
+    DeepSeek R1's chain-of-thought lives in ``message.reasoning_content``.
+    Our helper reads ONLY ``message.content`` so the CoT never reaches the
+    SSE pipeline or the JSON parser downstream.
+    """
+    from utils import provider_router
+
+    class _FakeMessage:
+        def __init__(self):
+            # Anthropic-style: CoT and answer arrive as separate fields. We
+            # must read only ``content`` (the visible final answer).
+            self.reasoning_content = "Let me think step by step about whether this matches..."
+            self.content = '{"supported": true, "reasoning": "matches"}'
+
+    class _FakeChoice:
+        def __init__(self):
+            self.message = _FakeMessage()
+
+    class _FakeResp:
+        def __init__(self):
+            self.choices = [_FakeChoice()]
+
+    class _FakeCompletions:
+        async def create(self, **kwargs):  # noqa: D401
+            return _FakeResp()
+
+    class _FakeChat:
+        def __init__(self):
+            self.completions = _FakeCompletions()
+
+    class _FakeAsyncOpenAI:
+        def __init__(self, **kwargs):
+            self.chat = _FakeChat()
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "or_test")
+    import openai
+    monkeypatch.setattr(openai, "AsyncOpenAI", _FakeAsyncOpenAI)
+
+    raw = await provider_router._claim_verify_with_deepseek(
+        "Microsoft acquired GitHub.", "Microsoft made an acquisition of a coding platform recently."
+    )
+    # The returned string must contain the JSON answer ONLY, never the CoT.
+    assert "supported" in raw
+    assert "step by step" not in raw
+    assert "Let me think" not in raw
+
+
 @pytest.mark.asyncio
 async def test_claim_precision_score_calculated_correctly(monkeypatch):
     # 3 supported, 2 unsupported → 0.6

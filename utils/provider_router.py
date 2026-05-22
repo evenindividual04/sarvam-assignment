@@ -11,15 +11,44 @@ from __future__ import annotations
 
 import logging
 import os
+import re as _re
 from typing import AsyncIterator, Optional
 
 from tenacity import retry, stop_after_attempt, wait_exponential
+from utils.retry_helpers import wait_retry_after_or_exponential
 
 import json as _json
 
 from agent.models import PlannerOutput, QueryIntent, TypedQuery
 from utils.circuit_breaker import CircuitOpenError, breaker
+from utils.key_rotation import KeyRotator
 from utils.prompt_registry import PROMPT_REGISTRY
+
+# Module-level rotator shared by every Groq caller (plan, call_groq, judge).
+# Single instance → shared throttle state across the process.
+_GROQ_ROTATOR = KeyRotator(
+    "groq", legacy_var="GROQ_API_KEY", multi_var="GROQ_API_KEYS"
+)
+
+
+def _extract_retry_after_s(exc: Exception) -> float | None:
+    """Pull a Retry-After (seconds) value from an SDK exception when present."""
+    try:
+        resp = getattr(exc, "response", None)
+        if resp is not None:
+            headers = getattr(resp, "headers", None)
+            if headers:
+                ra = headers.get("Retry-After") or headers.get("retry-after")
+                if ra:
+                    return float(ra)
+    except Exception:
+        return None
+    return None
+
+# Audit M3: strip ASCII control characters (incl. newlines, tabs) from
+# planner-derived text that gets spliced into LLM prompts. Defends against
+# prompt-format injection from a malicious or hallucinated planner output.
+_CTRL_CHAR_RE = _re.compile(r"[\x00-\x1f\x7f]")
 # Importing failure_policy registers all breakers at module import time.
 from utils import failure_policy as _failure_policy  # noqa: F401
 
@@ -31,6 +60,59 @@ _GITHUB_MODEL = "gpt-4o-mini"
 _OPENROUTER_MODEL = "deepseek/deepseek-r1"
 _SARVAM_BASE_URL = "https://api.sarvam.ai/v1"
 
+# ── Indic-script detection (mirrors agent.search._detect_language) ─────────
+# Duplicated locally to keep this module's import graph clean (it must not
+# import agent.* — would create a cycle since search/orchestrator import us).
+_DEVANAGARI_RE = _re.compile(r"[ऀ-ॿ]")
+_TAMIL_RE = _re.compile(r"[஀-௿]")
+_BENGALI_RE = _re.compile(r"[ঀ-৿]")
+
+
+def _detect_query_script(text: str) -> str:
+    """Return ``"indic"`` for any hi/ta/bn detection (script, keyword, or
+    statistical), ``"english"`` otherwise.
+
+    Delegates to ``utils.lang_detect`` so Hinglish ("kya haal hai") and
+    romanized Tamil/Bengali ("epdi iruka", "kemon acho") now correctly route
+    Sarvam-first instead of being mis-classified as English. The local
+    Devanagari/Tamil/Bengali regexes are retained above as a fast-path for
+    callers that may still import them, but are no longer the source of
+    truth here."""
+    if not text:
+        return "english"
+    from utils.lang_detect import detect_language as _ld
+    lang, _method = _ld(text)
+    return "indic" if lang in {"hi", "ta", "bn"} else "english"
+
+
+# ── Run-metadata propagation ──────────────────────────────────────────────
+# The orchestrator owns ``run_metadata``. The router decides chain order /
+# planner provider / verifier provider but doesn't see the dict. We stamp
+# decisions into ContextVars so concurrent orchestrator-driven requests
+# (e.g. ``asyncio.gather`` of two /research calls, or the eval runner
+# interleaving questions) each observe their OWN attribution. ContextVar
+# values set inside the same task propagate back to the caller after
+# ``await`` returns; only setters in *child* tasks would not.
+import contextvars as _contextvars
+
+_LAST_SYNTH_CHAIN_VAR: _contextvars.ContextVar[list[str] | None] = _contextvars.ContextVar(
+    "provider_router.last_synth_chain", default=None
+)
+_LAST_PLANNER_PROVIDER_VAR: _contextvars.ContextVar[str | None] = _contextvars.ContextVar(
+    "provider_router.last_planner_provider", default=None
+)
+
+
+def get_last_synth_chain() -> list[str] | None:
+    """Return the chain order that the most recent ``synthesize()`` decided on."""
+    return _LAST_SYNTH_CHAIN_VAR.get()
+
+
+def get_last_planner_provider() -> str | None:
+    """Return ``"cerebras" | "groq" | "gemini" | "fallback"`` for the most recent ``plan()`` call."""
+    return _LAST_PLANNER_PROVIDER_VAR.get()
+
+
 # ── Synthesis system prompt (verbatim from spec Section 2.9) ──────────────
 SYNTHESIS_SYSTEM_PROMPT = PROMPT_REGISTRY["synthesizer"]["system"]
 
@@ -38,12 +120,22 @@ SYNTHESIS_SYSTEM_PROMPT = PROMPT_REGISTRY["synthesizer"]["system"]
 PLANNING_PROMPT_TEMPLATE = PROMPT_REGISTRY["planner"]["template"]
 
 
+_VALID_SOURCE_TYPES = {"news", "academic", "official", "wiki", "forum"}
+
+
 def _fallback_planner(query: str) -> PlannerOutput:
     # Fallback represents low signal from the planner: triggers V3.2 second-hop eligibility.
+    # Phase 1.875: enriched fields explicitly defaulted (Pydantic defaults
+    # would suffice but stamping them keeps the fallback shape unambiguous).
     return PlannerOutput(
         strategy="Direct retrieval fallback",
         queries=[TypedQuery(text=query, intent=QueryIntent.PRIMARY)],
         confidence="low",
+        time_sensitivity="static",
+        expected_source_types=[],
+        difficulty="medium",
+        ambiguity_flag=False,
+        success_criteria=[],
     )
 
 
@@ -82,23 +174,222 @@ def parse_planner_output(raw: str, query: str) -> PlannerOutput:
     strategy = (data.get("strategy") or "").strip() or "Direct retrieval fallback"
     confidence_raw = (data.get("confidence") or "").strip().lower()
     confidence = confidence_raw if confidence_raw in {"low", "medium", "high"} else "medium"
-    return PlannerOutput(strategy=strategy, queries=typed[:4], confidence=confidence)  # type: ignore[arg-type]
+
+    # Phase 1.875: enriched fields. Every parser branch must be
+    # never-raises — missing or malformed values fall back to defaults.
+    ts_raw = (data.get("time_sensitivity") or "").strip().lower()
+    time_sensitivity = ts_raw if ts_raw in {"live", "recent", "static"} else "static"
+
+    diff_raw = (data.get("difficulty") or "").strip().lower()
+    difficulty = diff_raw if diff_raw in {"easy", "medium", "hard"} else "medium"
+
+    src_raw = data.get("expected_source_types") or []
+    expected_source_types: list[str] = []
+    if isinstance(src_raw, list):
+        for s in src_raw:
+            if isinstance(s, str) and s.strip().lower() in _VALID_SOURCE_TYPES:
+                expected_source_types.append(s.strip().lower())
+
+    amb_raw = data.get("ambiguity_flag")
+    ambiguity_flag = bool(amb_raw) if isinstance(amb_raw, bool) else False
+
+    # Audit M3: success_criteria gets injected verbatim into the synthesizer
+    # prompt. Strip control characters (incl. newlines) to prevent prompt-
+    # format injection where a malicious item could fake new prompt sections.
+    # Cap to 200 chars per item and 5 items total (matches the prompt's
+    # implicit budget).
+    crit_raw = data.get("success_criteria") or []
+    success_criteria: list[str] = []
+    if isinstance(crit_raw, list):
+        _ctrl_re = _CTRL_CHAR_RE
+        for c in crit_raw:
+            if isinstance(c, str) and c.strip():
+                cleaned = _ctrl_re.sub("", c).strip()[:200]
+                if cleaned:
+                    success_criteria.append(cleaned)
+        success_criteria = success_criteria[:5]
+
+    try:
+        return PlannerOutput(
+            strategy=strategy,
+            queries=typed[:4],
+            confidence=confidence,  # type: ignore[arg-type]
+            time_sensitivity=time_sensitivity,  # type: ignore[arg-type]
+            expected_source_types=expected_source_types,  # type: ignore[arg-type]
+            difficulty=difficulty,  # type: ignore[arg-type]
+            ambiguity_flag=ambiguity_flag,
+            success_criteria=success_criteria,
+        )
+    except Exception:
+        # Never raise from the parser — defaults always win.
+        return PlannerOutput(
+            strategy=strategy,
+            queries=typed[:4],
+            confidence=confidence,  # type: ignore[arg-type]
+        )
+
+
+_CEREBRAS_AVAILABLE_MODELS_HINT = (
+    "llama3.1-8b, qwen-3-235b-a22b-instruct-2507, zai-glm-4.7, gpt-oss-120b"
+)
+
+
+def _warn_cerebras_404_if_relevant(exc: Exception, model: str) -> None:
+    """If exc looks like a Cerebras 404 (model not found), log a clear hint.
+
+    Cerebras gates models per-account, so the default we ship may not be on
+    every key. Surface the working models from CLAUDE.md inline rather than
+    making operators dig through cloud.cerebras.ai/models.
+    """
+    status = getattr(exc, "status_code", None) or getattr(getattr(exc, "response", None), "status_code", None)
+    msg = str(exc).lower()
+    if status == 404 or "does not exist" in msg or "do not have access" in msg:
+        logger.warning(
+            "Cerebras model '%s' not available on this account. "
+            "Try CEREBRAS_MODEL=llama3.1-8b or check cloud.cerebras.ai/models. "
+            "Known-good options: %s",
+            model, _CEREBRAS_AVAILABLE_MODELS_HINT,
+        )
+
+
+async def _plan_with_cerebras(prompt: str) -> str:
+    """Cerebras-backed planner call. Returns the raw text response.
+
+    8K-context cap is enforced upstream by the caller checking prompt length.
+    5-second timeout — the planner is on the critical path, so we'd rather
+    fall back to Groq than wait.
+
+    Default model is ``llama3.1-8b`` — small, fast, and broadly available on
+    free Cerebras accounts. Set ``CEREBRAS_MODEL`` to override (e.g.
+    ``qwen-3-235b-a22b-instruct-2507``, ``zai-glm-4.7``, ``gpt-oss-120b``).
+    """
+    from openai import AsyncOpenAI
+    api_key = os.environ.get("CEREBRAS_API_KEY", "")
+    if not api_key:
+        raise RuntimeError("CEREBRAS_API_KEY not set")
+    client = AsyncOpenAI(
+        api_key=api_key,
+        base_url=os.environ.get("CEREBRAS_BASE_URL", "https://api.cerebras.ai/v1"),
+        timeout=5.0,
+    )
+    model = os.environ.get("CEREBRAS_MODEL", "llama3.1-8b")
+    try:
+        resp = await client.chat.completions.create(
+            model=model,
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=200,
+            temperature=0.3,
+        )
+    except Exception as e:
+        _warn_cerebras_404_if_relevant(e, model)
+        raise
+    return (resp.choices[0].message.content or "").strip()
+
+
+async def _plan_with_gemini_structured(prompt: str) -> str:
+    """Gemini structured-output planner. Uses response_mime_type=application/json
+    with the ``PlannerOutput`` Pydantic schema. Opt-in via ``PLANNER_PROVIDER=gemini``."""
+    from google import genai
+    from google.genai import types
+
+    api_key = os.environ.get("GEMINI_API_KEY", "")
+    if not api_key:
+        raise RuntimeError("GEMINI_API_KEY not set")
+    client = genai.Client(api_key=api_key)
+    config = types.GenerateContentConfig(
+        response_mime_type="application/json",
+        response_schema=PlannerOutput,
+        max_output_tokens=600,
+        temperature=0.3,
+    )
+    resp = await client.aio.models.generate_content(
+        model=os.environ.get("GEMINI_MODEL", "gemini-2.5-flash"),
+        contents=prompt,
+        config=config,
+    )
+    return (resp.text or "").strip()
 
 
 @breaker("groq")
-@retry(wait=wait_exponential(multiplier=1, min=2, max=10), stop=stop_after_attempt(3), reraise=True)
-async def plan(query: str, prior_summary: str = "No prior context.") -> PlannerOutput:
-    """Generate strategy + search queries via Groq."""
+@retry(wait=wait_retry_after_or_exponential(min=2, max=30), stop=stop_after_attempt(3), reraise=True)
+async def _plan_with_groq(prompt: str) -> str:
+    """Groq-backed planner call. Returns the raw text response."""
     import groq as groq_sdk
-    client = groq_sdk.AsyncGroq(api_key=os.environ["GROQ_API_KEY"])
+    key = _GROQ_ROTATOR.next_key()
+    if not key:
+        raise RuntimeError("No GROQ_API_KEY / GROQ_API_KEYS configured")
+    client = groq_sdk.AsyncGroq(api_key=key)
+    try:
+        resp = await client.chat.completions.create(
+            model=_GROQ_MODEL,
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=200,
+            temperature=0.3,
+        )
+    except groq_sdk.RateLimitError as e:
+        _GROQ_ROTATOR.mark_throttled(key, retry_after_s=_extract_retry_after_s(e))
+        raise
+    _GROQ_ROTATOR.mark_success(key)
+    return (resp.choices[0].message.content or "").strip()
+
+
+async def plan(query: str, prior_summary: str = "No prior context.") -> PlannerOutput:
+    """Generate strategy + search queries.
+
+    Provider selection (PLANNER_PROVIDER env, default ``auto``):
+      - ``auto``: Cerebras when key present + prompt fits in ~6K tokens, else Groq.
+      - ``cerebras``: force Cerebras (errors fall back to Groq).
+      - ``groq``: force Groq.
+      - ``gemini``: Gemini structured-output mode (opt-in, errors fall back to Groq).
+
+    The selected provider is stamped into ``_LAST_PLANNER_PROVIDER`` so the
+    orchestrator can record ``run_metadata["planner_provider"]``.
+    Never raises — degrades to the fallback parser on any error.
+    """
     prompt = PLANNING_PROMPT_TEMPLATE.format(query=query, prior_summary=prior_summary)
-    resp = await client.chat.completions.create(
-        model=_GROQ_MODEL,
-        messages=[{"role": "user", "content": prompt}],
-        max_tokens=200,
-        temperature=0.3,
-    )
-    raw = resp.choices[0].message.content.strip()
+    pref = os.environ.get("PLANNER_PROVIDER", "auto").lower().strip()
+
+    raw: str | None = None
+    chosen: str = "groq"
+
+    # ── Try Cerebras (auto or forced) ─────────────────────────────────────
+    if pref in ("auto", "cerebras") and os.environ.get("CEREBRAS_API_KEY"):
+        from utils.token_counter import count_tokens
+        # 8K cap minus 2K headroom for system + output = 6K usable prompt.
+        if count_tokens(prompt) <= 6000:
+            try:
+                raw = await _plan_with_cerebras(prompt)
+                chosen = "cerebras"
+            except Exception as e:
+                logger.warning("[planner] Cerebras failed (%s), falling back to Groq", e)
+                raw = None
+
+    # ── Try Gemini structured-output mode (opt-in only) ───────────────────
+    if raw is None and pref == "gemini" and os.environ.get("GEMINI_API_KEY"):
+        try:
+            raw = await _plan_with_gemini_structured(prompt)
+            chosen = "gemini"
+        except Exception as e:
+            logger.warning("[planner] Gemini structured failed (%s), falling back to Groq", e)
+            raw = None
+
+    # ── Fall back to Groq (default + forced + final fallback) ─────────────
+    if raw is None:
+        try:
+            raw = await _plan_with_groq(prompt)
+            # ``chosen`` stays "groq" unless Cerebras/Gemini succeeded above.
+            # If we got here after a Cerebras/Gemini attempt failed, mark as
+            # ``fallback`` to surface the degradation in run_metadata.
+            chosen = "fallback" if (
+                pref in ("cerebras", "gemini")
+                or (pref == "auto" and os.environ.get("CEREBRAS_API_KEY"))
+            ) and chosen == "groq" else "groq"
+        except Exception as e:
+            logger.error("[planner] Groq also failed (%s); using deterministic fallback", e)
+            _LAST_PLANNER_PROVIDER_VAR.set("fallback")
+            return _fallback_planner(query)
+
+    _LAST_PLANNER_PROVIDER_VAR.set(chosen)
     parsed = parse_planner_output(raw, query)
     if parsed.strategy == "Direct retrieval fallback":
         logger.warning("Plan parse failed, using fallback. Raw output: %s", raw)
@@ -106,21 +397,65 @@ async def plan(query: str, prior_summary: str = "No prior context.") -> PlannerO
 
 
 @breaker("groq")
-@retry(wait=wait_exponential(multiplier=1, min=2, max=10), stop=stop_after_attempt(3), reraise=True)
+@retry(wait=wait_retry_after_or_exponential(min=2, max=30), stop=stop_after_attempt(3), reraise=True)
 async def call_groq(prompt: str, max_tokens: int = 200) -> str:
     """Generic Groq call for conflict detection, rolling summary, etc."""
     import groq as groq_sdk
-    client = groq_sdk.AsyncGroq(api_key=os.environ["GROQ_API_KEY"])
-    resp = await client.chat.completions.create(
-        model=_GROQ_MODEL,
-        messages=[{"role": "user", "content": prompt}],
-        max_tokens=max_tokens,
-        temperature=0.1,
+    key = _GROQ_ROTATOR.next_key()
+    if not key:
+        raise RuntimeError("No GROQ_API_KEY / GROQ_API_KEYS configured")
+    client = groq_sdk.AsyncGroq(api_key=key)
+    try:
+        resp = await client.chat.completions.create(
+            model=_GROQ_MODEL,
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=max_tokens,
+            temperature=0.1,
+        )
+    except groq_sdk.RateLimitError as e:
+        _GROQ_ROTATOR.mark_throttled(key, retry_after_s=_extract_retry_after_s(e))
+        raise
+    _GROQ_ROTATOR.mark_success(key)
+    from utils import provider_usage
+    usage = getattr(resp, "usage", None)
+    await provider_usage.record(
+        "groq",
+        prompt_tokens=getattr(usage, "prompt_tokens", 0) or 0,
+        completion_tokens=getattr(usage, "completion_tokens", 0) or 0,
     )
     return resp.choices[0].message.content.strip()
 
 
-def _build_disagreement_block(conflict_result) -> str:
+async def call_cerebras(prompt: str, max_tokens: int = 200) -> str:
+    """Generic Cerebras call for short-prompt tasks (conflict probe, follow-up gen).
+
+    8K context cap upstream; callers should verify prompt length. Raises on
+    missing key or API failure — caller falls back to Groq.
+    """
+    from openai import AsyncOpenAI
+    api_key = os.environ.get("CEREBRAS_API_KEY", "")
+    if not api_key:
+        raise RuntimeError("CEREBRAS_API_KEY not set")
+    client = AsyncOpenAI(
+        api_key=api_key,
+        base_url=os.environ.get("CEREBRAS_BASE_URL", "https://api.cerebras.ai/v1"),
+        timeout=10.0,
+    )
+    model = os.environ.get("CEREBRAS_MODEL", "llama3.1-8b")
+    try:
+        resp = await client.chat.completions.create(
+            model=model,
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=max_tokens,
+            temperature=0.1,
+        )
+    except Exception as e:
+        _warn_cerebras_404_if_relevant(e, model)
+        raise
+    return (resp.choices[0].message.content or "").strip()
+
+
+def _build_disagreement_block(conflict_result: object | None) -> str:
     """V2.2: enumerate non-temporal contradictions for the synthesizer."""
     if conflict_result is None or not conflict_result.has_conflict:
         return ""
@@ -181,49 +516,82 @@ Research question: {query}
 
 Answer the research question using only the documents above. Cite every factual claim with [doc_N]."""
 
-    provider = os.environ.get("SYNTH_PROVIDER", "gemini").lower()
+    # V3.9: ordered fallback chain. The first entry is determined by
+    # SYNTH_PROVIDER; the rest are tried in order on 429 / breaker-open /
+    # context-overflow / connection-refused. Each step is independent:
+    # failure of one provider doesn't prevent the next from being tried.
+    primary = os.environ.get("SYNTH_PROVIDER", "gemini").lower()
+    chain_order = {
+        "gemini":     ["gemini", "sarvam", "openrouter", "cerebras", "ollama"],
+        "sarvam":     ["sarvam", "gemini", "openrouter", "cerebras", "ollama"],
+        "openrouter": ["openrouter", "gemini", "sarvam", "cerebras", "ollama"],
+        "cerebras":   ["cerebras", "gemini", "sarvam", "openrouter", "ollama"],
+        "ollama":     ["ollama", "gemini", "sarvam", "openrouter", "cerebras"],
+    }
+    chain = chain_order.get(primary, ["gemini", "sarvam", "openrouter", "cerebras", "ollama"])
 
-    if provider == "sarvam":
-        try:
-            async for chunk in _synthesize_sarvam(user_prompt):
-                yield chunk
-            return
-        except CircuitOpenError as e:
-            logger.warning("Sarvam breaker open, falling back to OpenRouter: %s", e)
-        except Exception as e:
-            openrouter_key = os.environ.get("OPENROUTER_API_KEY", "")
-            if not openrouter_key:
-                raise
-            logger.warning("Sarvam failed, falling back to OpenRouter: %s", e)
-    elif provider == "openrouter":
-        async for chunk in _synthesize_openrouter(user_prompt):
-            yield chunk
-        return
-    else:
-        try:
-            async for chunk in _synthesize_gemini(user_prompt):
-                yield chunk
-            return
-        except CircuitOpenError as e:
-            logger.warning("Gemini breaker open, falling back to OpenRouter: %s", e)
-        except Exception as e:
-            openrouter_key = os.environ.get("OPENROUTER_API_KEY", "")
-            if not openrouter_key:
-                raise
-            logger.warning("Gemini failed, falling back to OpenRouter: %s", e)
+    # ── Indic auto-routing: Sarvam first when query script is Indic ───────
+    # The assignment dataset is multilingual; Sarvam's models (sarvam-m,
+    # sarvam-30b) are tuned for Indic languages. Whenever a Devanagari / Tamil
+    # / Bengali query arrives AND SARVAM_API_KEY is configured AND the auto-
+    # routing flag is on (default), promote Sarvam to the head of the chain.
+    indic_auto = os.environ.get("SARVAM_INDIC_AUTO", "1").strip() not in {"0", "false", "False", ""}
+    if (
+        indic_auto
+        and os.environ.get("SARVAM_API_KEY")
+        and _detect_query_script(query) == "indic"
+    ):
+        chain = ["sarvam", "gemini", "openrouter", "cerebras", "ollama"]
+        logger.info("Sarvam-primary routing for Indic query")
 
-    # Fallback path: OpenRouter
-    try:
-        async for chunk in _synthesize_openrouter(user_prompt):
-            yield chunk
-    except CircuitOpenError:
-        logger.error("All synthesis providers' breakers are open; returning error string")
-        yield (
-            "[Synthesis temporarily unavailable: all synthesis providers are "
-            "currently rate-limited. Please retry in a few seconds.]",
-            0,
-            0,
-        )
+    # Stamp the chain so the orchestrator can record it in run_metadata.
+    _LAST_SYNTH_CHAIN_VAR.set(list(chain))
+    synth_fns = {
+        "gemini":     _synthesize_gemini,
+        "sarvam":     _synthesize_sarvam,
+        "openrouter": _synthesize_openrouter,
+        "cerebras":   _synthesize_cerebras,
+        "ollama":     _synthesize_ollama,
+    }
+
+    last_err: Exception | None = None
+    for step, name in enumerate(chain):
+        fn = synth_fns[name]
+        # Pre-flight: skip providers with no key configured (except ollama which
+        # uses a placeholder key and gates on connection reachability instead).
+        key_env = {
+            "gemini": "GEMINI_API_KEY",
+            "sarvam": "SARVAM_API_KEY",
+            "openrouter": "OPENROUTER_API_KEY",
+            "cerebras": "CEREBRAS_API_KEY",
+            "ollama": None,
+        }[name]
+        if key_env is not None and not os.environ.get(key_env):
+            logger.debug("Skipping %s: %s not set", name, key_env)
+            continue
+        try:
+            yielded_any = False
+            async for chunk in fn(user_prompt):
+                yielded_any = True
+                yield chunk
+            if yielded_any:
+                if step > 0:
+                    logger.info("[synth] fallback succeeded: provider=%s (step %d)", name, step)
+                return
+        except CircuitOpenError as e:
+            last_err = e
+            logger.warning("[synth] %s breaker open, trying next: %s", name, e)
+        except Exception as e:
+            last_err = e
+            logger.warning("[synth] %s failed (%s), trying next: %s", name, type(e).__name__, e)
+
+    logger.error("[synth] all providers exhausted; last error: %s", last_err)
+    yield (
+        "[Synthesis temporarily unavailable: all configured providers are "
+        "currently rate-limited or unreachable. Please retry in a few seconds.]",
+        0,
+        0,
+    )
 
 
 @breaker("gemini")
@@ -264,6 +632,12 @@ async def _synthesize_gemini(user_prompt: str) -> AsyncIterator[tuple[str, int, 
                     prompt_tokens = response.usage_metadata.prompt_token_count or 0
                     completion_tokens = response.usage_metadata.candidates_token_count or 0
             # Final sentinel with token counts
+            from utils import provider_usage
+            await provider_usage.record(
+                "gemini",
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+            )
             yield ("", prompt_tokens, completion_tokens)
             return
         except Exception as e:
@@ -276,6 +650,102 @@ async def _synthesize_gemini(user_prompt: str) -> AsyncIterator[tuple[str, int, 
     if last_err is not None:
         raise last_err
     raise RuntimeError("No Gemini model candidates available")
+
+
+@breaker("cerebras")
+async def _synthesize_cerebras(user_prompt: str) -> AsyncIterator[tuple[str, int, int]]:
+    """Cerebras Cloud — extremely fast Llama inference (~2000 tokens/s).
+
+    Important caveat (per CLAUDE.md): Cerebras has an 8K context cap. Our
+    synthesis budget can be up to 12K (system + history + web context).
+    For prompts that exceed 8K we silently fall through to the next provider
+    in the chain by raising — the caller's auto-promote logic will pick up
+    the next viable synthesizer.
+
+    Useful when: (a) Gemini and OpenRouter are both 429/breaker-open, (b) the
+    prompt actually fits in 8K (short queries with minimal history). Otherwise
+    a no-op fallback that yields to the next provider.
+    """
+    from utils.token_counter import count_tokens
+    if count_tokens(user_prompt) + 1500 > 7800:  # leave headroom for system + output
+        raise RuntimeError("Cerebras 8K context cap exceeded; skipping to next provider")
+    from openai import AsyncOpenAI
+    client = AsyncOpenAI(
+        api_key=os.environ.get("CEREBRAS_API_KEY", ""),
+        base_url=os.environ.get("CEREBRAS_BASE_URL", "https://api.cerebras.ai/v1"),
+        timeout=60.0,
+    )
+    if not client.api_key:
+        raise RuntimeError("CEREBRAS_API_KEY not set")
+    model = os.environ.get("CEREBRAS_MODEL", "llama3.1-8b")
+    messages = [
+        {"role": "system", "content": SYNTHESIS_SYSTEM_PROMPT},
+        {"role": "user", "content": user_prompt},
+    ]
+    try:
+        resp = await client.chat.completions.create(
+            model=model, messages=messages, max_tokens=1500, stream=True,
+        )
+    except Exception as e:
+        _warn_cerebras_404_if_relevant(e, model)
+        raise
+    prompt_tokens = 0
+    completion_tokens = 0
+    async for chunk in resp:
+        delta = chunk.choices[0].delta.content if chunk.choices else None
+        if delta:
+            yield (delta, 0, 0)
+        if hasattr(chunk, "usage") and chunk.usage:
+            prompt_tokens = chunk.usage.prompt_tokens or 0
+            completion_tokens = chunk.usage.completion_tokens or 0
+    from utils import provider_usage
+    await provider_usage.record(
+        "cerebras", prompt_tokens=prompt_tokens, completion_tokens=completion_tokens,
+    )
+    yield ("", prompt_tokens, completion_tokens)
+
+
+@breaker("ollama")
+async def _synthesize_ollama(user_prompt: str) -> AsyncIterator[tuple[str, int, int]]:
+    """Ollama — local OpenAI-compatible inference server.
+
+    Designed for the "all cloud providers are exhausted" fallback. Default
+    model is `llama3.1:8b` which is small enough to run on a typical laptop
+    but produces respectable synthesis. The base URL defaults to
+    http://localhost:11434/v1, which works whenever Ollama is running
+    locally; on HF Spaces this won't connect (no Ollama process), which is
+    fine — the next provider in the chain will be tried instead.
+
+    No quota tracking. By definition unlimited (your machine's RAM is the limit).
+    """
+    from openai import AsyncOpenAI
+    client = AsyncOpenAI(
+        api_key="ollama",  # Ollama ignores the key; required by the SDK
+        base_url=os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434/v1"),
+        timeout=120.0,
+    )
+    model = os.environ.get("OLLAMA_MODEL", "llama3.1:8b")
+    messages = [
+        {"role": "system", "content": SYNTHESIS_SYSTEM_PROMPT},
+        {"role": "user", "content": user_prompt},
+    ]
+    resp = await client.chat.completions.create(
+        model=model, messages=messages, max_tokens=1500, stream=True,
+    )
+    prompt_tokens = 0
+    completion_tokens = 0
+    async for chunk in resp:
+        delta = chunk.choices[0].delta.content if chunk.choices else None
+        if delta:
+            yield (delta, 0, 0)
+        if hasattr(chunk, "usage") and chunk.usage:
+            prompt_tokens = chunk.usage.prompt_tokens or 0
+            completion_tokens = chunk.usage.completion_tokens or 0
+    from utils import provider_usage
+    await provider_usage.record(
+        "ollama", prompt_tokens=prompt_tokens, completion_tokens=completion_tokens,
+    )
+    yield ("", prompt_tokens, completion_tokens)
 
 
 @breaker("openrouter")
@@ -369,32 +839,176 @@ async def _synthesize_sarvam(user_prompt: str) -> AsyncIterator[tuple[str, int, 
         yield chunk
 
 
-@breaker("github_models")
-@retry(wait=wait_exponential(multiplier=1, min=2, max=10), stop=stop_after_attempt(3), reraise=True)
+_JUDGE_PROVIDERS = {
+    "groq": {
+        "base_url": "https://api.groq.com/openai/v1",
+        "api_key_env": "GROQ_API_KEY",
+        "default_model": "llama-3.3-70b-versatile",
+    },
+    "github": {
+        "base_url": "https://models.inference.ai.azure.com",
+        "api_key_env": "GITHUB_TOKEN",
+        "default_model": "gpt-4o-mini",
+    },
+}
+
+
+@breaker("judge")
+@retry(wait=wait_retry_after_or_exponential(min=2, max=30), stop=stop_after_attempt(3), reraise=True)
 async def judge(prompt: str) -> str:
-    """GitHub Models GPT-4o-mini for eval judging. Different family from generator."""
+    """LLM judge for eval scoring.
+
+    Provider is selected by JUDGE_PROVIDER env var (default 'groq'). The judge
+    *must* be a different model family from the synthesis generator to avoid
+    self-preference bias. Defaults: synth=Gemini, judge=Groq Llama — cross-family.
+    If you set SYNTH_PROVIDER=sarvam (also Llama-based), switch JUDGE_PROVIDER
+    to 'github' (GPT-4o-mini) to preserve the invariant.
+    """
     from openai import AsyncOpenAI
 
+    provider = os.environ.get("JUDGE_PROVIDER", "groq").lower()
+    cfg = _JUDGE_PROVIDERS.get(provider) or _JUDGE_PROVIDERS["groq"]
+    model = os.environ.get("JUDGE_MODEL", cfg["default_model"])
+
+    # Groq judges pull from the multi-key rotator so the same key pool covers
+    # planner + conflict + judge calls and shares throttle state.
+    is_groq = provider == "groq"
+    api_key: str | None = None
+    if is_groq:
+        api_key = _GROQ_ROTATOR.next_key()
+        if not api_key:
+            raise RuntimeError("No GROQ_API_KEY / GROQ_API_KEYS configured")
+    else:
+        api_key = os.environ[cfg["api_key_env"]]
+
     client = AsyncOpenAI(
-        api_key=os.environ["GITHUB_TOKEN"],
-        base_url="https://models.inference.ai.azure.com",
+        api_key=api_key,
+        base_url=cfg["base_url"],
         timeout=60.0,
     )
+    try:
+        resp = await client.chat.completions.create(
+            model=model,
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=400,
+            temperature=0.0,
+        )
+    except Exception as e:
+        # OpenAI SDK surfaces 429 as openai.RateLimitError; we treat anything
+        # with .status_code == 429 as a throttle to stay SDK-version-tolerant.
+        if is_groq and api_key:
+            status = getattr(e, "status_code", None) or getattr(
+                getattr(e, "response", None), "status_code", None
+            )
+            if status == 429:
+                _GROQ_ROTATOR.mark_throttled(
+                    api_key, retry_after_s=_extract_retry_after_s(e)
+                )
+        raise
+    if is_groq and api_key:
+        _GROQ_ROTATOR.mark_success(api_key)
+    return resp.choices[0].message.content.strip()
+
+
+async def _claim_verify_with_deepseek(claim: str, snippet: str) -> str:
+    """Verify a single claim against an evidence snippet via DeepSeek R1 (OpenRouter).
+
+    Returns the raw text content. The caller parses JSON downstream.
+
+    CRITICAL: DeepSeek R1 returns chain-of-thought in a separate ``reasoning_content``
+    field on the message. We deliberately use ONLY ``message.content`` (the
+    final answer), never ``reasoning_content`` — to keep CoT out of the SSE
+    pipeline and out of the parsed JSON output.
+    """
+    from openai import AsyncOpenAI
+
+    api_key = os.environ.get("OPENROUTER_API_KEY", "")
+    if not api_key:
+        raise RuntimeError("OPENROUTER_API_KEY not set")
+    client = AsyncOpenAI(
+        api_key=api_key,
+        base_url="https://openrouter.ai/api/v1",
+        timeout=20.0,
+    )
+    prompt = (
+        f"CLAIM: {claim}\n"
+        f"EVIDENCE SNIPPET: {snippet[:1500]}\n"
+        "Does the snippet explicitly support this exact claim "
+        "(entities, numbers, dates must match)?\n"
+        'JSON only: {"supported": bool, "reasoning": str}'
+    )
     resp = await client.chat.completions.create(
-        model=_GITHUB_MODEL,
+        model=_OPENROUTER_MODEL,
         messages=[{"role": "user", "content": prompt}],
         max_tokens=400,
         temperature=0.0,
     )
-    return resp.choices[0].message.content.strip()
+    # NOTE: do NOT read ``reasoning_content`` — that's DeepSeek R1's chain of
+    # thought. The visible final answer lives in ``message.content``.
+    msg = resp.choices[0].message
+    return (getattr(msg, "content", "") or "").strip()
 
 
 async def rolling_summary(turns_text: str) -> str:
-    """Compress old turns into a rolling summary via Groq."""
-    prompt = f"""Summarize the following research conversation into a concise paragraph.
-Preserve all key facts, entities, and conclusions. Do not add any information not present.
+    """Compress old turns into a rolling summary via Groq.
+
+    Phase 1.75: tightened prompt requires structured preservation of
+    (a) named entities, (b) dates, (c) decisions, (d) source contradictions.
+    """
+    prompt = f"""Summarize the following research conversation.
+
+Preserve: (a) named entities, (b) dates, (c) decisions made,
+(d) any contradictions noted between sources.
+
+Output as 2-3 short paragraphs (<= 50 words each) separated by '---'.
+Do not add any information not present in the conversation.
 
 {turns_text}
 
 Summary:"""
     return await call_groq(prompt, max_tokens=300)
+
+
+async def compress_history(
+    existing_summary: str,
+    remaining_turns: list,
+    max_tokens: int,
+) -> str:
+    """Second-pass summary-of-summaries.
+
+    Phase 1.75: called when even the rolling-summary + most-recent-turn
+    history still overflows ``ContextBudget.history_budget``. Compresses
+    ``existing_summary`` plus ``remaining_turns`` into at most ``max_tokens``
+    cl100k tokens while preserving structured signal.
+
+    Falls back to hard truncation if the Groq call fails. Never raises.
+    """
+    from utils.token_counter import count_tokens, truncate_to_tokens
+
+    turns_text = "\n\n".join(
+        f"Q: {getattr(t, 'query', '')}\nA: {getattr(t, 'response', '') or ''}"
+        for t in (remaining_turns or [])
+    )
+    combined = f"[Earlier summary]\n{existing_summary}\n\n[Recent turns]\n{turns_text}".strip()
+
+    prompt = (
+        f"Compress the following research session history into <= {max_tokens} tokens "
+        "while preserving: (a) named entities, (b) dates, (c) decisions made, "
+        "(d) any contradictions noted between sources.\n"
+        "Output as 2-3 short paragraphs separated by '---'.\n\n"
+        f"{combined}\n\nCompressed history:"
+    )
+
+    try:
+        compressed = await call_groq(prompt, max_tokens=max(64, max_tokens))
+        if compressed and count_tokens(compressed) <= max_tokens:
+            return compressed
+        # Model returned but overshot the budget: precision-truncate.
+        return truncate_to_tokens(compressed or combined, max_tokens)
+    except Exception as e:
+        logger.warning(
+            "compress_history Groq call failed, hard-truncating: %s",
+            e,
+            extra={"component": "provider_router"},
+        )
+        return truncate_to_tokens(combined, max_tokens)

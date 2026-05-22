@@ -22,9 +22,9 @@ const STATUS_BADGE: Record<string, string> = {
 };
 
 const METHOD_BADGE: Record<string, string> = {
-  deterministic: "bg-zinc-900 text-muted-foreground border-border",
+  deterministic: "bg-surface text-muted-foreground border-border",
   llm: "bg-blue-950/40 text-blue-300 border-blue-900/40",
-  skip: "bg-zinc-900 text-subtle-foreground border-border",
+  skip: "bg-surface text-subtle-foreground border-border",
 };
 
 export function ClaimsTable({ rows }: ClaimsTableProps) {
@@ -139,7 +139,7 @@ export function ClaimsTable({ rows }: ClaimsTableProps) {
               <span
                 className={cn(
                   "inline-block font-mono text-[10px] uppercase tracking-[0.10em] px-1.5 py-0.5 rounded-[3px] border",
-                  STATUS_BADGE[r.status] ?? "bg-zinc-900 text-muted-foreground border-border",
+                  STATUS_BADGE[r.status] ?? "bg-surface text-muted-foreground border-border",
                 )}
               >
                 {r.status}

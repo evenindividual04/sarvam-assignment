@@ -1,6 +1,6 @@
 "use client";
 
-import { use, useEffect, useState } from "react";
+import { use, useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { getQuestionDetail } from "@/lib/api";
 import type { EvalQuestionDetail } from "@/lib/types";
@@ -39,18 +39,18 @@ export default function QuestionDetailPage({ params }: PageProps) {
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
 
-  useEffect(() => {
-    let alive = true;
-    // eslint-disable-next-line react-hooks/set-state-in-effect
+  const load = useCallback(() => {
     setLoading(true);
+    setErr(null);
     getQuestionDetail(decodedRunAt, decodedQuestionId)
-      .then((d) => alive && setDetail(d))
-      .catch((e) => alive && setErr(e instanceof Error ? e.message : "error"))
-      .finally(() => alive && setLoading(false));
-    return () => {
-      alive = false;
-    };
+      .then((d) => setDetail(d))
+      .catch((e) => setErr(e instanceof Error ? e.message : "error"))
+      .finally(() => setLoading(false));
   }, [decodedRunAt, decodedQuestionId]);
+
+  useEffect(() => {
+    load();
+  }, [load]);
 
   return (
     <div className="px-8 md:px-12 py-12 max-w-[1024px] mx-auto w-full">
@@ -128,6 +128,9 @@ export default function QuestionDetailPage({ params }: PageProps) {
               )}
             </span>
           </div>
+
+          {/* Tier A (Phase 1+): routing decisions surfaced from run_metadata */}
+          <RoutingDecisions detail={detail} />
 
           {/* Tabs — text-based underline */}
           <Tabs defaultValue="answer">
@@ -275,6 +278,59 @@ export default function QuestionDetailPage({ params }: PageProps) {
   );
 }
 
+/**
+ * Tier A (Phase 1+): six-field card showing the actual routing decisions
+ * the orchestrator made — which planner provider was used, which
+ * synthesis/reranker provider chain ran, which terminator fired, and how
+ * language was detected. Renders "—" for any field missing (older rows).
+ */
+function RoutingDecisions({ detail }: { detail: EvalQuestionDetail }) {
+  const items: { label: string; value: string | null | undefined }[] = [
+    { label: "Planner provider", value: detail.planner_provider ?? null },
+    { label: "Reranker used", value: detail.reranker_used ?? null },
+    { label: "Terminator fired", value: detail.terminator_fired ?? null },
+    { label: "Language method", value: detail.language_method ?? null },
+    {
+      label: "Quote grounding",
+      value:
+        detail.quote_grounding_ratio === null ||
+        detail.quote_grounding_ratio === undefined
+          ? null
+          : detail.quote_grounding_ratio.toFixed(2),
+    },
+    {
+      label: "Numeric grounding",
+      value:
+        detail.numeric_grounding_ratio === null ||
+        detail.numeric_grounding_ratio === undefined
+          ? null
+          : detail.numeric_grounding_ratio.toFixed(2),
+    },
+  ];
+  if (items.every((it) => it.value === null || it.value === undefined)) {
+    return null;
+  }
+  return (
+    <div className="mb-10 border border-border rounded-[6px] bg-surface p-5">
+      <div className="font-mono text-[10px] uppercase tracking-[0.18em] text-muted-foreground mb-4">
+        Routing decisions
+      </div>
+      <div className="grid grid-cols-2 sm:grid-cols-3 gap-x-6 gap-y-3">
+        {items.map((it) => (
+          <div key={it.label}>
+            <div className="font-mono text-[10px] uppercase tracking-[0.12em] text-subtle-foreground">
+              {it.label}
+            </div>
+            <div className="font-mono tabular-nums text-[13px] text-foreground mt-1">
+              {it.value === null || it.value === undefined ? "—" : it.value}
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function Stat({ label, value }: { label: string; value: string }) {
   return (
     <div>
@@ -320,7 +376,7 @@ function tierLabel(domain: string): { tier: string; cls: string } {
     return { tier: "tier_3", cls: TIER_DOT.tier_3 };
   if (/\b(medium|substack|hackernews|news\.ycombinator)\b/.test(d))
     return { tier: "tier_4", cls: TIER_DOT.tier_4 };
-  return { tier: "unknown", cls: "bg-zinc-700" };
+  return { tier: "unknown", cls: "bg-[var(--surface-emphasis)]" };
 }
 
 function DocMapTable({

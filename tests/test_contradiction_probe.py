@@ -195,6 +195,116 @@ def test_synthesizer_receives_disagreement_block_only_when_non_temporal():
     assert _build_disagreement_block(no_conflict) == ""
 
 
+# ── Tier C: Cerebras-first routing ──────────────────────────────────────────
+
+
+def test_conflict_detection_uses_cerebras_when_available(monkeypatch):
+    """CEREBRAS_API_KEY set + auto → Cerebras tried first, Groq not called."""
+    monkeypatch.setenv("CEREBRAS_API_KEY", "test-key")
+    monkeypatch.setenv("CONFLICT_PROBE_PROVIDER", "auto")
+
+    payload = json.dumps({"has_conflict": False, "contradictions": []})
+
+    async def fake_cerebras(prompt: str, max_tokens: int = 200) -> str:
+        return payload
+
+    async def must_not_call_groq(prompt: str, max_tokens: int = 200) -> str:
+        raise AssertionError("Groq should not be invoked when Cerebras works")
+
+    monkeypatch.setattr(provider_router, "call_cerebras", fake_cerebras, raising=True)
+    monkeypatch.setattr(provider_router, "call_groq", must_not_call_groq, raising=True)
+
+    chunks = [
+        _mk_snippet("doc_1", "claim a"),
+        _mk_snippet("doc_2", "claim b"),
+    ]
+    from agent.context_engine import last_conflict_probe_provider
+
+    async def _run():
+        r = await probe_contradictions(chunks, "q")
+        return r, last_conflict_probe_provider()
+
+    result, prov = asyncio.run(_run())
+    assert result.has_conflict is False
+    assert prov == "cerebras"
+
+
+def test_conflict_detection_falls_back_to_groq_on_cerebras_error(monkeypatch):
+    """Cerebras raises → Groq is invoked + provider stamped as ``groq``."""
+    monkeypatch.setenv("CEREBRAS_API_KEY", "test-key")
+    monkeypatch.setenv("CONFLICT_PROBE_PROVIDER", "auto")
+
+    async def broken_cerebras(prompt: str, max_tokens: int = 200) -> str:
+        raise RuntimeError("cerebras down")
+
+    payload = json.dumps({"has_conflict": False, "contradictions": []})
+
+    async def fake_groq(prompt: str, max_tokens: int = 200) -> str:
+        return payload
+
+    monkeypatch.setattr(provider_router, "call_cerebras", broken_cerebras, raising=True)
+    monkeypatch.setattr(provider_router, "call_groq", fake_groq, raising=True)
+
+    chunks = [
+        _mk_snippet("doc_1", "a"),
+        _mk_snippet("doc_2", "b"),
+    ]
+    from agent.context_engine import last_conflict_probe_provider
+
+    async def _run():
+        r = await probe_contradictions(chunks, "q")
+        return r, last_conflict_probe_provider()
+
+    result, prov = asyncio.run(_run())
+    assert result.probe_skipped_reason is None
+    assert prov == "groq"
+
+
+def test_probe_provider_is_per_task_under_concurrent_gather(monkeypatch):
+    """Two concurrent probes (one picks Cerebras, one picks Groq) must each
+    see their OWN provider via the ContextVar. The old module-level global
+    would race: whichever setter ran last would win for *both* readers."""
+    from agent.context_engine import last_conflict_probe_provider
+
+    monkeypatch.setenv("CEREBRAS_API_KEY", "test-key")
+
+    no_conflict = json.dumps({"has_conflict": False, "contradictions": []})
+
+    async def cerebras_slow(prompt: str, max_tokens: int = 200) -> str:
+        await asyncio.sleep(0.05)  # let the other task's groq attempt race
+        return no_conflict
+
+    async def cerebras_raise(prompt: str, max_tokens: int = 200) -> str:
+        # Used by the groq-bound task. Force fallback into Groq.
+        raise RuntimeError("cerebras unavailable for this task")
+
+    async def groq_fast(prompt: str, max_tokens: int = 200) -> str:
+        return no_conflict
+
+    chunks = [_mk_snippet("doc_1", "a"), _mk_snippet("doc_2", "b")]
+
+    # We monkeypatch globally and switch behavior per-task using a flag in
+    # the prompt text (q-cere vs q-groq).
+    async def call_cerebras_dispatch(prompt: str, max_tokens: int = 200) -> str:
+        if "q-groq" in prompt:
+            return await cerebras_raise(prompt, max_tokens)
+        return await cerebras_slow(prompt, max_tokens)
+
+    monkeypatch.setattr(provider_router, "call_cerebras", call_cerebras_dispatch, raising=True)
+    monkeypatch.setattr(provider_router, "call_groq", groq_fast, raising=True)
+
+    async def _task(tag: str) -> str:
+        await probe_contradictions(chunks, tag)
+        return last_conflict_probe_provider()
+
+    async def _drive():
+        return await asyncio.gather(_task("q-cere"), _task("q-groq"))
+
+    cere_prov, groq_prov = asyncio.run(_drive())
+    assert cere_prov == "cerebras", f"expected cerebras, got {cere_prov}"
+    assert groq_prov == "groq", f"expected groq, got {groq_prov}"
+
+
 # ── 7. one row per turn persisted ───────────────────────────────────────────
 
 def test_probe_persists_row_per_turn(monkeypatch, tmp_path):

@@ -4,6 +4,7 @@ import "./globals.css";
 import { Toaster } from "@/components/ui/sonner";
 import { Sidebar } from "@/components/shell/sidebar";
 import { MobileNav } from "@/components/shell/mobile-nav";
+import { ThemeProvider } from "@/components/shell/theme-provider";
 
 const display = Instrument_Serif({
   subsets: ["latin"],
@@ -37,21 +38,26 @@ export default function RootLayout({
   return (
     <html
       lang="en"
-      className={`dark ${display.variable} ${sans.variable} ${mono.variable}`}
+      suppressHydrationWarning
+      className={`${display.variable} ${sans.variable} ${mono.variable}`}
     >
       <body className="bg-background text-foreground min-h-screen antialiased">
-        <div
-          aria-hidden
-          className="pointer-events-none fixed inset-0 -z-10 bg-[radial-gradient(ellipse_at_top,rgba(255,255,255,0.025),transparent_60%)]"
-        />
-        <div className="flex min-h-screen">
-          <Sidebar />
-          <div className="flex-1 flex flex-col min-w-0">
-            <MobileNav />
-            <main className="flex-1 flex flex-col min-w-0">{children}</main>
+        <ThemeProvider>
+          {/* Subtle radial vignette: bright glow in dark mode, soft dark glow in
+              light mode. Avoids the "flat wall of color" look in either theme. */}
+          <div
+            aria-hidden
+            className="pointer-events-none fixed inset-0 -z-10 bg-[radial-gradient(ellipse_at_top,rgba(0,0,0,0.025),transparent_60%)] dark:bg-[radial-gradient(ellipse_at_top,rgba(255,255,255,0.025),transparent_60%)]"
+          />
+          <div className="flex min-h-screen">
+            <Sidebar />
+            <div className="flex-1 flex flex-col min-w-0">
+              <MobileNav />
+              <main className="flex-1 flex flex-col min-w-0">{children}</main>
+            </div>
           </div>
-        </div>
-        <Toaster position="bottom-right" />
+          <Toaster position="bottom-right" />
+        </ThemeProvider>
       </body>
     </html>
   );

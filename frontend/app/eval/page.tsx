@@ -1,16 +1,29 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { listEvalRuns } from "@/lib/api";
+import { BACKEND } from "@/lib/api";
 import type { EvalRun } from "@/lib/types";
 import { MetricBar } from "@/components/chat/metric-bar";
+import { Button } from "@/components/ui/button";
+import { ErrorPanel } from "@/components/shell/error-panel";
+import { Skeleton } from "@/components/ui/skeleton";
 import { formatDateTime } from "@/lib/format";
+import { toast } from "sonner";
+
+type SmokeState =
+  | { status: "idle" }
+  | { status: "running"; elapsed: number; completed: number; total: number; label?: string }
+  | { status: "done"; runAt: string }
+  | { status: "error"; message: string };
 
 export default function EvalListPage() {
   const [runs, setRuns] = useState<EvalRun[]>([]);
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
+  const [smoke, setSmoke] = useState<SmokeState>({ status: "idle" });
+  const abortRef = useRef<AbortController | null>(null);
 
   const load = useCallback(() => {
     setLoading(true);
@@ -25,6 +38,81 @@ export default function EvalListPage() {
     // eslint-disable-next-line react-hooks/set-state-in-effect
     load();
   }, [load]);
+
+  const runSmoke = useCallback(async () => {
+    if (smoke.status === "running") return;
+    setSmoke({ status: "running", elapsed: 0, completed: 0, total: 8 });
+    const ac = new AbortController();
+    abortRef.current = ac;
+    try {
+      const res = await fetch(`${BACKEND}/eval/smoke`, {
+        method: "POST",
+        signal: ac.signal,
+      });
+      if (!res.ok || !res.body) {
+        const text = await res.text().catch(() => res.statusText);
+        throw new Error(text || res.statusText);
+      }
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const parts = buffer.split("\n\n");
+        buffer = parts.pop() ?? "";
+        for (const part of parts) {
+          const line = part.split("\n").find((l) => l.startsWith("data: "));
+          if (!line) continue;
+          let ev: { step: string; label?: string; data?: unknown };
+          try {
+            ev = JSON.parse(line.slice(6));
+          } catch {
+            continue;
+          }
+          if (ev.step === "start") {
+            const d = ev.data as { n_questions: number };
+            setSmoke({
+              status: "running",
+              elapsed: 0,
+              completed: 0,
+              total: d.n_questions,
+              label: "Starting",
+            });
+          } else if (ev.step === "progress") {
+            const d = ev.data as { completed: number; total: number; elapsed_s: number };
+            setSmoke({
+              status: "running",
+              elapsed: d.elapsed_s,
+              completed: d.completed,
+              total: d.total,
+              label: ev.label,
+            });
+          } else if (ev.step === "done") {
+            const d = ev.data as { run_at: string };
+            setSmoke({ status: "done", runAt: d.run_at });
+            toast.success("Smoke eval complete");
+            load();
+          } else if (ev.step === "error") {
+            setSmoke({
+              status: "error",
+              message: typeof ev.data === "string" ? ev.data : ev.label || "Smoke eval failed",
+            });
+            toast.error(typeof ev.data === "string" ? ev.data : "Smoke eval failed");
+          }
+        }
+      }
+    } catch (e: unknown) {
+      if (e instanceof DOMException && e.name === "AbortError") return;
+      setSmoke({
+        status: "error",
+        message: e instanceof Error ? e.message : "Smoke eval failed",
+      });
+    }
+  }, [smoke.status, load]);
+
+  useEffect(() => () => abortRef.current?.abort(), []);
 
   return (
     <div className="px-8 md:px-12 py-12 max-w-[1280px] mx-auto w-full">
@@ -47,18 +135,33 @@ export default function EvalListPage() {
       </div>
 
       <div className="mt-10">
-        {err && !loading && (
-          <div className="font-mono text-[11px] uppercase tracking-[0.12em] text-subtle-foreground">
-            backend unreachable.
+        {loading && runs.length === 0 && (
+          <div className="space-y-2">
+            {Array.from({ length: 3 }).map((_, i) => (
+              <Skeleton key={i} className="h-12 w-full" />
+            ))}
           </div>
         )}
+        {err && !loading && <ErrorPanel detail={err} onRetry={load} />}
         {!loading && !err && runs.length === 0 && (
-          <div className="font-mono text-[12px] text-subtle-foreground">
-            No eval runs recorded. Run{" "}
-            <code className="text-muted-foreground">
-              python eval/eval_runner.py
-            </code>
-            .
+          <SmokePanel smoke={smoke} onRun={runSmoke} variant="empty" />
+        )}
+        {runs.length > 0 && smoke.status !== "idle" && (
+          <SmokePanel smoke={smoke} onRun={runSmoke} variant="inline" />
+        )}
+        {runs.length > 0 && smoke.status === "idle" && (
+          <div className="mb-6 flex items-center justify-between font-mono text-[11px] text-muted-foreground">
+            <span className="uppercase tracking-[0.14em]">
+              {runs.length} run{runs.length === 1 ? "" : "s"} recorded
+            </span>
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={runSmoke}
+              className="font-mono text-[10px] uppercase tracking-[0.12em]"
+            >
+              ▶ Run smoke eval (8 questions, ~2-3 min)
+            </Button>
           </div>
         )}
 
@@ -115,6 +218,130 @@ export default function EvalListPage() {
           </div>
         )}
       </div>
+    </div>
+  );
+}
+
+/**
+ * Smoke runner panel. Two visual modes:
+ *  - `empty`: the whole-page empty-state (no runs in the DB yet).
+ *  - `inline`: a thin status strip shown above the runs table while a smoke
+ *    eval is in progress or its result is being announced.
+ *
+ * The full 53-question eval is intentionally CLI-only (`python eval/eval_runner.py`)
+ * for reproducibility — the smoke variant is the in-browser path so a
+ * reviewer never sees an empty Eval page and never has to leave the URL.
+ */
+function SmokePanel({
+  smoke,
+  onRun,
+  variant,
+}: {
+  smoke: SmokeState;
+  onRun: () => void;
+  variant: "empty" | "inline";
+}) {
+  if (variant === "empty") {
+    return (
+      <div className="border border-border rounded-[6px] p-8 bg-surface space-y-4">
+        <div className="font-mono text-[11px] uppercase tracking-[0.14em] text-muted-foreground">
+          No evaluation runs yet
+        </div>
+        <p className="text-[14px] leading-relaxed text-foreground max-w-[680px]">
+          The full 53-question dataset is meant to be run from CLI for
+          reproducibility (
+          <code className="font-mono text-[12px] text-muted-foreground">
+            python eval/eval_runner.py
+          </code>
+          ), but you can trigger an 8-question{" "}
+          <span className="text-foreground">smoke eval</span> right here. It
+          covers all 6 categories plus a multi-turn pair, takes ~2-3 minutes,
+          and persists results into the dashboard.
+        </p>
+        <SmokeStatusInline smoke={smoke} onRun={onRun} />
+      </div>
+    );
+  }
+  return (
+    <div className="mb-6 border border-border rounded-[6px] p-4 bg-surface">
+      <SmokeStatusInline smoke={smoke} onRun={onRun} />
+    </div>
+  );
+}
+
+function SmokeStatusInline({
+  smoke,
+  onRun,
+}: {
+  smoke: SmokeState;
+  onRun: () => void;
+}) {
+  if (smoke.status === "idle") {
+    return (
+      <Button
+        onClick={onRun}
+        className="font-mono text-[11px] uppercase tracking-[0.12em]"
+      >
+        ▶ Run smoke eval
+      </Button>
+    );
+  }
+  if (smoke.status === "running") {
+    const pct = smoke.total > 0 ? Math.min(100, Math.round((smoke.completed / smoke.total) * 100)) : 0;
+    return (
+      <div className="space-y-3">
+        <div className="flex items-baseline justify-between font-mono text-[11px] text-muted-foreground">
+          <span className="uppercase tracking-[0.14em]">
+            {smoke.label ?? "Running"} · {smoke.completed}/{smoke.total} questions
+          </span>
+          <span className="tabular-nums">{smoke.elapsed}s elapsed</span>
+        </div>
+        <div className="h-1 bg-border-strong rounded-full overflow-hidden">
+          <div
+            className="h-full bg-accent transition-all"
+            style={{ width: `${pct}%` }}
+          />
+        </div>
+        <p className="font-mono text-[10px] text-subtle-foreground leading-relaxed">
+          The smoke eval runs sequentially against the live agent. Each
+          question generates an answer, then 5-7 LLM-judge calls evaluate
+          faithfulness, citation integrity, relevance, conflict adherence,
+          and (for the multi-turn pair) session coherence.
+        </p>
+      </div>
+    );
+  }
+  if (smoke.status === "done") {
+    return (
+      <div className="flex items-baseline justify-between font-mono text-[11px]">
+        <span className="uppercase tracking-[0.14em] text-accent">
+          ✓ Smoke eval complete
+        </span>
+        <Link
+          href={`/eval/${encodeURIComponent(smoke.runAt)}`}
+          className="text-muted-foreground hover:text-accent transition-colors"
+        >
+          View run →
+        </Link>
+      </div>
+    );
+  }
+  return (
+    <div className="space-y-2">
+      <div className="font-mono text-[11px] uppercase tracking-[0.14em] text-destructive">
+        Smoke eval failed
+      </div>
+      <div className="font-mono text-[11px] text-muted-foreground leading-relaxed">
+        {smoke.message}
+      </div>
+      <Button
+        variant="ghost"
+        size="sm"
+        onClick={onRun}
+        className="font-mono text-[10px] uppercase tracking-[0.12em]"
+      >
+        Retry
+      </Button>
     </div>
   );
 }

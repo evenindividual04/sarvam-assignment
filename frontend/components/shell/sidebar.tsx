@@ -4,40 +4,75 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
 import { cn } from "@/lib/utils";
-import { getHealth } from "@/lib/api";
+import { getProviderHealth, type ProviderHealth } from "@/lib/api";
+import { ThemeToggle } from "./theme-toggle";
+import { QuotaPill } from "./quota-pill";
 
 const NAV = [
   { href: "/", label: "Chat" },
   { href: "/sessions", label: "Sessions" },
   { href: "/eval", label: "Eval" },
   { href: "/settings", label: "Settings" },
+  { href: "/status", label: "Status" },
 ];
 
+const POLL_INTERVAL_MS = 60_000;
+
 function HealthDot() {
-  const [ok, setOk] = useState<boolean | null>(null);
+  const [health, setHealth] = useState<ProviderHealth | null>(null);
+  const [loading, setLoading] = useState(true);
+
   useEffect(() => {
     let alive = true;
-    getHealth()
-      .then(() => alive && setOk(true))
-      .catch(() => alive && setOk(false));
+    const tick = async () => {
+      try {
+        const snap = await getProviderHealth();
+        if (alive) {
+          setHealth(snap);
+          setLoading(false);
+        }
+      } catch {
+        if (alive) {
+          setHealth(null);
+          setLoading(false);
+        }
+      }
+    };
+    tick();
+    const id = setInterval(tick, POLL_INTERVAL_MS);
     return () => {
       alive = false;
+      clearInterval(id);
     };
   }, []);
+
+  const overall = health?.overall;
   const color =
-    ok === true
-      ? "bg-accent"
-      : ok === false
-        ? "bg-zinc-700"
-        : "bg-zinc-800";
-  const label =
-    ok === true ? "Backend online" : ok === false ? "Backend offline" : "Checking";
+    loading
+      ? "bg-[var(--surface-emphasis)]"
+      : overall === "ok"
+        ? "bg-accent"
+        : overall === "degraded"
+          ? "bg-amber-500"
+          : "bg-red-500";
+
+  const summary = (() => {
+    if (loading) return "Checking providers…";
+    if (!health) return "Health unknown";
+    const okCount = health.providers.filter((p) => p.status === "ok").length;
+    const total = health.providers.length;
+    return `${overall?.toUpperCase()} — ${okCount}/${total} providers OK`;
+  })();
+
   return (
-    <span
-      title={label}
-      aria-label={label}
-      className={cn("inline-block size-[6px] rounded-full", color)}
-    />
+    <Link href="/status" title={summary} aria-label={summary} className="shrink-0">
+      <span
+        className={cn(
+          "inline-block size-[6px] rounded-full transition-colors",
+          color,
+        )}
+      />
+    </Link>
   );
 }
 
@@ -90,9 +125,13 @@ export function Sidebar() {
         })}
       </nav>
 
-      <div className="px-6 py-4 border-t border-border">
-        <div className="font-mono text-[10px] uppercase tracking-[0.18em] text-subtle-foreground">
-          Built for Sarvam — 2026
+      <div className="px-6 py-4 border-t border-border space-y-3">
+        <QuotaPill />
+        <div className="flex items-center justify-between">
+          <div className="font-mono text-[10px] uppercase tracking-[0.18em] text-subtle-foreground">
+            Built for Sarvam — 2026
+          </div>
+          <ThemeToggle size="sm" />
         </div>
       </div>
     </aside>

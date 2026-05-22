@@ -155,7 +155,7 @@ def _install_common_mocks(monkeypatch, probe: _GateProbe, *, selected_tokens_per
     monkeypatch.setattr(orch_mod, "save_session_summary", _save_session_summary)
 
     # Search: returns one result per call
-    async def _search(typed_queries, cancel_token=None):
+    async def _search(typed_queries, cancel_token=None, **kwargs):
         probe.search_calls.append(list(typed_queries))
         hop = len(probe.search_calls)
         return [_mk_search_result(f"https://example.com/hop{hop}")]
@@ -194,6 +194,11 @@ def _install_common_mocks(monkeypatch, probe: _GateProbe, *, selected_tokens_per
 
     monkeypatch.setattr(orch_mod, "rank_and_select", _rank_and_select)
     monkeypatch.setattr(orch_mod, "rank_and_select_mmr", _rank_and_select)
+
+    async def _rank_and_select_async(query, chunks, max_tokens):
+        return _rank_and_select(query, chunks, max_tokens)
+
+    monkeypatch.setattr(orch_mod, "rank_and_select_async", _rank_and_select_async)
 
     # format_context_xml: trivial xml
     def _format_xml(selected):
@@ -428,3 +433,156 @@ def test_state_trace_contains_HOP_2_when_second_hop_runs(monkeypatch):
     asyncio.run(_run_once())
 
     assert "HOP_2" in probe.persisted_state_trace
+
+
+# ── Phase 1.875: terminator & evidence_gap tests ──────────────────────────
+
+def test_terminator_fired_difficulty_easy(monkeypatch):
+    """difficulty='easy' clamps max_hops to 1, terminator='DIFFICULTY_EASY_SKIPPED'."""
+    probe = _GateProbe()
+    _install_common_mocks(monkeypatch, probe, selected_tokens_per_hop=[10, 10])
+    _patch_plan(
+        monkeypatch,
+        probe,
+        plan_outputs=[
+            PlannerOutput(
+                strategy="hop1",
+                confidence="low",
+                difficulty="easy",
+                queries=[TypedQuery(text="q1", intent=QueryIntent.PRIMARY)],
+            ),
+        ],
+    )
+
+    asyncio.run(_run_once())
+
+    # Difficulty=easy clamps max_hops=1 so hop loop exits via MAX_HOPS_REACHED.
+    # (Defensive: orchestrator may stamp either MAX_HOPS_REACHED or the easy
+    # bypass depending on which guard fires first; both are acceptable signals
+    # that the easy path was respected.)
+    assert len(probe.search_calls) == 1, "easy difficulty must run hop 1 only"
+    terminator = probe.persisted_run_metadata.get("terminator_fired")
+    assert terminator in ("MAX_HOPS_REACHED", "DIFFICULTY_EASY_SKIPPED")
+
+
+def test_terminator_fired_token_budget(monkeypatch):
+    """High cumulative tokens skip hop 2 even when confidence='low'."""
+    probe = _GateProbe()
+    # Hop 1 selects 15,000 tokens — far above 0.75 * 16_000 threshold.
+    _install_common_mocks(monkeypatch, probe, selected_tokens_per_hop=[15000])
+    _patch_plan(
+        monkeypatch,
+        probe,
+        plan_outputs=[
+            PlannerOutput(
+                strategy="hop1",
+                confidence="low",
+                queries=[TypedQuery(text="q1", intent=QueryIntent.PRIMARY)],
+            ),
+        ],
+    )
+
+    asyncio.run(_run_once())
+
+    assert len(probe.search_calls) == 1, "token budget should terminate before hop 2"
+    assert probe.persisted_run_metadata.get("terminator_fired") == "TOKEN_BUDGET_EXHAUSTED"
+
+
+def test_evidence_gap_detection_no_results(monkeypatch):
+    """A TypedQuery with zero results recorded as no_results gap."""
+    probe = _GateProbe()
+    _install_common_mocks(monkeypatch, probe, selected_tokens_per_hop=[100])
+
+    # Override search to return results only for some queries.
+    async def _search(typed_queries, cancel_token=None, urls_by_query=None, **kwargs):
+        probe.search_calls.append(list(typed_queries))
+        out = []
+        for tq in typed_queries:
+            if urls_by_query is not None:
+                urls_by_query.setdefault(tq.text, [])
+            if tq.text == "found-query":
+                r = _mk_search_result("https://example.com/found")
+                r.intent_origin = tq.intent.value
+                out.append(r)
+                if urls_by_query is not None:
+                    urls_by_query[tq.text].append(r.url)
+        return out
+
+    monkeypatch.setattr(orch_mod, "search", _search)
+
+    _patch_plan(
+        monkeypatch,
+        probe,
+        plan_outputs=[
+            PlannerOutput(
+                strategy="hop1",
+                confidence="medium",
+                queries=[
+                    TypedQuery(text="found-query", intent=QueryIntent.PRIMARY),
+                    TypedQuery(text="empty-query", intent=QueryIntent.DEFINITION),
+                ],
+            ),
+        ],
+    )
+
+    asyncio.run(_run_once())
+
+    gaps = probe.persisted_run_metadata.get("evidence_gaps", [])
+    by_query = {g["query"]: g for g in gaps}
+    assert "empty-query" in by_query
+    assert by_query["empty-query"]["reason"] == "no_results"
+    assert by_query["empty-query"]["intent"] == "definition"
+
+
+def test_evidence_gap_detection_all_filtered(monkeypatch):
+    """A TypedQuery with results but all dropped during selection → all_filtered."""
+    probe = _GateProbe()
+    _install_common_mocks(monkeypatch, probe, selected_tokens_per_hop=[10])
+
+    async def _search(typed_queries, cancel_token=None, urls_by_query=None, **kwargs):
+        probe.search_calls.append(list(typed_queries))
+        out = []
+        for tq in typed_queries:
+            r = _mk_search_result(f"https://example.com/{tq.text}")
+            r.intent_origin = tq.intent.value
+            out.append(r)
+            if urls_by_query is not None:
+                urls_by_query.setdefault(tq.text, []).append(r.url)
+        return out
+
+    monkeypatch.setattr(orch_mod, "search", _search)
+
+    # Selection picks only an unrelated URL — so every plan query is "all_filtered".
+    def _rank(query, chunks, max_tokens):
+        s = _mk_snippet(doc_id="sel-unrelated", tokens=10, domain="unrelated.com")
+        s.url = "https://unrelated.com/whatever"
+        return [s]
+
+    monkeypatch.setattr(orch_mod, "rank_and_select", _rank)
+    monkeypatch.setattr(orch_mod, "rank_and_select_mmr", _rank)
+
+    async def _rank_async(query, chunks, max_tokens):
+        return _rank(query, chunks, max_tokens)
+
+    monkeypatch.setattr(orch_mod, "rank_and_select_async", _rank_async)
+
+    _patch_plan(
+        monkeypatch,
+        probe,
+        plan_outputs=[
+            PlannerOutput(
+                strategy="hop1",
+                confidence="medium",
+                queries=[
+                    TypedQuery(text="filt-q", intent=QueryIntent.PRIMARY),
+                ],
+            ),
+        ],
+    )
+
+    asyncio.run(_run_once())
+
+    gaps = probe.persisted_run_metadata.get("evidence_gaps", [])
+    by_query = {g["query"]: g for g in gaps}
+    assert "filt-q" in by_query
+    assert by_query["filt-q"]["reason"] == "all_filtered"

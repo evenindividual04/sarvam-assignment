@@ -1,6 +1,6 @@
 "use client";
 
-import { use, useEffect, useState } from "react";
+import { use, useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import {
   BarChart,
@@ -18,6 +18,8 @@ import { getRunSummary, getRunQuestions } from "@/lib/api";
 import type { EvalQuestion, EvalSummary } from "@/lib/types";
 import { failureClassColor, formatDateTime, formatScore } from "@/lib/format";
 import { costFor, formatCost } from "@/lib/cost";
+import { ErrorPanel } from "@/components/shell/error-panel";
+import { Skeleton } from "@/components/ui/skeleton";
 
 interface PageProps {
   params: Promise<{ runAt: string }>;
@@ -32,22 +34,21 @@ export default function RunSummaryPage({ params }: PageProps) {
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
 
-  useEffect(() => {
-    let alive = true;
-    // eslint-disable-next-line react-hooks/set-state-in-effect
+  const load = useCallback(() => {
     setLoading(true);
+    setErr(null);
     Promise.all([getRunSummary(decodedRunAt), getRunQuestions(decodedRunAt)])
       .then(([s, q]) => {
-        if (!alive) return;
         setSummary(s);
         setQuestions(q);
       })
-      .catch((e) => alive && setErr(e instanceof Error ? e.message : "error"))
-      .finally(() => alive && setLoading(false));
-    return () => {
-      alive = false;
-    };
+      .catch((e) => setErr(e instanceof Error ? e.message : "error"))
+      .finally(() => setLoading(false));
   }, [decodedRunAt]);
+
+  useEffect(() => {
+    load();
+  }, [load]);
 
   const failureChart = summary
     ? Object.entries(summary.failure_class_distribution).map(
@@ -77,15 +78,23 @@ export default function RunSummaryPage({ params }: PageProps) {
         {decodedRunAt}
       </p>
 
-      {loading && (
-        <div className="mt-10 font-mono text-[11px] uppercase tracking-[0.12em] text-subtle-foreground">
-          loading…
+      {loading && !summary && (
+        <div className="mt-10 space-y-3">
+          <Skeleton className="h-32 w-full" />
+          <Skeleton className="h-24 w-full" />
+          <Skeleton className="h-48 w-full" />
         </div>
       )}
-      {err && (
-        <div className="mt-10 font-mono text-[11px] uppercase tracking-[0.12em] text-subtle-foreground">
-          {err.includes("404") ? "run not found." : "backend unreachable."}
-        </div>
+      {err && !loading && (
+        err.includes("404") ? (
+          <div className="mt-10 font-mono text-[11px] uppercase tracking-[0.12em] text-subtle-foreground">
+            run not found.
+          </div>
+        ) : (
+          <div className="mt-10">
+            <ErrorPanel detail={err} onRetry={load} />
+          </div>
+        )
       )}
 
       {summary && (
@@ -113,8 +122,16 @@ export default function RunSummaryPage({ params }: PageProps) {
             <Metric label="Claim prec" value={summary.avg_claim_precision} />
           </div>
 
+          {/* Tier A (Phase 1+): per-turn quality metrics promoted from run_metadata */}
+          <PerTurnQualityCard summary={summary} />
+
           {/* Calibration — confidence vs faithfulness (V3.5) */}
           <CalibrationStrip summary={summary} />
+
+          {/* Failure-class legend — collapsed by default so it doesn't crowd
+              the charts. Expanding it explains what HALLUCINATION_FACT vs
+              KNOWLEDGE_BLEED actually mean for reviewers outside the codebase. */}
+          <FailureClassLegend />
 
           {/* Charts */}
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-12">
@@ -123,7 +140,7 @@ export default function RunSummaryPage({ params }: PageProps) {
                 <BarChart data={failureChart}>
                   <CartesianGrid
                     strokeDasharray="2 2"
-                    stroke="rgba(255,255,255,0.06)"
+                    stroke="rgba(128,128,128,0.20)"
                   />
                   <XAxis
                     dataKey="failure_class"
@@ -170,7 +187,7 @@ export default function RunSummaryPage({ params }: PageProps) {
                 <BarChart data={summary.by_category}>
                   <CartesianGrid
                     strokeDasharray="2 2"
-                    stroke="rgba(255,255,255,0.06)"
+                    stroke="rgba(128,128,128,0.20)"
                   />
                   <XAxis
                     dataKey="category"
@@ -296,8 +313,9 @@ export default function RunSummaryPage({ params }: PageProps) {
 }
 
 const tooltipStyle: React.CSSProperties = {
-  background: "#111114",
-  border: "1px solid rgba(255, 255, 255, 0.12)",
+  background: "var(--popover)",
+  color: "var(--popover-foreground)",
+  border: "1px solid var(--border-strong)",
   borderRadius: 6,
   fontSize: 11,
   fontFamily: "var(--font-mono)",
@@ -305,7 +323,7 @@ const tooltipStyle: React.CSSProperties = {
 };
 
 const tooltipLabelStyle: React.CSSProperties = {
-  color: "#9b9ba3",
+  color: "var(--muted-foreground)",
   fontSize: 10,
   textTransform: "uppercase",
   letterSpacing: "0.12em",
@@ -370,7 +388,7 @@ function CalibrationStrip({ summary }: { summary: EvalSummary }) {
           <LineChart data={data} margin={{ top: 4, right: 12, bottom: 4, left: 0 }}>
             <CartesianGrid
               strokeDasharray="2 2"
-              stroke="rgba(255,255,255,0.06)"
+              stroke="rgba(128,128,128,0.20)"
               vertical={false}
             />
             <XAxis
@@ -410,6 +428,55 @@ function CalibrationStrip({ summary }: { summary: EvalSummary }) {
   );
 }
 
+/**
+ * Tier A (Phase 1+): renders the three per-turn quality ratios — quote
+ * grounding, numeric grounding, and criteria coverage. Hidden when all three
+ * are null so older runs (pre-migration) don't show an empty card.
+ */
+function PerTurnQualityCard({ summary }: { summary: EvalSummary }) {
+  const ptq = summary.per_turn_quality;
+  if (!ptq) return null;
+  const items: { label: string; value: number | null | undefined }[] = [
+    { label: "Quote grounding", value: ptq.mean_quote_grounding_ratio },
+    { label: "Numeric grounding", value: ptq.mean_numeric_grounding_ratio },
+    { label: "Criteria coverage", value: ptq.mean_criteria_coverage_ratio },
+  ];
+  if (items.every((it) => it.value === null || it.value === undefined)) return null;
+  return (
+    <div className="mb-12 border-t border-b border-border py-6">
+      <div className="font-mono text-[10px] uppercase tracking-[0.18em] text-muted-foreground mb-4">
+        Per-turn quality (Phase 1+)
+      </div>
+      <div className="grid grid-cols-3 gap-8">
+        {items.map((it) => (
+          <div key={it.label}>
+            <div className="font-mono text-[10px] uppercase tracking-[0.14em] text-muted-foreground mb-2">
+              {it.label}
+            </div>
+            <div className="font-mono tabular-nums text-2xl text-foreground leading-none">
+              {it.value === null || it.value === undefined
+                ? "—"
+                : it.value.toFixed(2)}
+            </div>
+            <div className="mt-2 h-[2px] w-full bg-border">
+              <div
+                className="h-full bg-accent"
+                style={{
+                  width: `${
+                    it.value === null || it.value === undefined
+                      ? 0
+                      : Math.max(0, Math.min(100, it.value * 100))
+                  }%`,
+                }}
+              />
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function Metric({ label, value }: { label: string; value: number | undefined }) {
   const v = value === undefined || Number.isNaN(value) ? undefined : value;
   const norm = v === undefined ? 0 : v <= 1 ? v : v / 100;
@@ -428,5 +495,44 @@ function Metric({ label, value }: { label: string; value: number | undefined }) 
         />
       </div>
     </div>
+  );
+}
+
+/**
+ * Six-row legend explaining what each failure class catches. Collapsed by
+ * default so the dashboard isn't visually crowded; reviewers outside the
+ * codebase open it to learn what HALLUCINATION_FACT etc. actually mean.
+ *
+ * Classes are emitted by `eval/judge.py:classify_failure` based on the
+ * judges' per-metric votes for a given question.
+ */
+function FailureClassLegend() {
+  const items: { fc: string; explanation: string }[] = [
+    { fc: "PASS", explanation: "Judges agreed the answer is grounded, relevant, and well-cited." },
+    { fc: "HALLUCINATION_FACT", explanation: "A claim asserted in the answer is not present in the retrieved context." },
+    { fc: "HALLUCINATION_ATTRIBUTION", explanation: "A citation points to a doc that doesn't support the claim it's attached to." },
+    { fc: "KNOWLEDGE_BLEED", explanation: "The answer leaned on the model's training-data prior instead of the retrieved context." },
+    { fc: "RETRIEVAL_FAILURE", explanation: "Retrieval didn't surface the relevant information; synthesis was set up to fail." },
+    { fc: "CONFLICT_MISS", explanation: "Sources disagreed but the agent picked a side without surfacing the disagreement." },
+    { fc: "COHERENCE_FAIL", explanation: "A multi-turn follow-up lost the prior turn's context." },
+  ];
+  return (
+    <details className="mb-6 border border-border rounded-[6px] bg-surface px-5 py-3">
+      <summary className="cursor-pointer font-mono text-[11px] uppercase tracking-[0.14em] text-muted-foreground hover:text-foreground transition-colors">
+        Failure class legend — what each class means
+      </summary>
+      <ul className="mt-4 space-y-2.5">
+        {items.map(({ fc, explanation }) => (
+          <li key={fc} className="flex items-start gap-3">
+            <span className={`inline-block px-1.5 py-0.5 rounded-[3px] border font-mono text-[10px] uppercase tracking-[0.10em] shrink-0 ${failureClassColor(fc)}`}>
+              {fc}
+            </span>
+            <span className="text-[12px] text-muted-foreground leading-relaxed">
+              {explanation}
+            </span>
+          </li>
+        ))}
+      </ul>
+    </details>
   );
 }
