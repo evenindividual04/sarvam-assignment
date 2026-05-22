@@ -855,18 +855,33 @@ class ResearchOrchestrator:
             run_metadata["timeout_hits"].append("planning")
             run_metadata["fallback_path_taken"].append("planning_timeout_fallback")
             run_metadata["budget_breach"].append("planning_timeout")
+            run_metadata["planner_fallback_reason"] = (
+                f"timeout after {POLICY.plan_timeout_s}s"
+            )
             from agent.models import PlannerOutput, QueryIntent, TypedQuery
             planner = PlannerOutput(
-                strategy="Direct retrieval fallback",
+                strategy="Direct retrieval fallback (planner timed out)",
                 queries=[TypedQuery(text=query, intent=QueryIntent.PRIMARY)],
+                confidence="low",
             )
         except (httpx.TimeoutException, httpx.ConnectError, Exception) as e:
             logger.error("Planning failed: %s", e, extra={"component": "orchestrator", "turn_id": turn_id})
             run_metadata["fallback_path_taken"].append("planning_error_fallback")
+            # Surface the actual exception class + first-line message into
+            # run_metadata so the trace inspector can show *why* the planner
+            # dropped to fallback. Without this the user just sees "Direct
+            # retrieval fallback" with no hint whether it was a JSON parse,
+            # a Pydantic validation, a 429, or a network error.
+            err_class = e.__class__.__name__
+            err_msg = str(e).splitlines()[0][:200] if str(e) else ""
+            run_metadata["planner_fallback_reason"] = (
+                f"{err_class}: {err_msg}" if err_msg else err_class
+            )
             from agent.models import PlannerOutput, QueryIntent, TypedQuery
             planner = PlannerOutput(
-                strategy="Direct retrieval fallback",
+                strategy=f"Direct retrieval fallback ({err_class})",
                 queries=[TypedQuery(text=query, intent=QueryIntent.PRIMARY)],
+                confidence="low",
             )
         stage_ms["planning_ms"] += int((time.time() - t0) * 1000)
         from agent.models import QueryIntent, TypedQuery

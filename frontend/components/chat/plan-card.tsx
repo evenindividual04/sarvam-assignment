@@ -121,12 +121,30 @@ export function PlanCard({
     (c) => c && c.trim(),
   );
 
+  // Detect fallback-path plans so the UI signals that this isn't the
+  // normal planner output. The orchestrator stamps strategy with
+  // "Direct retrieval fallback" (+ optional reason) when the planner
+  // LLM call timed out or raised. Fallback plans are 1 query and
+  // confidence=low — still actionable, but reviewers shouldn't mistake
+  // them for the rich multi-query decomposition the planner normally
+  // produces.
+  const isFallback =
+    typeof plan.strategy === "string" &&
+    plan.strategy.toLowerCase().startsWith("direct retrieval fallback");
+
   return (
     <div className="mb-5 rounded-[8px] border border-border bg-surface/40 p-4">
       <div className="flex flex-wrap items-center gap-2 mb-3">
         <span className="font-mono text-[10px] uppercase tracking-[0.18em] text-subtle-foreground">
           Plan
         </span>
+        {isFallback && (
+          <Pill
+            label="Fallback"
+            tone="amber"
+            title="The planner LLM failed; the agent fell back to a direct-retrieval plan using the user's original query verbatim."
+          />
+        )}
         {plan.confidence && (
           <Pill
             label={`Confidence: ${plan.confidence}`}
