@@ -13,6 +13,26 @@ logger = logging.getLogger(__name__)
 
 # Pattern matching [doc_N] where N is one or more digits
 _DOC_PATTERN = re.compile(r'\[doc_\d+\]')
+
+# B4: detect a Markdown disagreement matrix in the answer. We require a header
+# row containing all three column labels (Claim/Source A/Source B) followed by
+# the GFM separator row (---). Whitespace inside cells is tolerated.
+_DISAGREEMENT_TABLE_RE = re.compile(
+    r'\|\s*Claim\s*\|\s*Source\s*A\s*\|\s*Source\s*B\s*\|\s*\n\s*\|\s*-{2,}',
+    re.IGNORECASE,
+)
+
+
+def has_disagreement_matrix(answer: str) -> bool:
+    """B4: True if ``answer`` contains a Markdown table with the mandated
+    ``| Claim | Source A | Source B |`` header. Used to audit whether the
+    synthesizer honored the disagreement-matrix instruction when a conflict
+    was detected."""
+    if not answer:
+        return False
+    return _DISAGREEMENT_TABLE_RE.search(answer) is not None
+
+
 _DOC_ID_PATTERN = re.compile(r'doc_\d+')
 _GROUPED_DOC_PATTERN = re.compile(r'\[(doc_\d+(?:\s*,\s*doc_\d+)*)\]')
 
@@ -156,7 +176,7 @@ def parse_claims_with_citations(
     return out
 
 
-def _extract_doc_ids(text: str) -> list[str]:
+def extract_doc_ids(text: str) -> list[str]:
     """Extract doc ids even from grouped refs such as [doc_1, doc_2]."""
     ids = []
     for match in _GROUPED_DOC_PATTERN.finditer(text):
@@ -202,6 +222,156 @@ def convert_citations(answer: str, doc_map: dict[str, tuple[str, str, str]]) -> 
     return _DOC_PATTERN.sub(replace, answer)
 
 
+# B5: quote-anchored citation popovers.
+# Sentence boundary used when expanding an n-gram match to a full sentence.
+_SENT_END_RE = re.compile(r'[.!?]\s')
+_TOKEN_RE = re.compile(r"\w+")
+# Words ignored when picking the longest claim n-gram. Mirrors the small stop
+# list in claim_verifier so behavior is consistent across the two audits.
+_QUOTE_STOPWORDS = frozenset({
+    "the", "a", "an", "of", "in", "on", "at", "to", "for", "and", "or", "but",
+    "is", "are", "was", "were", "be", "been", "being", "this", "that", "these",
+    "those", "it", "its", "with", "by", "from", "as", "also", "not", "no",
+    "yes", "has", "have", "had", "will", "would", "can", "could", "should",
+})
+
+
+def _split_sentences(text: str) -> list[tuple[int, int, str]]:
+    """Return ``(start, end, sentence_text)`` tuples covering ``text``."""
+    spans: list[tuple[int, int, str]] = []
+    cursor = 0
+    for m in re.finditer(r'[.!?](?:\s|$)', text):
+        end = m.end()
+        s = text[cursor:end].strip()
+        if s:
+            spans.append((cursor, end, s))
+        cursor = end
+    if cursor < len(text):
+        tail = text[cursor:].strip()
+        if tail:
+            spans.append((cursor, len(text), tail))
+    return spans
+
+
+def _truncate_at_sentence_boundary(text: str, max_chars: int) -> str:
+    """Truncate ``text`` to at most ``max_chars`` characters, preferring to cut
+    at the nearest sentence boundary (``.?!\\n``) within the slice; failing
+    that, cut at the last whitespace. Appends an ellipsis when truncation
+    actually shortens the text. Pure-Python, never raises.
+    """
+    if not text:
+        return ""
+    if len(text) <= max_chars:
+        return text.strip()
+    snippet = text[:max_chars]
+    # Prefer the last sentence-terminator inside the window.
+    best_cut = -1
+    for ch in ".?!\n":
+        idx = snippet.rfind(ch)
+        if idx > best_cut:
+            best_cut = idx
+    if best_cut >= max_chars // 2:
+        return snippet[: best_cut + 1].strip()
+    # Fallback: last whitespace.
+    space_idx = snippet.rfind(" ")
+    if space_idx >= max_chars // 2:
+        return snippet[:space_idx].rstrip() + "…"
+    return snippet.rstrip() + "…"
+
+
+# Minimum token-overlap score required to trust the sentence-scoring result.
+# Below this threshold we fall back to a clean head-of-chunk excerpt so the
+# UI popover always renders SOMETHING grounded in the source.
+_ANCHOR_SCORE_THRESHOLD = 1
+
+
+def _extract_anchor_quote(
+    claim_text: str, chunk_text: str, max_chars: int = 240
+) -> Optional[str]:
+    """Find the verbatim sentence in ``chunk_text`` most lexically anchored to
+    ``claim_text``.
+
+    Strategy: split the chunk into sentences, score each by the count of
+    shared content tokens with the claim (stop-words and short tokens
+    excluded), and return the best-scoring sentence. When the best score is
+    below ``_ANCHOR_SCORE_THRESHOLD`` (i.e. no meaningful overlap, e.g. a
+    very short paraphrased claim), fall back to a clean head-of-chunk
+    excerpt truncated at the nearest sentence boundary — this guarantees
+    the citation popover always renders something useful from the source.
+    Pure-Python — no LLM call. Returns ``None`` only on empty inputs.
+    """
+    if not claim_text or not chunk_text:
+        return None
+    claim_tokens = {
+        t for t in _TOKEN_RE.findall(claim_text.lower())
+        if t not in _QUOTE_STOPWORDS and len(t) > 2
+    }
+    sentences = _split_sentences(chunk_text)
+    if not sentences:
+        head = _truncate_at_sentence_boundary(chunk_text, max_chars)
+        return head or None
+
+    best_score = 0
+    best_sentence = sentences[0][2]
+    if claim_tokens:
+        for _start, _end, sent in sentences:
+            sent_tokens = {
+                t for t in _TOKEN_RE.findall(sent.lower())
+                if t not in _QUOTE_STOPWORDS and len(t) > 2
+            }
+            score = len(claim_tokens & sent_tokens)
+            if score > best_score:
+                best_score = score
+                best_sentence = sent
+
+    # Deterministic fallback: if the best sentence has no meaningful overlap
+    # with the claim, prefer a sentence-boundary-clean prefix of the chunk
+    # over the (arbitrary) first sentence picked by the scoring loop. The
+    # head of a retrieved chunk is empirically its most representative text.
+    if best_score < _ANCHOR_SCORE_THRESHOLD:
+        head = _truncate_at_sentence_boundary(chunk_text, max_chars)
+        return head or None
+
+    snippet = best_sentence.strip()
+    if len(snippet) > max_chars:
+        snippet = snippet[:max_chars].rstrip() + "…"
+    return snippet or None
+
+
+def build_cite_quote_map(
+    answer: str,
+    doc_map: dict[str, tuple[str, str, str]],
+    snippet_lookup: dict[str, str],
+    max_chars: int = 240,
+) -> dict[str, str]:
+    """B5: for each ``[doc_N]`` cited in ``answer``, return the verbatim quote
+    from the cited chunk that best anchors the surrounding claim sentence.
+
+    Keys are ``doc_id`` strings (e.g. ``"doc_1"``) so the result is JSON-safe
+    for persistence in ``run_metadata`` and transport to the frontend. Never
+    raises — defensive callers can rely on an empty dict on failure.
+    """
+    out: dict[str, str] = {}
+    if not answer or not doc_map or not snippet_lookup:
+        return out
+    try:
+        parsed = parse_claims_with_citations(answer)
+    except Exception as e:  # pragma: no cover — defensive
+        logger.warning("build_cite_quote_map: parse failed: %s", e)
+        return out
+    for claim_text, doc_ids, _ in parsed:
+        for doc_id in doc_ids:
+            if doc_id in out:
+                continue
+            chunk = snippet_lookup.get(doc_id)
+            if not chunk:
+                continue
+            quote = _extract_anchor_quote(claim_text, chunk, max_chars=max_chars)
+            if quote:
+                out[doc_id] = quote
+    return out
+
+
 class CitationGuard:
     """Verifies that every cited [doc_N] has a URL that was actually fetched."""
 
@@ -216,7 +386,7 @@ class CitationGuard:
         1.0 = all citations valid, 0.0 = all hallucinated.
         An answer with no citations scores 1.0 (no violations).
         """
-        cited_ids = _extract_doc_ids(answer)
+        cited_ids = extract_doc_ids(answer)
 
         if not cited_ids:
             return 1.0

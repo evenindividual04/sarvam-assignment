@@ -97,6 +97,11 @@ class Extractor:
         # ``run_metadata["extraction_fallbacks"]`` by the orchestrator so eval
         # runs can quantify how often Trafilatura was insufficient.
         self.fallback_counts: dict[str, int] = {"tavily": 0, "jina": 0}
+        # Provenance for opened-but-unreachable pages — assignment line 50
+        # wants metadata retained even when fetch fails. Orchestrator copies
+        # this into run_metadata["unreachable_pages"] so the UI and eval can
+        # distinguish "we tried and failed" from "we never tried".
+        self.fetch_failures: dict[str, str] = {}
 
     async def aclose(self) -> None:
         await self._client.aclose()
@@ -235,6 +240,7 @@ class Extractor:
                 "Refusing unsafe URL (SSRF guard) %s", url,
                 extra={"component": "extractor"},
             )
+            self.fetch_failures[url] = "blocked_unsafe_url"
             return None
         try:
             resp = await self._client.get(url)
@@ -242,18 +248,29 @@ class Extractor:
             html = resp.text
         except asyncio.TimeoutError:
             logger.warning("asyncio.TimeoutError fetching %s", url, extra={"component": "extractor"})
+            self.fetch_failures[url] = "timeout"
             return None
         except httpx.TimeoutException:
             logger.warning("httpx.TimeoutException fetching %s", url, extra={"component": "extractor"})
+            self.fetch_failures[url] = "timeout"
             return None
         except httpx.ConnectError:
             logger.warning("httpx.ConnectError fetching %s", url, extra={"component": "extractor"})
+            self.fetch_failures[url] = "connection_error"
+            return None
+        except httpx.HTTPStatusError as e:
+            status = getattr(e.response, "status_code", "unknown")
+            logger.warning("HTTP %s fetching %s", status, url, extra={"component": "extractor"})
+            self.fetch_failures[url] = f"http_{status}"
             return None
         except Exception as e:
             logger.warning("Fetch failed %s: %s", url, e, extra={"component": "extractor"})
+            self.fetch_failures[url] = f"error:{type(e).__name__}"
             return None
 
         text = await self._extract_with_fallbacks(url, html)
+        if not text:
+            self.fetch_failures[url] = "empty_extraction"
         return text or None
 
     async def extract_all(self, results: list[SearchResult], cancel_token=None) -> dict[str, Optional[str]]:

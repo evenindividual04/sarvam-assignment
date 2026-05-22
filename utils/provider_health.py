@@ -22,8 +22,13 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
-HEALTH_CACHE_TTL_S = int(os.environ.get("HEALTH_CACHE_TTL_S", "60"))
+HEALTH_CACHE_TTL_S = int(os.environ.get("HEALTH_CACHE_TTL_S", "90"))
 _PROBE_TIMEOUT_S = 8.0
+# Audit smart-polling: per-provider exponential backoff after consecutive
+# failures, capped at 15 minutes. Resets on first success. Separate from the
+# `Retry-After`-driven throttle window which short-circuits earlier.
+_BACKOFF_MAX_S = 900
+_BACKOFF_FAIL_THRESHOLD = 3
 
 
 @dataclass(frozen=True)
@@ -44,6 +49,11 @@ class HealthSnapshot:
     checked_at: float
     overall: str  # "ok" | "degraded" | "down"
     providers: list[ProviderProbe] = field(default_factory=list)
+    # When True, the cached snapshot is stale because the most recent probe
+    # attempt itself failed (network, exception). We keep the previous data
+    # so the UI doesn't go blank, but signal that callers should treat this
+    # as untrusted.
+    stale: bool = False
 
     def to_dict(self) -> dict:
         return {
@@ -51,11 +61,54 @@ class HealthSnapshot:
             "overall": self.overall,
             "providers": [asdict(p) for p in self.providers],
             "cache_ttl_s": HEALTH_CACHE_TTL_S,
+            "stale": self.stale,
         }
 
 
 _cache: Optional[HealthSnapshot] = None
 _lock = asyncio.Lock()
+
+# Per-provider next-probe-allowed timestamp. Set when a probe returns 429
+# with Retry-After, or after N consecutive failures (exponential backoff).
+# Probes are short-circuited to a cached "throttled"/"down" probe entry
+# until the timestamp passes. Invalidation clears the entry.
+_next_probe_at: dict[str, float] = {}
+_consecutive_failures: dict[str, int] = {}
+# Providers explicitly invalidated by callers (e.g. orchestrator on 429).
+# Cleared on the next probe of that provider.
+_force_reprobe: set[str] = set()
+
+
+def invalidate(provider: Optional[str] = None) -> None:
+    """Mark the cached snapshot stale so the next ``get_health()`` re-probes.
+
+    When ``provider`` is set, only that provider's throttle/backoff state is
+    cleared and the next ``get_health()`` will run a fresh probe round. When
+    ``provider`` is None, the entire cache is invalidated.
+
+    Wired from real-failure choke points (orchestrator 429 handling) so a sick
+    provider gets re-probed before the 90s TTL expires, while idle dashboards
+    continue to coast on the cached snapshot.
+    """
+    global _cache
+    if provider is None:
+        _cache = None
+        _next_probe_at.clear()
+        _consecutive_failures.clear()
+        _force_reprobe.clear()
+        return
+    _next_probe_at.pop(provider, None)
+    _consecutive_failures.pop(provider, None)
+    _force_reprobe.add(provider)
+    # Mark the cached snapshot as stale so callers see the hint even before
+    # the next refresh tick completes.
+    if _cache is not None:
+        _cache = HealthSnapshot(
+            checked_at=_cache.checked_at,
+            overall=_cache.overall,
+            providers=_cache.providers,
+            stale=True,
+        )
 
 
 def _is_deployed_env() -> bool:
@@ -90,6 +143,23 @@ def _not_configured(name: str, role: str, detail: str) -> ProviderProbe:
                          detail=detail)
 
 
+def _record_failure(name: str) -> float:
+    """Bump consecutive-failure count and return the resulting backoff seconds
+    once the threshold is reached (0 below threshold). Capped at _BACKOFF_MAX_S."""
+    n = _consecutive_failures.get(name, 0) + 1
+    _consecutive_failures[name] = n
+    if n < _BACKOFF_FAIL_THRESHOLD:
+        return 0.0
+    # 3 failures → 2× TTL, 4 → 5× TTL, 5+ → 10× TTL, capped.
+    multipliers = {3: 2, 4: 5}
+    mult = multipliers.get(n, 10)
+    return float(min(_BACKOFF_MAX_S, HEALTH_CACHE_TTL_S * mult))
+
+
+def _record_success(name: str) -> None:
+    _consecutive_failures.pop(name, None)
+
+
 async def _probe(
     name: str, role: str, coro_factory
 ) -> ProviderProbe:
@@ -103,22 +173,57 @@ async def _probe(
         # to "not_configured" so the UI can de-emphasize them rather than
         # treating absence as failure.
         return _not_configured(name, role, "API key not configured (optional)")
+
+    # Honor per-provider throttle windows: if Retry-After or exponential
+    # backoff has set a future next-probe-at, return a cached "throttled"
+    # entry instead of hitting the wire. invalidate(provider) clears this.
+    now = time.time()
+    if name in _force_reprobe:
+        _force_reprobe.discard(name)
+        _next_probe_at.pop(name, None)
+    next_at = _next_probe_at.get(name)
+    if next_at and now < next_at:
+        wait = int(next_at - now)
+        return ProviderProbe(
+            name=name, role=role, status="throttled",
+            detail=f"backing off; retrying in ~{wait}s",
+        )
+
     start = time.perf_counter()
     try:
         await asyncio.wait_for(coro_factory(), timeout=_PROBE_TIMEOUT_S)
         latency = int((time.perf_counter() - start) * 1000)
+        _record_success(name)
         return ProviderProbe(name=name, role=role, status="ok", latency_ms=latency)
     except asyncio.TimeoutError:
+        backoff = _record_failure(name)
+        if backoff:
+            _next_probe_at[name] = time.time() + backoff
         return ProviderProbe(name=name, role=role, status="degraded",
                              detail=f"timeout after {_PROBE_TIMEOUT_S}s")
     except httpx.HTTPStatusError as e:
         code = e.response.status_code
+        if code == 429:
+            # Respect Retry-After when the provider tells us; else default to
+            # the configured TTL so we're not hammering during a known throttle.
+            retry_after_s = _parse_retry_after(e.response.headers.get("Retry-After"))
+            if retry_after_s is None:
+                retry_after_s = float(HEALTH_CACHE_TTL_S)
+            _next_probe_at[name] = time.time() + retry_after_s
+            _record_success(name)  # 429 is a quota signal, not a hard failure
+            return ProviderProbe(
+                name=name, role=role, status="throttled",
+                detail=f"HTTP 429 — retry after ~{int(retry_after_s)}s",
+            )
         if code in (401, 403):
             env_var = _REQUIRED_KEYS.get(name) or f"{name.upper()}_API_KEY"
             detail = (f"HTTP {code} — invalid or expired key. "
                       f"Check your {env_var} value.")
         else:
             detail = f"HTTP {code}"
+        backoff = _record_failure(name)
+        if backoff:
+            _next_probe_at[name] = time.time() + backoff
         return ProviderProbe(name=name, role=role, status="down", detail=detail)
     except Exception as e:
         # Ollama unreachable on a local box with no server running → optional,
@@ -127,8 +232,23 @@ async def _probe(
             return _not_configured(
                 name, role, "Local Ollama not running (optional fallback)"
             )
+        backoff = _record_failure(name)
+        if backoff:
+            _next_probe_at[name] = time.time() + backoff
         return ProviderProbe(name=name, role=role, status="down",
                              detail=f"{type(e).__name__}: {str(e)[:80]}")
+
+
+def _parse_retry_after(header: Optional[str]) -> Optional[float]:
+    """Parse a `Retry-After` header value. Returns seconds, or None if absent
+    or unparseable. Supports the integer-seconds form; HTTP-date form is
+    treated as missing because the providers we hit emit seconds."""
+    if not header:
+        return None
+    try:
+        return float(header.strip())
+    except (TypeError, ValueError):
+        return None
 
 
 _REQUIRED_KEYS = {
@@ -160,6 +280,8 @@ def _has_required_key(name: str) -> bool:
     if name == "groq" and os.environ.get("GROQ_API_KEYS"):
         return True
     if name == "gemini" and os.environ.get("GEMINI_API_KEYS"):
+        return True
+    if name == "cerebras" and os.environ.get("CEREBRAS_API_KEYS"):
         return True
     return bool(os.environ.get(env_var))
 
@@ -210,12 +332,33 @@ async def _probe_chat(c: httpx.AsyncClient, base_url: str, key: str,
     r.raise_for_status()
 
 
+def _first_key(single_var: str, multi_var: str) -> str:
+    # Multi-key mode (GROQ_API_KEYS / GEMINI_API_KEYS) is the new default;
+    # the legacy single-key var stays a valid fallback. Prefer the first
+    # multi-key entry so the probe matches what real traffic uses.
+    multi = os.environ.get(multi_var, "").strip()
+    if multi:
+        first = next((p.strip() for p in multi.split(",") if p.strip()), "")
+        if first:
+            return first
+    return os.environ[single_var]
+
+
 async def _probe_groq(c: httpx.AsyncClient) -> None:
-    await _probe_chat(c, "https://api.groq.com/openai/v1",
-                      os.environ["GROQ_API_KEY"], "llama-3.3-70b-versatile")
+    # Cheap probe: list models. Validates auth, no token cost. Avoids
+    # consuming the daily request quota that 30s dashboard polling would
+    # otherwise eat into.
+    r = await c.get(
+        "https://api.groq.com/openai/v1/models",
+        headers={"Authorization": f"Bearer {_first_key('GROQ_API_KEY', 'GROQ_API_KEYS')}"},
+    )
+    r.raise_for_status()
 
 
 async def _probe_github(c: httpx.AsyncClient) -> None:
+    # GitHub Models doesn't expose a public /models list, but a 1-token chat
+    # probe is the cheapest valid auth check. Cached at 90s, this is ~960
+    # calls/day worst case, well under any per-day cap.
     await _probe_chat(c, "https://models.inference.ai.azure.com",
                       os.environ["GITHUB_TOKEN"], "gpt-4o-mini")
 
@@ -236,32 +379,40 @@ async def _probe_openrouter(c: httpx.AsyncClient) -> None:
 
 
 async def _probe_sarvam(c: httpx.AsyncClient) -> None:
+    # Sarvam Model API has no free `/models` listing — the cheapest valid
+    # auth check is a 1-token chat completion. Aggressive TTL caching keeps
+    # this from burning meaningful quota (90s → 960 calls/day worst case).
     await _probe_chat(c, "https://api.sarvam.ai/v1",
                       os.environ["SARVAM_API_KEY"],
                       os.environ.get("SARVAM_MODEL", "sarvam-m"))
 
 
 async def _probe_gemini(c: httpx.AsyncClient) -> None:
-    # Pull from the rotator so the probe drains a key from the same pool as
-    # synthesis — gives quota-balanced telemetry across multi-key setups.
+    # Cheap probe: GET /models. Lists available models, no quota / token cost.
+    # CRITICAL for Gemini specifically — the free tier is 1500 requests/day,
+    # which a 30s polling loop on a few open tabs can exhaust in hours. The
+    # previous probe issued a real generateContent call.
+    # We pull from the rotator so probes drain the same key pool as synthesis
+    # gets quota-balanced telemetry across multi-key setups.
     from utils.provider_router import _GEMINI_ROTATOR
     key = _GEMINI_ROTATOR.next_key() or os.environ.get("GEMINI_API_KEY", "")
     if not key:
         raise RuntimeError("No GEMINI_API_KEY / GEMINI_API_KEYS configured")
-    r = await c.post(
-        f"https://generativelanguage.googleapis.com/v1beta/"
-        f"models/gemini-2.5-flash:generateContent?key={key}",
-        json={"contents": [{"parts": [{"text": "hi"}]}],
-              "generationConfig": {"maxOutputTokens": 1}},
+    r = await c.get(
+        f"https://generativelanguage.googleapis.com/v1beta/models?key={key}"
     )
     r.raise_for_status()
 
 
 async def _probe_cerebras(c: httpx.AsyncClient) -> None:
-    """Cerebras Cloud — OpenAI-compatible chat completions endpoint."""
+    """Cerebras Cloud — cheap GET /models endpoint (no token cost)."""
     base = os.environ.get("CEREBRAS_BASE_URL", "https://api.cerebras.ai/v1")
-    model = os.environ.get("CEREBRAS_MODEL", "llama3.1-8b")
-    await _probe_chat(c, base, os.environ["CEREBRAS_API_KEY"], model)
+    key = _first_key("CEREBRAS_API_KEY", "CEREBRAS_API_KEYS")
+    r = await c.get(
+        f"{base.rstrip('/')}/models",
+        headers={"Authorization": f"Bearer {key}"},
+    )
+    r.raise_for_status()
 
 
 async def _probe_ollama(c: httpx.AsyncClient) -> None:
@@ -404,10 +555,23 @@ async def get_health(force: bool = False) -> HealthSnapshot:
         try:
             _cache = await _run_all_probes()
         except Exception as exc:
+            # If a probe round itself fails (rare — _run_all_probes catches
+            # per-provider errors), keep the previous snapshot but flag it
+            # stale so the UI can warn. Falling back to a "down/empty"
+            # snapshot would erase healthy state from a transient hiccup.
             logger.warning("provider health probe failed: %s", exc)
-            _cache = HealthSnapshot(
-                checked_at=time.time(),
-                overall="down",
-                providers=[],
-            )
+            if _cache is not None:
+                _cache = HealthSnapshot(
+                    checked_at=_cache.checked_at,
+                    overall=_cache.overall,
+                    providers=_cache.providers,
+                    stale=True,
+                )
+            else:
+                _cache = HealthSnapshot(
+                    checked_at=time.time(),
+                    overall="down",
+                    providers=[],
+                    stale=True,
+                )
         return _cache

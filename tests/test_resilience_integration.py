@@ -139,8 +139,8 @@ def test_cot_filter_strips_deepseek_reasoning_content():
     assert main_mod._contains_cot(payload)
 
 
-def test_cot_filter_strips_claude_thinking_blocks():
-    """Anthropic-style `<thought>...</thought>` blocks must be filtered."""
+def test_cot_filter_strips_thought_tag_blocks():
+    """`<thought>...</thought>` reasoning blocks must be filtered."""
     import main as main_mod
 
     payload = {
@@ -151,7 +151,7 @@ def test_cot_filter_strips_claude_thinking_blocks():
 
 
 def test_cot_filter_strips_redacted_thinking():
-    """Claude API `redacted_thinking` content blocks must be filtered."""
+    """`redacted_thinking` content blocks must be filtered."""
     import main as main_mod
 
     payload = {"step": "generating", "data": {"type": "redacted_thinking", "data": "..."}}

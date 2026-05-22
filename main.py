@@ -3,9 +3,11 @@ import json
 import logging
 import os
 import re
+import time
 import uuid
 from collections import OrderedDict, deque
 from contextlib import asynccontextmanager
+from typing import AsyncIterator
 from urllib.parse import unquote
 
 from fastapi import FastAPI, HTTPException, Request, Response
@@ -169,11 +171,17 @@ _APPROVAL_HTML_PATTERN = re.compile(r"<[^>]*>")
 
 
 # Phase 1.25: CoT pre-emit filter — defense-in-depth against accidentally
-# streaming Gemini `thought_summary`/`thought_tokens` content if a future
-# refactor wires it in. The filter operates on the serialized payload so it
-# catches both `data.text="<thinking>..."` and `data={"thought_summary": …}`.
+# streaming model chain-of-thought to the wire (assignment forbids this:
+# "Do not stream hidden chain-of-thought"). The filter operates on the
+# serialized payload so it catches both `data.text="<thinking>..."` and
+# `data={"thought_summary": …}` shapes. Patterns extended to cover:
+#   - `<think>` / `<thinking>` / `<thought>` (and their closing forms) —
+#     DeepSeek R1 and some Llama-derived reasoners emit `<think>...</think>`;
+#     Gemini extended-thinking emits `<thinking>...</thinking>`.
+#   - Provider-specific reasoning-content envelopes (thought_summary,
+#     reasoning_content, reasoning_tokens, redacted_thinking).
 _COT_PATTERNS = re.compile(
-    r"(<thinking>|</thinking>|<thought>|</thought>|"
+    r"(<think>|</think>|<thinking>|</thinking>|<thought>|</thought>|"
     r"thought_summary|thought_tokens|"
     r"reasoning_content|reasoning_tokens|"
     r"redacted_thinking)",
@@ -181,11 +189,65 @@ _COT_PATTERNS = re.compile(
 )
 
 
+# Inline stripper: when answer-delta text contains a partial or full
+# `<think>…</think>` block, scrub the block contents and the tags themselves
+# from the streaming text before the frame goes on the wire. This is a
+# softer measure than dropping the whole frame — it preserves the legitimate
+# text on either side of the CoT block.
+_THINK_BLOCK_RE = re.compile(r"<think(?:ing)?>.*?</think(?:ing)?>", re.DOTALL | re.IGNORECASE)
+_THINK_OPEN_RE = re.compile(r"<think(?:ing)?>.*", re.DOTALL | re.IGNORECASE)
+_THINK_CLOSE_RE = re.compile(r".*?</think(?:ing)?>", re.DOTALL | re.IGNORECASE)
+
+
+def _strip_cot_from_text(text: str) -> str:
+    """Remove `<think>…</think>` blocks (DeepSeek R1 / extended-thinking)
+    from streamed text. Idempotent; safe to call on partial chunks.
+    Handles: full blocks, open-tag-only (mid-stream), close-tag-only."""
+    if not isinstance(text, str) or "<think" not in text.lower():
+        if not isinstance(text, str) or "</think" not in text.lower():
+            return text
+    out = _THINK_BLOCK_RE.sub("", text)
+    # If an unclosed open tag remains, drop everything from it to the end.
+    if "<think" in out.lower():
+        out = _THINK_OPEN_RE.sub("", out)
+    # If a stray close tag remains (open was in a prior chunk), drop everything up to it.
+    if "</think" in out.lower():
+        out = _THINK_CLOSE_RE.sub("", out)
+    return out
+
+
 def _contains_cot(payload: dict) -> bool:
     try:
         return bool(_COT_PATTERNS.search(json.dumps(payload, default=str)))
     except Exception:
         return False
+
+
+def _scrub_cot_recursive(value):
+    """Recursively walk a JSON-ish value, stripping `<think>…</think>` blocks
+    from every string leaf. Used to clean fields like done.data.answer that
+    carry the full synthesized text. Returns a new structure (immutable)."""
+    if isinstance(value, str):
+        return _strip_cot_from_text(value)
+    if isinstance(value, dict):
+        return {k: _scrub_cot_recursive(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_scrub_cot_recursive(v) for v in value]
+    return value
+
+
+def _scrub_cot_in_payload(payload: dict) -> dict:
+    """Strip `<think>…</think>` from every string leaf in the payload.
+
+    Belt-and-suspenders: the streaming-text path is handled by the stateful
+    scrubber in `_drive` (which tracks open/close across chunks). THIS pass
+    catches single-frame whole-text values like `done.data.answer` so the
+    CoT-envelope contains-check below doesn't blow up the entire frame.
+    """
+    cleaned_data = _scrub_cot_recursive(payload.get("data"))
+    if cleaned_data == payload.get("data"):
+        return payload
+    return {**payload, "data": cleaned_data}
 
 
 def _format_event(payload: dict, *, event_id: int | None = None,
@@ -307,6 +369,51 @@ async def _research_stream(req: ChatRequest, request: Request, *,
         except asyncio.CancelledError:
             return
 
+    # Per-turn CoT stream state — tracks whether we're currently INSIDE a
+    # `<think>...</think>` block that opened in a prior chunk. Required because
+    # streaming chunks may split a CoT block: chunk N has `<think>...`, chunks
+    # N+1..M have body text (NO marker tokens), chunk M has `...</think>`.
+    # Without per-stream state every chunk between N and M passes through
+    # unscrubbed.
+    cot_state: dict[str, bool] = {"in_block": False}
+
+    def _stateful_cot_scrub(payload: dict) -> dict:
+        """Apply `<think>` block scrubbing using per-turn state. Mutates the
+        text field of answer_delta / generating payloads. Returns a NEW dict."""
+        data = payload.get("data")
+        text: str | None = None
+        if isinstance(data, dict) and isinstance(data.get("text"), str):
+            text = data["text"]
+        elif isinstance(data, str):
+            text = data
+        else:
+            return payload
+        if not text:
+            return payload
+
+        out = text
+        if cot_state["in_block"]:
+            # We're inside a block opened in a prior chunk.
+            if "</think" in out.lower():
+                # Close tag in this chunk — drop up to & including it.
+                out = _THINK_CLOSE_RE.sub("", out)
+                cot_state["in_block"] = False
+            else:
+                # Still inside; drop the whole chunk's text.
+                out = ""
+        # Now handle full blocks and any new open-tag in this (possibly trimmed) chunk.
+        out = _THINK_BLOCK_RE.sub("", out)
+        if "<think" in out.lower():
+            # Unclosed open tag remains — flip state and drop from open onwards.
+            out = _THINK_OPEN_RE.sub("", out)
+            cot_state["in_block"] = True
+
+        if out == text:
+            return payload
+        if isinstance(data, dict):
+            return {**payload, "data": {**data, "text": out}}
+        return {**payload, "data": out}
+
     async def _drive() -> None:
         nonlocal first_event, event_id_counter
         try:
@@ -320,9 +427,23 @@ async def _research_stream(req: ChatRequest, request: Request, *,
                         data = {**data, "turn_id": turn_id}
                     else:
                         data = {"turn_id": turn_id}
+                etype = event.event_type
                 payload = {"step": event.step, "label": event.label, "data": data}
+                # Belt-and-suspenders: also embed the typed-event discriminator
+                # inside the JSON payload so the frontend dispatch works even
+                # if a proxy strips the SSE `event:` line (some L7 layers do).
+                if etype:
+                    payload["type"] = etype
 
-                # Phase 1.25: CoT pre-emit filter — drop and log if matched.
+                # CoT scrub-then-check. Two layers:
+                #   1. Stateful per-turn scrub: tracks whether a `<think>` block
+                #      opened in a previous chunk is still in flight; drops body
+                #      chunks until the matching `</think>` arrives.
+                #   2. Belt-and-suspenders contains-check: drops the whole frame
+                #      if a CoT envelope key (thought_summary, reasoning_content,
+                #      …) survived scrubbing.
+                payload = _stateful_cot_scrub(payload)
+                payload = _scrub_cot_in_payload(payload)
                 if _contains_cot(payload):
                     logger.warning(
                         "Dropping SSE frame containing CoT-like content",
@@ -331,7 +452,6 @@ async def _research_stream(req: ChatRequest, request: Request, *,
                     continue
 
                 event_id_counter += 1
-                etype = event.event_type
                 _replay_remember(turn_id, event_id_counter, etype, payload)
                 frame = _format_event(payload, event_id=event_id_counter, event_type=etype)
                 await out_queue.put(frame)
@@ -988,6 +1108,14 @@ def _adapt_question_detail(payload: dict) -> dict:
             flat[k] = turn[k]
     flat["claim_audit"] = payload.get("claim_audit") or []
     flat["contradiction_probes"] = _adapt_probe(payload.get("contradiction_probe"))
+    # Refactor #3 surface area: lift the terminator trace + stop-rag decision
+    # log out of run_metadata so the per-question detail page can render the
+    # adaptive-hop reasoning sequence. Missing/older rows just omit the keys.
+    run_meta = turn.get("run_metadata") if isinstance(turn, dict) else None
+    if isinstance(run_meta, dict):
+        for k in ("terminator_history", "terminator_source", "stop_rag_decisions"):
+            if run_meta.get(k) is not None:
+                flat[k] = run_meta[k]
     fc = flat.get("failure_class")
     flat["pass"] = (fc == "PASS") or (fc is None)
     return flat
@@ -1017,6 +1145,73 @@ async def question_detail(run_at: str, question_id: str):
     if detail is None:
         raise HTTPException(status_code=404, detail="question not found in run")
     return _adapt_question_detail(detail)
+
+
+# ── Live eval dashboard SSE ─────────────────────────────────────────────────
+#
+# Polls `eval_runs` and pushes a `runs_changed` event whenever the latest
+# `run_at` differs from what the client last saw. Keepalive comments every
+# 15s so reverse proxies don't drop idle connections. The client subscribes
+# from the /eval list page; on a `runs_changed` event it re-fetches the
+# `/eval/runs` list to update the table without a full page reload.
+#
+# Polling (not LISTEN/NOTIFY) is intentional — SQLite has no pub/sub, the
+# `eval_runner.py` writer runs in a different process, and a 3s poll is
+# cheaper than building a process-shared signal.
+
+async def _eval_live_stream(request: Request) -> AsyncIterator[bytes]:
+    import asyncio as _asyncio
+    last_run_at: str | None = None
+    last_keepalive = 0.0
+    poll_interval_s = 3.0
+    keepalive_interval_s = 15.0
+    while True:
+        # FIX 6: wrap loop body so client disconnect (CancelledError) and
+        # unexpected exceptions cleanly terminate the generator instead of
+        # propagating uncaught.
+        try:
+            if await request.is_disconnected():
+                break
+            try:
+                rows = await eval_queries.list_eval_runs()
+                top = rows[0]["run_at"] if rows else None
+            except Exception as e:
+                payload = json.dumps({"step": "error", "data": str(e)})
+                yield f"data: {payload}\n\n".encode()
+                await _asyncio.sleep(poll_interval_s)
+                continue
+            if last_run_at is None:
+                # First tick — announce the current top so the client can sync state.
+                last_run_at = top
+                payload = json.dumps({"step": "snapshot", "data": {"latest_run_at": top}})
+                yield f"data: {payload}\n\n".encode()
+            elif top != last_run_at:
+                last_run_at = top
+                payload = json.dumps({"step": "runs_changed", "data": {"latest_run_at": top}})
+                yield f"data: {payload}\n\n".encode()
+            # Keepalive comment for proxy idle-timeouts.
+            now = time.time()
+            if now - last_keepalive > keepalive_interval_s:
+                yield b": keepalive\n\n"
+                last_keepalive = now
+            await _asyncio.sleep(poll_interval_s)
+        except _asyncio.CancelledError:
+            break
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                "eval live stream terminating on unexpected error: %s", e,
+                extra={"component": "eval_live_stream"},
+            )
+            break
+
+
+@app.get("/eval/live")
+async def eval_live(request: Request):
+    return StreamingResponse(
+        _eval_live_stream(request),
+        media_type="text/event-stream",
+        headers={"X-Accel-Buffering": "no", "Cache-Control": "no-cache"},
+    )
 
 
 # ── Smoke eval ────────────────────────────────────────────────────────────

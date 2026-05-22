@@ -338,6 +338,12 @@ def test_cerebras_404_logs_helpful_warning(monkeypatch, caplog):
 
     monkeypatch.setenv("CEREBRAS_API_KEY", "test")
     monkeypatch.setenv("CEREBRAS_MODEL", "llama-3.3-70b")
+    # The Cerebras key rotator caches its pool at module-load time, so a
+    # runtime monkeypatch.setenv doesn't reach it. Stub next_key() directly
+    # so the 404 path executes against the fake client.
+    monkeypatch.setattr(provider_router._CEREBRAS_ROTATOR, "next_key", lambda: "test")
+    monkeypatch.setattr(provider_router._CEREBRAS_ROTATOR, "mark_success", lambda *_a, **_kw: None)
+    monkeypatch.setattr(provider_router._CEREBRAS_ROTATOR, "mark_throttled", lambda *_a, **_kw: None)
     import openai
     monkeypatch.setattr(openai, "AsyncOpenAI", _FakeClient)
 

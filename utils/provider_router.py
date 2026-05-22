@@ -36,6 +36,12 @@ _GEMINI_ROTATOR = KeyRotator(
     "gemini", legacy_var="GEMINI_API_KEY", multi_var="GEMINI_API_KEYS"
 )
 
+# Cerebras multi-key rotation — shared by planner + judge + short calls +
+# streaming synth + health probe. Same throttle-aware pool design as Groq/Gemini.
+_CEREBRAS_ROTATOR = KeyRotator(
+    "cerebras", legacy_var="CEREBRAS_API_KEY", multi_var="CEREBRAS_API_KEYS"
+)
+
 
 def _gemini_429_retry_after_s(exc: Exception) -> float | None:
     """Extract Retry-After from a Gemini ClientError-style exception. Lenient
@@ -306,9 +312,9 @@ async def _plan_with_cerebras(prompt: str) -> str:
     ``qwen-3-235b-a22b-instruct-2507``, ``zai-glm-4.7``, ``gpt-oss-120b``).
     """
     from openai import AsyncOpenAI
-    api_key = os.environ.get("CEREBRAS_API_KEY", "")
+    api_key = _CEREBRAS_ROTATOR.next_key()
     if not api_key:
-        raise RuntimeError("CEREBRAS_API_KEY not set")
+        raise RuntimeError("No CEREBRAS_API_KEY / CEREBRAS_API_KEYS configured")
     client = AsyncOpenAI(
         api_key=api_key,
         base_url=os.environ.get("CEREBRAS_BASE_URL", "https://api.cerebras.ai/v1"),
@@ -324,7 +330,15 @@ async def _plan_with_cerebras(prompt: str) -> str:
         )
     except Exception as e:
         _warn_cerebras_404_if_relevant(e, model)
+        status = getattr(e, "status_code", None) or getattr(
+            getattr(e, "response", None), "status_code", None
+        )
+        if status == 429:
+            _CEREBRAS_ROTATOR.mark_throttled(
+                api_key, retry_after_s=_extract_retry_after_s(e)
+            )
         raise
+    _CEREBRAS_ROTATOR.mark_success(api_key)
     return (resp.choices[0].message.content or "").strip()
 
 
@@ -353,6 +367,13 @@ async def _plan_with_gemini_structured(prompt: str) -> str:
     except Exception as e:
         if _is_gemini_429(e):
             _GEMINI_ROTATOR.mark_throttled(api_key, retry_after_s=_gemini_429_retry_after_s(e))
+            # Tell the health probe layer Gemini is sick so the next
+            # dashboard hit re-probes ahead of the TTL.
+            try:
+                from utils.provider_health import invalidate
+                invalidate("gemini")
+            except Exception:
+                pass
         raise
     _GEMINI_ROTATOR.mark_success(api_key)
     return (resp.text or "").strip()
@@ -376,6 +397,11 @@ async def _plan_with_groq(prompt: str) -> str:
         )
     except groq_sdk.RateLimitError as e:
         _GROQ_ROTATOR.mark_throttled(key, retry_after_s=_extract_retry_after_s(e))
+        try:
+            from utils.provider_health import invalidate
+            invalidate("groq")
+        except Exception:
+            pass
         raise
     _GROQ_ROTATOR.mark_success(key)
     return (resp.choices[0].message.content or "").strip()
@@ -481,9 +507,9 @@ async def call_cerebras(prompt: str, max_tokens: int = 200) -> str:
     missing key or API failure — caller falls back to Groq.
     """
     from openai import AsyncOpenAI
-    api_key = os.environ.get("CEREBRAS_API_KEY", "")
+    api_key = _CEREBRAS_ROTATOR.next_key()
     if not api_key:
-        raise RuntimeError("CEREBRAS_API_KEY not set")
+        raise RuntimeError("No CEREBRAS_API_KEY / CEREBRAS_API_KEYS configured")
     client = AsyncOpenAI(
         api_key=api_key,
         base_url=os.environ.get("CEREBRAS_BASE_URL", "https://api.cerebras.ai/v1"),
@@ -499,12 +525,54 @@ async def call_cerebras(prompt: str, max_tokens: int = 200) -> str:
         )
     except Exception as e:
         _warn_cerebras_404_if_relevant(e, model)
+        status = getattr(e, "status_code", None) or getattr(
+            getattr(e, "response", None), "status_code", None
+        )
+        if status == 429:
+            _CEREBRAS_ROTATOR.mark_throttled(
+                api_key, retry_after_s=_extract_retry_after_s(e)
+            )
         raise
+    _CEREBRAS_ROTATOR.mark_success(api_key)
     return (resp.choices[0].message.content or "").strip()
 
 
+def _sanitize_conflict_string(s: str, max_chars: int = 300) -> str:
+    """FIX 2: sanitize LLM-sourced conflict text before interpolation into the
+    synthesizer's mandatory-instruction block. Strips control chars, angle
+    brackets, lines that look like prompt-injection attempts, and truncates.
+    """
+    if not s:
+        return ""
+    # Drop control chars and angle brackets
+    cleaned = "".join(
+        ch for ch in s if (ch == "\n" or ch == "\t" or (ord(ch) >= 32 and ch not in "<>"))
+    )
+    injection_markers = (
+        "system:",
+        "assistant:",
+        "ignore previous",
+        "disregard",
+        "you are now",
+    )
+    safe_lines: list[str] = []
+    for line in cleaned.splitlines():
+        lowered = line.lower()
+        if any(marker in lowered for marker in injection_markers):
+            continue
+        safe_lines.append(line)
+    flattened = " ".join(safe_lines).strip()
+    if len(flattened) > max_chars:
+        flattened = flattened[:max_chars].rstrip() + "…"
+    return flattened
+
+
 def _build_disagreement_block(conflict_result: object | None) -> str:
-    """V2.2: enumerate non-temporal contradictions for the synthesizer."""
+    """V2.2 + B4: enumerate non-temporal contradictions for the synthesizer
+    and demand a structured Markdown disagreement matrix. The block embeds a
+    pre-rendered Markdown skeleton (one row per contradiction) so the model
+    has the exact table shape and citation format to emit verbatim.
+    """
     if conflict_result is None or not conflict_result.has_conflict:
         return ""
     real = [c for c in conflict_result.contradictions if not c.is_temporal_evolution]
@@ -514,14 +582,45 @@ def _build_disagreement_block(conflict_result: object | None) -> str:
         "<cross_source_disagreement>",
         "The retrieval found conflicting claims you MUST present neutrally:",
     ]
+    # FIX 2: sanitize attacker-influenced LLM output before interpolation.
+    sanitized: list[tuple[object, str, str, str]] = []
     for c in real:
+        sanitized.append(
+            (
+                c,
+                _sanitize_conflict_string(c.claim),
+                _sanitize_conflict_string(c.position_a),
+                _sanitize_conflict_string(c.position_b),
+            )
+        )
+    for c, s_claim, s_pos_a, s_pos_b in sanitized:
         ids_a = ", ".join(c.doc_ids_a)
         ids_b = ", ".join(c.doc_ids_b)
         lines.append(
-            f'- On "{c.claim}": [{ids_a}] state "{c.position_a}", '
-            f'while [{ids_b}] states "{c.position_b}".'
+            f'- On "{s_claim}": [{ids_a}] state "{s_pos_a}", '
+            f'while [{ids_b}] states "{s_pos_b}".'
         )
     lines.append('  Do NOT pick a winner. Use the phrasing "Sources disagree."')
+    lines.append("")
+    lines.append("MANDATORY OUTPUT FORMAT — render the disagreement as a Markdown")
+    lines.append("table inside the answer (verbatim shape, one row per conflict):")
+    lines.append("")
+    lines.append("**Sources disagree on this:**")
+    lines.append("")
+    lines.append("| Claim | Source A | Source B |")
+    lines.append("|---|---|---|")
+    for c, s_claim, s_pos_a, s_pos_b in sanitized:
+        first_a = c.doc_ids_a[0] if c.doc_ids_a else ""
+        first_b = c.doc_ids_b[0] if c.doc_ids_b else ""
+        lines.append(
+            f"| {s_claim}: A={s_pos_a} / B={s_pos_b} "
+            f"| [{first_a}] | [{first_b}] |"
+        )
+    lines.append("")
+    lines.append("Cite each source using a bare [doc_N] marker inside the table")
+    lines.append("cells — the post-processor expands them to [Title — domain](URL).")
+    lines.append("The table is REQUIRED whenever this block is present; rendering")
+    lines.append("only prose without the table is a failure.")
     lines.append("</cross_source_disagreement>")
     return "\n".join(lines)
 
@@ -732,13 +831,14 @@ async def _synthesize_cerebras(user_prompt: str) -> AsyncIterator[tuple[str, int
     if count_tokens(user_prompt) + 1500 > 7800:  # leave headroom for system + output
         raise RuntimeError("Cerebras 8K context cap exceeded; skipping to next provider")
     from openai import AsyncOpenAI
+    api_key = _CEREBRAS_ROTATOR.next_key()
+    if not api_key:
+        raise RuntimeError("No CEREBRAS_API_KEY / CEREBRAS_API_KEYS configured")
     client = AsyncOpenAI(
-        api_key=os.environ.get("CEREBRAS_API_KEY", ""),
+        api_key=api_key,
         base_url=os.environ.get("CEREBRAS_BASE_URL", "https://api.cerebras.ai/v1"),
         timeout=60.0,
     )
-    if not client.api_key:
-        raise RuntimeError("CEREBRAS_API_KEY not set")
     model = os.environ.get("CEREBRAS_MODEL", "llama3.1-8b")
     messages = [
         {"role": "system", "content": SYNTHESIS_SYSTEM_PROMPT},
@@ -750,7 +850,15 @@ async def _synthesize_cerebras(user_prompt: str) -> AsyncIterator[tuple[str, int
         )
     except Exception as e:
         _warn_cerebras_404_if_relevant(e, model)
+        status = getattr(e, "status_code", None) or getattr(
+            getattr(e, "response", None), "status_code", None
+        )
+        if status == 429:
+            _CEREBRAS_ROTATOR.mark_throttled(
+                api_key, retry_after_s=_extract_retry_after_s(e)
+            )
         raise
+    _CEREBRAS_ROTATOR.mark_success(api_key)
     prompt_tokens = 0
     completion_tokens = 0
     async for chunk in resp:
@@ -911,6 +1019,14 @@ _JUDGE_PROVIDERS = {
         "base_url": "https://models.inference.ai.azure.com",
         "api_key_env": "GITHUB_TOKEN",
         "default_model": "gpt-4o-mini",
+    },
+    "cerebras": {
+        "base_url": "https://api.cerebras.ai/v1",
+        "api_key_env": "CEREBRAS_API_KEY",
+        # Qwen family — non-overlapping with Gemini synth and GPT-4o-mini
+        # secondary, gives the most independent cross-family signal. Free-tier
+        # TPD on Cerebras is ~10× Groq's, eliminating the 22-turn ceiling.
+        "default_model": "qwen-3-235b-a22b-instruct-2507",
     },
 }
 

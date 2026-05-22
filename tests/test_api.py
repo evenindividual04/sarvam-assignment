@@ -434,17 +434,30 @@ def test_sse_event_carries_type_discriminator(app_client, monkeypatch):
 
 
 def test_cot_preemit_filter_strips_thinking(app_client, monkeypatch, caplog):
-    """Phase 1.25: payloads containing `<thinking>` or `thought_summary` are dropped."""
+    """The CoT filter scrubs `<thinking>` blocks from text leaves and drops
+    frames whose CoT-envelope keys (thought_summary, reasoning_content, …)
+    survive scrubbing.
+
+    Behavior split:
+    - `data.text="<thinking>…</thinking>"` → text scrubbed to empty, frame
+      kept (so a mixed thinking+content stream doesn't lose the content
+      portion in a future refactor).
+    - `data={"thought_summary": …}` → envelope key survives scrub → frame
+      dropped wholesale.
+
+    Invariant: no `<thinking>` / `thought_summary` substring leaks into the
+    serialized SSE output — this is the line-103 assignment guarantee.
+    """
     client, _, main_mod = app_client
     from agent.models import ExecutionEvent
 
     async def fake_run(self, query, session_id, cancel_token=None, turn_id=None, config=None):
         # First event: normal, should pass through.
         yield ExecutionEvent("planning", "Planning", data={"turn_id": turn_id})
-        # Second event: contains CoT, must be dropped.
+        # Second event: text contains CoT → scrubbed to empty, frame kept.
         yield ExecutionEvent("generating", "Generating answer with citations",
                              data={"text": "<thinking>internal reasoning</thinking>"})
-        # Third event: also CoT — keyword form.
+        # Third event: CoT envelope key → frame dropped wholesale.
         yield ExecutionEvent("generating", "Generating answer with citations",
                              data={"thought_summary": "hidden"})
         # Fourth event: clean.
@@ -455,10 +468,15 @@ def test_cot_preemit_filter_strips_thinking(app_client, monkeypatch, caplog):
         body = b"".join(r.iter_bytes()).decode()
     frames = [f for f in _parse_sse_frames(body) if f["data"] is not None]
     serialized = json.dumps([f["data"] for f in frames])
+    # Line-103 assignment invariant: no CoT substring in the wire output.
     assert "<thinking>" not in serialized
     assert "thought_summary" not in serialized
-    # Original event count was 4; we expect 2 to survive.
-    assert len(frames) == 2, f"expected 2 frames, got {len(frames)}: {frames}"
+    # Envelope-key frame dropped, scrubbed-text frame kept (planning + scrubbed-generating + done).
+    assert len(frames) == 3, f"expected 3 frames, got {len(frames)}: {frames}"
+    # The scrubbed-text frame should have an empty (or absent) text field.
+    gen_frames = [f for f in frames if f["data"].get("step") == "generating"]
+    assert len(gen_frames) == 1
+    assert gen_frames[0]["data"]["data"].get("text", "") == ""
 
 
 def test_last_event_id_replay(app_client, monkeypatch):
