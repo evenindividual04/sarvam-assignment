@@ -44,3 +44,4 @@ frontend/next-env.d.ts
 # Claude harness internals (agent worktrees, plans, transcripts)
 .claude/
 
+.coverage

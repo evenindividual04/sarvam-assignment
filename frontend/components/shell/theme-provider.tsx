@@ -1,7 +1,11 @@
 "use client";
 
 import { ThemeProvider as NextThemesProvider } from "next-themes";
-import type { ThemeProviderProps } from "next-themes";
+import type { ComponentProps } from "react";
+
+// next-themes 1.0+ no longer exports ThemeProviderProps as a named type.
+// Derive it from the component itself so future shape changes stay in sync.
+type ThemeProviderProps = ComponentProps<typeof NextThemesProvider>;
 
 /**
  * Client-only wrapper around `next-themes` so the server-rendered
