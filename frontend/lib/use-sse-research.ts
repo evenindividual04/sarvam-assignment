@@ -74,6 +74,9 @@ export interface PlanApprovalPending {
   turnId: string;
   plannerOutput: PlannerOutput;
   subQueries: string[];
+  /** Wall-clock time (ms) the `plan_approval` event arrived. The panel's
+   *  countdown anchors on this so it survives remounts without resetting. */
+  arrivedAt: number;
 }
 
 export interface UncertaintySignal {
@@ -401,6 +404,7 @@ export function useSseResearch(): UseSseResearchReturn {
                 subQueries: Array.isArray(d.sub_queries)
                   ? d.sub_queries
                   : d.planner_output.queries.map((q) => q.text),
+                arrivedAt: Date.now(),
               });
             }
           }
@@ -624,13 +628,24 @@ export function useSseResearch(): UseSseResearchReturn {
       if (!sid) return;
       try {
         await approveResearchPlan(pending.turnId, sid, editedSubQueries);
+        setApprovalPending(null);
       } catch (e) {
-        // Surface a soft error but don't abort the stream — the server will
-        // resolve via /cancel or timeout if approve never lands.
+        // Previously this was a console.warn + silent dismiss, which left
+        // the SSE stream paused until the 300s approval timeout fired —
+        // ~5 minutes of silence with no UI signal. Surface the failure
+        // immediately, abort the dangling stream, and let the user
+        // re-submit. The panel dismissal still happens so the user can
+        // see the error banner instead.
         // eslint-disable-next-line no-console
         console.warn("approveResearchPlan failed", e);
-      } finally {
         setApprovalPending(null);
+        setError(
+          e instanceof Error
+            ? `Couldn't submit plan approval: ${e.message}. Re-submit the query to try again.`
+            : "Couldn't submit plan approval. Re-submit the query to try again.",
+        );
+        setStatus("error");
+        abortRef.current?.abort();
       }
     },
     [approvalPending],

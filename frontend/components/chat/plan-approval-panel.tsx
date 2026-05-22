@@ -13,7 +13,7 @@
  * we surface a read-only countdown badge so the user knows the window.
  */
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import type { PlannerOutput } from "@/lib/types";
@@ -26,6 +26,11 @@ interface PlanApprovalPanelProps {
   onCancel: () => void;
   /** Default 300s; injected so tests can override. */
   timeoutSeconds?: number;
+  /** Wall-clock time the `plan_approval` SSE event arrived. Required for
+   *  the countdown to survive parent re-renders / row remounts — without
+   *  it the timer resets to 300s every time React decides to unmount and
+   *  re-add the panel (e.g. on row-list re-rendering during streaming). */
+  arrivedAt?: number;
 }
 
 const MAX_SUB_QUERIES = 6;
@@ -38,10 +43,23 @@ export function PlanApprovalPanel({
   onApprove,
   onCancel,
   timeoutSeconds = 300,
+  arrivedAt,
 }: PlanApprovalPanelProps) {
   const [edited, setEdited] = useState<string[]>(() => [...subQueries]);
   const [submitting, setSubmitting] = useState(false);
-  const [remaining, setRemaining] = useState(timeoutSeconds);
+  // Anchor the countdown on the actual moment the approval event arrived
+  // (via `arrivedAt` prop). Falling back to component mount-time only
+  // matters during synthetic tests that don't supply the prop.
+  const anchorRef = useRef<number>(arrivedAt ?? Date.now());
+  useEffect(() => {
+    if (typeof arrivedAt === "number") anchorRef.current = arrivedAt;
+  }, [arrivedAt]);
+  const compute = () =>
+    Math.max(
+      0,
+      timeoutSeconds - Math.floor((Date.now() - anchorRef.current) / 1000),
+    );
+  const [remaining, setRemaining] = useState(compute);
 
   useEffect(() => {
     setEdited([...subQueries]);
@@ -49,23 +67,32 @@ export function PlanApprovalPanel({
 
   useEffect(() => {
     if (submitting) return;
-    const start = Date.now();
+    setRemaining(compute());
     const id = window.setInterval(() => {
-      const elapsed = Math.floor((Date.now() - start) / 1000);
-      setRemaining(Math.max(0, timeoutSeconds - elapsed));
+      setRemaining(compute());
     }, 1000);
     return () => window.clearInterval(id);
+    // `compute` reads from anchorRef + timeoutSeconds; both are stable for
+    // the lifetime of an approval gate (the ref is only updated when a
+    // different gate's arrivedAt prop lands), so omitting `compute` from
+    // the dep list is intentional.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [timeoutSeconds, submitting]);
+
+  const expired = remaining <= 0;
 
   const dirty = useMemo(() => {
     if (edited.length !== subQueries.length) return true;
     return edited.some((q, i) => q !== subQueries[i]);
   }, [edited, subQueries]);
 
-  const canSubmit = edited.length > 0 && edited.every((q) => q.trim().length > 0);
+  const canSubmit =
+    !expired &&
+    edited.length > 0 &&
+    edited.every((q) => q.trim().length > 0);
 
   const handleApprove = () => {
-    if (submitting || !canSubmit) return;
+    if (submitting || expired || !canSubmit) return;
     setSubmitting(true);
     const payload = dirty ? edited.map((q) => q.trim()) : null;
     onApprove(payload);
@@ -111,10 +138,13 @@ export function PlanApprovalPanel({
           </p>
         </div>
         <span
-          className="font-mono text-[10px] tabular-nums text-subtle-foreground"
+          className={cn(
+            "font-mono text-[10px] tabular-nums",
+            expired ? "text-destructive" : "text-subtle-foreground",
+          )}
           aria-live="polite"
         >
-          {remaining}s
+          {expired ? "timed out" : `${remaining}s`}
         </span>
       </div>
 
@@ -190,8 +220,17 @@ export function PlanApprovalPanel({
             onClick={handleApprove}
             disabled={submitting || !canSubmit}
             className="font-mono text-[11px] uppercase tracking-[0.12em]"
+            title={
+              expired
+                ? "Approval window has expired — re-submit the query to try again."
+                : undefined
+            }
           >
-            {dirty ? "Approve edited plan" : "Approve plan"}
+            {expired
+              ? "Window expired"
+              : dirty
+                ? "Approve edited plan"
+                : "Approve plan"}
           </Button>
         </div>
       </div>

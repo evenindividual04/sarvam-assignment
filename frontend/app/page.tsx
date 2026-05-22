@@ -622,6 +622,7 @@ function ChatTurn({
               turnId={row.approvalPending.turnId}
               plannerOutput={row.approvalPending.plannerOutput}
               subQueries={row.approvalPending.subQueries}
+              arrivedAt={row.approvalPending.arrivedAt}
               onApprove={onApprovePlan}
               onCancel={onApprovalCancel}
             />
