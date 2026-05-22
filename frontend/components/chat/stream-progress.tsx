@@ -439,7 +439,15 @@ function aggregateTypedEvents(events: ExecutionEvent[]): AggregateResult {
       if (!loc) continue;
       const bucket = out.phases[loc.phase];
       const chip = bucket?.chips?.[loc.idx];
-      if (chip) chip.status = d.status === "ok" ? "ok" : "error";
+      if (chip && bucket?.chips) {
+        // Immutable update — mutating a derived object inside useMemo
+        // is fragile under StrictMode and React's reconciliation. Replace
+        // the chip in place with a new object instead.
+        bucket.chips[loc.idx] = {
+          ...chip,
+          status: d.status === "ok" ? "ok" : "error",
+        };
+      }
     } else if (t === "phase_progress") {
       const name = String(d.name || "");
       if (!name) continue;

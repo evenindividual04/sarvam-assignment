@@ -176,7 +176,24 @@ export default function QuestionDetailPage({ params }: PageProps) {
                 <div className="font-mono text-[10px] uppercase tracking-[0.18em] text-subtle-foreground mb-4">
                   Agent answer
                 </div>
-                <RichMarkdown>{detail.agent_answer || "_No answer._"}</RichMarkdown>
+                {detail.agent_answer && detail.agent_answer.trim() ? (
+                  <RichMarkdown>{detail.agent_answer}</RichMarkdown>
+                ) : (
+                  <div className="border border-dashed border-border rounded-[8px] p-6 text-center">
+                    <div className="font-mono text-[10px] uppercase tracking-[0.14em] text-subtle-foreground mb-2">
+                      No answer recorded
+                    </div>
+                    <p className="font-sans text-[13px] text-muted-foreground leading-relaxed max-w-prose mx-auto">
+                      This turn produced no answer text. Most commonly:
+                      the synthesizer timed out, the context window was
+                      blown by an oversized page, or the LLM provider
+                      returned an empty response. Check{" "}
+                      <code className="font-mono text-[12px]">judge_reasoning</code>{" "}
+                      below or the <strong>Context</strong> tab for the
+                      full XML the synthesizer received.
+                    </p>
+                  </div>
+                )}
               </div>
             </TabsContent>
 

@@ -112,11 +112,21 @@ export async function getQuestionDetail(
 // Phase 1.25: fetch the canonical phase label dictionary so the pipeline
 // component doesn't duplicate the Python STREAM_LABELS constant. Cached on
 // the module so a single network round-trip per page load suffices.
-let _labelsCache: StreamLabelsResponse | null = null;
-export async function getStreamLabels(): Promise<StreamLabelsResponse> {
-  if (_labelsCache) return _labelsCache;
-  _labelsCache = await getJson<StreamLabelsResponse>("/stream/labels");
-  return _labelsCache;
+// Promise-level cache so multiple concurrent mounts of StreamProgress
+// (one per ChatTurn) share a single in-flight fetch instead of each one
+// hitting `/stream/labels` independently. On failure the cache resets so
+// a later mount can retry.
+let _labelsPromise: Promise<StreamLabelsResponse> | null = null;
+export function getStreamLabels(): Promise<StreamLabelsResponse> {
+  if (!_labelsPromise) {
+    _labelsPromise = getJson<StreamLabelsResponse>("/stream/labels").catch(
+      (e) => {
+        _labelsPromise = null;
+        throw e;
+      },
+    );
+  }
+  return _labelsPromise;
 }
 
 // S1 fix: session_id is required by the backend to prove the caller owns the
