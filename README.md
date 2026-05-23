@@ -9,6 +9,8 @@ pinned: false
 short_description: Web-grounded research with citation audit and conflict probe
 ---
 
+> The block above is Hugging Face Spaces metadata — it tells HF how to build the live Space (SDK type, exposed port, card gradient, emoji). GitHub renders it as a table at the top of this README; HF reads it silently at deploy time. Project content starts below.
+
 # Deep Research Agent
 
 A web-grounded research agent that issues typed search queries, fetches and reranks sources, and synthesizes citation-traced answers — every claim audited against the snippet it cites at generation time. Conflicts between sources are surfaced as disagreements, not collapsed into a single take. Built in plain Python `asyncio` with no orchestration framework, in line with the assignment constraint.
