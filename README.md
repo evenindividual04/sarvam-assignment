@@ -36,7 +36,6 @@ A web-grounded research agent that issues typed search queries, fetches and rera
 8. [Future Improvements](#future-improvements)
 9. [Assumptions](#assumptions)
 10. [Related Work](#related-work)
-11. [Submission Packet](#submission-packet)
 
 ---
 
@@ -468,26 +467,6 @@ Each architectural decision traces to a published paper or system. Full citation
 Key influences: **Huang et al. 2025** (DR-agent taxonomy), **Park et al. 2025** (Stop-RAG value gate), **Cattan et al. 2025** (DRAGged conflict taxonomy), **Liu et al. 2023** (Lost-in-the-Middle reordering), **Zheng et al. 2023** + **Panickssery et al. 2024** (cross-family judge discipline), **Krishna et al. 2025** (FRAMES 4-dimension metric coverage).
 
 ---
-
-## Submission Packet
-
-The final PDF submission bundles this README, the demo video link, the live URLs, and the assumptions list. Generate it deterministically:
-
-```bash
-# Produce the PDF from the README + assumptions appendix
-python scripts/build_submission_pdf.py --out submission.pdf
-
-# Reproducibility snapshot to embed in the packet
-python scripts/repro_report.py --mode quick > submission_repro.txt
-```
-
-Submission contents:
-
-1. This README (rendered to PDF)
-2. Demo video link (top of file)
-3. Live URLs (Vercel frontend + HF Spaces backend)
-4. `assumptions` section (above)
-5. `submission_repro.txt` — git SHA, prompt versions, env knobs, smoke summary
 
 ## License
 
