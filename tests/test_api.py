@@ -551,3 +551,55 @@ def test_stream_labels_endpoint(app_client):
     assert body["labels"]["fetching"] == "Fetching sources"
     assert body["labels"]["selecting"] == "Selecting relevant context"
     assert body["labels"]["generating"] == "Generating answer with citations"
+
+
+def test_stream_labels_match_spec_order():
+    """Spec (sarvam-assignment.pdf p.4) lists the streaming step labels in this
+    order: Planning, Searching the web, Fetching sources, Selecting relevant
+    context, Generating answer with citations. The PDF says "such as" so the
+    labels aren't mandated verbatim — but if we DO emit them, they should
+    appear in the spec order so the UI's progress indicator reads top-to-bottom
+    the way a reviewer expects.
+    """
+    from agent.orchestrator import PHASE_ORDER, STREAM_LABELS
+
+    spec_order = [
+        "Planning",
+        "Searching the web",
+        "Fetching sources",
+        "Selecting relevant context",
+        "Generating answer with citations",
+    ]
+    emitted = [STREAM_LABELS[p] for p in PHASE_ORDER if p in STREAM_LABELS]
+    # The 5 spec labels must appear in spec order within our emission sequence
+    # (we additionally emit 'Probing' and 'Verifying'; those can be interleaved).
+    indices = [emitted.index(lbl) for lbl in spec_order if lbl in emitted]
+    assert indices == sorted(indices), (
+        f"Spec-required labels are out of order. Spec order: {spec_order}. "
+        f"Our PHASE_ORDER emits: {emitted}"
+    )
+    # Every spec-required label must actually be in the emission set.
+    missing = [lbl for lbl in spec_order if lbl not in emitted]
+    assert not missing, f"Missing spec-required stream labels: {missing}"
+
+
+def test_default_allowed_origins_covers_localhost_and_127():
+    """Regression: by default both http://localhost:3000 and
+    http://127.0.0.1:3000 must be allowed. Dev users (and Playwright E2E)
+    hit the frontend via either form; restricting to only `localhost` made
+    127.0.0.1 page loads silently fail provider health probes.
+    """
+    import importlib, os
+    os.environ.pop("ALLOWED_ORIGINS", None)
+    import main as main_mod
+    importlib.reload(main_mod)
+    # Inspect the configured CORS middleware to assert both origins are present.
+    from starlette.middleware.cors import CORSMiddleware
+    cors = next(
+        (m for m in main_mod.app.user_middleware if m.cls is CORSMiddleware),
+        None,
+    )
+    assert cors is not None, "CORSMiddleware not installed"
+    origins = cors.kwargs["allow_origins"]
+    assert "http://localhost:3000" in origins
+    assert "http://127.0.0.1:3000" in origins

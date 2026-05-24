@@ -85,7 +85,9 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Deep Research Agent", lifespan=lifespan)
 
-_allowed = os.environ.get("ALLOWED_ORIGINS", "http://localhost:3000")
+_allowed = os.environ.get(
+    "ALLOWED_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000"
+)
 _allow_origins = [o.strip() for o in _allowed.split(",") if o.strip()]
 # S3 fix: with allow_credentials=True a wildcard origin is both incorrect (the
 # CORS spec forbids it) and a security risk. Fail loudly at import time so a
