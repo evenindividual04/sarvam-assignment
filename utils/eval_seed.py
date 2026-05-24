@@ -87,6 +87,20 @@ async def seed_if_empty() -> int:
                         )
                 if not parsed_rows:
                     continue
+                # Skip JSONL files whose entire run scored 0% pass. These are
+                # artifacts of provider outages or judge misfires that should
+                # not surface as the headline run on a fresh HF Space deploy —
+                # a reviewer clicking the most-recent row would see a 0% verdict
+                # and conclude the agent is broken. The file stays in the repo
+                # as a research artifact; it just doesn't seed the dashboard.
+                # An "all PASS" run is fine; only the all-FAIL case is dropped.
+                passes = sum(1 for r in parsed_rows if r.get("failure_class") == "PASS")
+                if passes == 0:
+                    logger.info(
+                        "eval_seed: skipping %s (0/%d PASS; artifact only)",
+                        path.name, len(parsed_rows),
+                    )
+                    continue
                 canonical_run_at = min(
                     (r.get("run_at") for r in parsed_rows if r.get("run_at")),
                     default=None,
