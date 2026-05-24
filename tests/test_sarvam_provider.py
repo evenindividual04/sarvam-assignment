@@ -252,3 +252,73 @@ def test_synthesize_default_is_gemini(monkeypatch):
 
     asyncio.run(go())
     assert sarvam_called["yes"] is False
+
+
+def test_synth_chain_strips_think_blocks_from_provider_output(monkeypatch):
+    """Regression: reasoning-tuned synth providers (Sarvam-m, Qwen on Cerebras)
+    emit <think>...</think> blocks inline. The outer synthesize() chain must
+    strip them before yielding to the SSE pipeline so users never see CoT.
+    """
+    monkeypatch.setenv("SYNTH_PROVIDER", "sarvam")
+    monkeypatch.setenv("SARVAM_API_KEY", "sk-test")
+
+    async def thinking_sarvam(prompt):
+        # Stream comes in fragments — the open tag and close tag straddle
+        # different yields, mirroring a real reasoning model.
+        yield ("<think>let me ", 0, 0)
+        yield ("plan</think>", 0, 0)
+        yield ("Paris is the capital.", 0, 0)
+        yield ("", 100, 50)  # token-count bookkeeping tail
+
+    monkeypatch.setattr(provider_router, "_synthesize_sarvam", thinking_sarvam)
+
+    async def go():
+        out = []
+        async for chunk in provider_router.synthesize(
+            query="capital?", context_xml="<documents/>", doc_map={}, history_text="",
+        ):
+            out.append(chunk)
+        return out
+
+    chunks = asyncio.run(go())
+    text = "".join(c[0] for c in chunks if c and c[0])
+    assert "Paris is the capital." in text
+    assert "<think>" not in text
+    assert "</think>" not in text
+    assert "let me plan" not in text
+
+
+def test_synth_chain_falls_through_when_provider_yields_only_empty(monkeypatch):
+    """Regression: a provider that yields ONLY the trailing ("", 0, 0)
+    bookkeeping tuple (e.g. Sarvam after sarvam-m 422s and sarvam-30b returns
+    no content) must not stop the chain. The outer chain must fall through to
+    the next provider so the user gets a real answer.
+    """
+    monkeypatch.setenv("SYNTH_PROVIDER", "sarvam")
+    monkeypatch.setenv("SARVAM_API_KEY", "sk-test")
+
+    async def empty_sarvam(prompt):
+        # Mimic _stream_sarvam_model: no content chunks, only the trailing
+        # bookkeeping yield used for prompt/completion token totals.
+        yield ("", 0, 0)
+
+    async def good_gemini(prompt):
+        yield ("Real Gemini answer.", 0, 0)
+        yield ("", 100, 50)
+
+    monkeypatch.setattr(provider_router, "_synthesize_sarvam", empty_sarvam)
+    monkeypatch.setattr(provider_router, "_synthesize_gemini", good_gemini)
+
+    async def go():
+        out = []
+        async for chunk in provider_router.synthesize(
+            query="q", context_xml="<documents/>", doc_map={}, history_text="",
+        ):
+            out.append(chunk)
+        return out
+
+    chunks = asyncio.run(go())
+    text = "".join(c[0] for c in chunks)
+    assert "Real Gemini answer." in text, (
+        "Chain must fall through Sarvam (no content) to Gemini, but got: %r" % text
+    )

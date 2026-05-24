@@ -807,14 +807,41 @@ Answer the research question using only the documents above. Cite every factual 
             logger.debug("Skipping %s: %s not set", name, key_env)
             continue
         try:
+            # Every provider emits a trailing ("", 0, 0) bookkeeping tuple for
+            # token totals. Counting that as success would mask providers that
+            # silently produced no content (e.g. Sarvam-m 422'ing on context
+            # overflow, then sarvam-30b returning empty) and stop the chain
+            # before Gemini gets a turn. Only treat non-empty text as success.
+            #
+            # Reasoning-tuned models (Sarvam-m, Qwen 3 on Cerebras, DeepSeek R1
+            # on OpenRouter) emit <think>...</think> blocks inline. Apply a
+            # streaming filter here so the SSE pipeline never sees CoT — same
+            # invariant whether the synth provider is reasoning-tuned or not.
+            from utils.cot_filter import CotStreamFilter
+            cot = CotStreamFilter()
             yielded_any = False
             async for chunk in fn(user_prompt):
+                if isinstance(chunk, tuple) and chunk:
+                    raw_text = chunk[0] or ""
+                    clean = cot.feed(raw_text)
+                    if clean:
+                        yielded_any = True
+                        # Rebuild the tuple preserving any token-count fields.
+                        yield (clean, *chunk[1:])
+                    elif not raw_text and len(chunk) > 1:
+                        # Bookkeeping tail (e.g. ("", prompt_tokens, completion_tokens)).
+                        yield chunk
+                else:
+                    yield chunk
+            tail = cot.flush()
+            if tail:
                 yielded_any = True
-                yield chunk
+                yield (tail, 0, 0)
             if yielded_any:
                 if step > 0:
                     logger.info("[synth] fallback succeeded: provider=%s (step %d)", name, step)
                 return
+            logger.warning("[synth] %s yielded no content, trying next", name)
         except CircuitOpenError as e:
             last_err = e
             logger.warning("[synth] %s breaker open, trying next: %s", name, e)
@@ -1032,7 +1059,37 @@ async def _stream_sarvam_model(
     user_prompt: str,
     model: str,
 ) -> AsyncIterator[tuple[str, int, int]]:
-    """Open a single Sarvam streaming completion against the given model."""
+    """Open a single Sarvam streaming completion against the given model.
+
+    Pre-flight context check: sarvam-m caps at 7192 tokens, sarvam-30b at
+    ~32k. Realistic research prompts (system + history + 6-10 sources +
+    instructions) typically clear 8k tokens. Without this guard we burn a
+    full HTTP round-trip on a guaranteed 422 before the chain falls through
+    to Gemini. Mirrors the Cerebras pre-flight at line 923.
+    """
+    from utils.token_counter import count_tokens
+
+    # SYNTHESIS_SYSTEM_PROMPT is sent as a separate message but still
+    # consumed from the model's context window.
+    estimated_tokens = (
+        count_tokens(user_prompt)
+        + count_tokens(SYNTHESIS_SYSTEM_PROMPT)
+        + 1500  # max_tokens reservation for the response
+    )
+    # Verified caps (May 2026):
+    #  - sarvam-m: 7192 (live 422 from the hosted API)
+    #  - sarvam-30b: 32k per Sarvam's release blog (some configs report 65k;
+    #    we stay conservative because the hosted endpoint may serve the
+    #    smaller variant)
+    #  - sarvam-105b: 128k per Sarvam's release blog
+    _SARVAM_CONTEXT_CAPS = {"sarvam-m": 7192, "sarvam-30b": 32768, "sarvam-105b": 131072}
+    cap = _SARVAM_CONTEXT_CAPS.get(model, 8000)
+    if estimated_tokens > cap:
+        raise RuntimeError(
+            f"Sarvam {model} {cap}-token cap exceeded "
+            f"(~{estimated_tokens} tokens estimated); skipping to next provider"
+        )
+
     from openai import AsyncOpenAI
 
     client = AsyncOpenAI(
