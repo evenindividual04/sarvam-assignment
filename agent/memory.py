@@ -309,6 +309,16 @@ async def init_db() -> None:
         await db.execute(CREATE_CLAIM_AUDIT_INDEX)
         await db.execute(CREATE_CIRCUIT_EVENTS)
         await db.execute(CREATE_CIRCUIT_EVENTS_INDEX)
+        # TTL caches for page fetches and search results (utils.cache).
+        # Created inside init_db so a single init call wires the full schema.
+        from utils.cache import (
+            CREATE_FETCHED_PAGES,
+            CREATE_SEARCH_CACHE,
+            CREATE_SEARCH_CACHE_INDEX,
+        )
+        await db.execute(CREATE_FETCHED_PAGES)
+        await db.execute(CREATE_SEARCH_CACHE)
+        await db.execute(CREATE_SEARCH_CACHE_INDEX)
         try:
             await db.execute("ALTER TABLE eval_runs ADD COLUMN context_precision_score REAL")
         except aiosqlite.OperationalError:

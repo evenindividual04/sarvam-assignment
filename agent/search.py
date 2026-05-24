@@ -265,11 +265,59 @@ async def _search_single_query(
     V3.4 / FDSE add-on: when ``language`` is any Indic script (``hi``/``ta``/``bn``),
     prefer Parallel only — Tavily and Serper return English-heavy results for
     Indic queries. If Parallel fails (or its breaker is open), fall through to
-    the standard chain so the turn still completes in a degraded mode."""
+    the standard chain so the turn still completes in a degraded mode.
+
+    Results are cached for 1h (disable with SEARCH_CACHE_DISABLED=1). The
+    cache key combines provider-class + intent + language + time_sensitivity
+    so a re-ask of the same query under the same routing returns instantly
+    — critical for eval re-runs and dev iteration. We cache the post-routing
+    result list (the same list this function would return on a cache miss).
+    """
     results: list[SearchResult] = []
 
     if language is None:
         language = _detect_language(q)
+
+    # Cache lookup. Keyed wider than just `q` so different intents on the
+    # same string still get correct routing.
+    cache_enabled = os.getenv("SEARCH_CACHE_DISABLED", "").strip() not in {"1", "true", "True"}
+    cache_provider_key = f"search:{intent.value}:{language}:{time_sensitivity}"
+    if cache_enabled:
+        try:
+            from utils.cache import get_cached_search
+            hit = await get_cached_search(cache_provider_key, q)
+            if hit:
+                logger.debug(
+                    "search cache hit (%s) for %r", cache_provider_key, q,
+                    extra={"component": "search"},
+                )
+                return [SearchResult(**r) for r in hit]
+        except Exception as exc:
+            logger.debug(
+                "search cache lookup error: %s", exc,
+                extra={"component": "search"},
+            )
+
+    async def _finalize(out: list[SearchResult]) -> list[SearchResult]:
+        """Tag intent_origin and persist to cache. Only writes when non-empty
+        — caching an empty result list would mask transient provider outages."""
+        tag = "contradiction_probe" if intent == QueryIntent.CONTRADICTION_PROBE else intent.value
+        for r in out:
+            if r.intent_origin is None:
+                r.intent_origin = tag
+        if cache_enabled and out:
+            try:
+                from dataclasses import asdict
+                from utils.cache import set_cached_search
+                await set_cached_search(
+                    cache_provider_key, q, [asdict(r) for r in out],
+                )
+            except Exception as exc:
+                logger.debug(
+                    "search cache write error: %s", exc,
+                    extra={"component": "search"},
+                )
+        return out
 
     if language in {"hi", "ta", "bn"}:
         label = f"Parallel({language})"
@@ -283,11 +331,7 @@ async def _search_single_query(
             results = await _try(lambda: _search_tavily(q, client), f"Tavily({language}-fallback)", q)
             if not results:
                 results = await _try(lambda: _search_serper(q, client), f"Serper({language}-fallback)", q)
-        tag = "contradiction_probe" if intent == QueryIntent.CONTRADICTION_PROBE else intent.value
-        for r in results:
-            if r.intent_origin is None:
-                r.intent_origin = tag
-        return results
+        return await _finalize(results)
 
     # Phase 1.875: planner-level `time_sensitivity == "live"` forces the
     # Tavily news-mode route regardless of intent, since news is the only
@@ -298,11 +342,7 @@ async def _search_single_query(
             results = await _try(lambda: _search_parallel(q, client), "Parallel(live-fallback)", q)
         if not results:
             results = await _try(lambda: _search_serper(q, client), "Serper(live-fallback)", q)
-        tag = "contradiction_probe" if intent == QueryIntent.CONTRADICTION_PROBE else intent.value
-        for r in results:
-            if r.intent_origin is None:
-                r.intent_origin = tag
-        return results
+        return await _finalize(results)
 
     if intent == QueryIntent.RECENCY_CHECK and os.getenv("TAVILY_API_KEY"):
         results = await _try(lambda: _search_tavily_news(q, client, days=30), "Tavily(news)", q)
@@ -324,11 +364,7 @@ async def _search_single_query(
         if not results:
             results = await _try(lambda: _search_serper(q, client), "Serper", q)
 
-    tag = "contradiction_probe" if intent == QueryIntent.CONTRADICTION_PROBE else intent.value
-    for r in results:
-        if r.intent_origin is None:
-            r.intent_origin = tag
-    return results
+    return await _finalize(results)
 
 
 def _dedup_preserve_origin(results: list[SearchResult]) -> list[SearchResult]:

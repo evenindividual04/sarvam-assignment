@@ -242,6 +242,24 @@ class Extractor:
             )
             self.fetch_failures[url] = "blocked_unsafe_url"
             return None
+        # Page-fetch cache hit: Wikipedia / Britannica / news domains recur
+        # often across turns and sessions. Skip the httpx + Trafilatura round
+        # trip when we already have a fresh extraction. Disabled by setting
+        # PAGE_CACHE_DISABLED=1 (eval/CI may want fresh fetches).
+        if os.getenv("PAGE_CACHE_DISABLED", "").strip() not in {"1", "true", "True"}:
+            try:
+                from utils.cache import get_cached_page
+                hit = await get_cached_page(url)
+                if hit and hit.get("text"):
+                    logger.debug(
+                        "page cache hit %s", url, extra={"component": "extractor"},
+                    )
+                    return hit["text"]
+            except Exception as exc:
+                logger.debug(
+                    "page cache lookup error %s: %s", url, exc,
+                    extra={"component": "extractor"},
+                )
         try:
             resp = await self._client.get(url)
             resp.raise_for_status()
@@ -271,7 +289,26 @@ class Extractor:
         text = await self._extract_with_fallbacks(url, html)
         if not text:
             self.fetch_failures[url] = "empty_extraction"
-        return text or None
+            return None
+        # Persist for the next caller. Best-effort; ignores DB errors.
+        if os.getenv("PAGE_CACHE_DISABLED", "").strip() not in {"1", "true", "True"}:
+            try:
+                from utils.cache import set_cached_page
+                from datetime import datetime, timezone
+                from urllib.parse import urlparse
+                from utils.url_norm import normalize_domain
+                await set_cached_page(
+                    url,
+                    text,
+                    domain=normalize_domain(urlparse(url).netloc),
+                    retrieved_at=datetime.now(timezone.utc).isoformat(),
+                )
+            except Exception as exc:
+                logger.debug(
+                    "page cache write failed %s: %s", url, exc,
+                    extra={"component": "extractor"},
+                )
+        return text
 
     async def extract_all(self, results: list[SearchResult], cancel_token=None) -> dict[str, Optional[str]]:
         """Extract all URLs concurrently (semaphore limits to 3 parallel)."""
