@@ -557,8 +557,28 @@ export function useSseResearch(): UseSseResearchReturn {
           }
 
           if (ev.step === "done") {
-            setFinalData(ev.data as DoneEventData);
-            setStatus("done");
+            // Two distinct events both arrive with step="done":
+            //   1) typed `run_finished` — usage + latency + cost (NO `urls`)
+            //   2) full final-answer payload (HAS `urls`, `doc_map`, etc.)
+            // The first one is consumed by the stream-progress pill via
+            // its own `t === "run_finished"` branch. Without this guard,
+            // the partial payload wins setFinalData briefly and a render
+            // accessing `final.urls.length` crashes in production (where
+            // React doesn't always batch the two updates the way dev does).
+            const d = ev.data as Partial<DoneEventData> | undefined;
+            const looksFinal =
+              d !== undefined &&
+              typeof d === "object" &&
+              Array.isArray(d.urls);
+            if (looksFinal) {
+              setFinalData(ev.data as DoneEventData);
+              setStatus("done");
+            } else if (ev.type !== "run_finished") {
+              // Unknown step=done variant with no urls and no run_finished
+              // type discriminator — still close the stream out so the UI
+              // doesn't hang, just don't set the partial as final.
+              setStatus("done");
+            }
           }
 
           if (ev.step === "error") {

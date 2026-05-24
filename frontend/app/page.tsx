@@ -692,9 +692,10 @@ function ChatTurn({
               </div>
               <div className="flex items-center justify-between pt-1">
                 <span className="font-mono text-[11px] tabular-nums text-muted-foreground">
-                  {row.final.urls.length} sources ·{" "}
-                  {row.final.prompt_tokens + row.final.completion_tokens} tokens
-                  · {formatMs(row.final.latency_ms)}
+                  {row.final.urls?.length ?? 0} sources ·{" "}
+                  {(row.final.prompt_tokens ?? 0) +
+                    (row.final.completion_tokens ?? 0)}{" "}
+                  tokens · {formatMs(row.final.latency_ms ?? 0)}
                 </span>
                 <div className="flex items-center gap-1">
                   <Button
