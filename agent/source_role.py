@@ -208,8 +208,22 @@ async def classify_source_roles(
     if raw:
         parsed = _parse_response(raw)
 
+    # FIX: the LLM frequently echoes URLs with a trailing slash, scheme
+    # change, or missing fragment. A naive `parsed.get(c.url, ...)` lookup
+    # then misses and the source gets marked "unclassified" even though the
+    # LLM successfully classified it — this was the "1-char difference but
+    # still got flagged as a bad source" symptom users saw in the trace.
+    # Build a normalized index and look up against that, with the raw URL
+    # as a secondary fallback.
+    from utils.url_norm import normalize_url
+    parsed_by_norm = {normalize_url(u): v for u, v in parsed.items()}
+
     for c in batch:
-        entry = parsed.get(c.url, ("unclassified", 0.0))
+        entry = (
+            parsed.get(c.url)
+            or parsed_by_norm.get(normalize_url(c.url))
+            or ("unclassified", 0.0)
+        )
         result[c.url] = entry
         # Only cache real classifications, not failure-path fallbacks. This
         # lets a flaky run retry on the next turn instead of pinning every URL

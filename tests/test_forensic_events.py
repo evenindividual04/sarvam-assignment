@@ -256,6 +256,50 @@ def test_source_role_classifier_parses_valid_response(monkeypatch):
     assert result["https://news.example/b"] == ("news_event", 0.7)
 
 
+def test_source_role_classifier_tolerates_llm_url_echo_variants(monkeypatch):
+    """Regression A1: the LLM frequently echoes URLs with a trailing slash,
+    scheme case change, missing fragment, or :443 added. Previously the
+    naive `parsed.get(c.url, ...)` lookup missed and the source was marked
+    'unclassified' — the "1-character difference still got flagged" symptom
+    users saw in the trace. The match must succeed via the normalized index.
+    """
+    from agent.source_role import _clear_cache
+    _clear_cache()
+
+    # Input URLs as they exist in the chunk pool (canonical).
+    inputs = [
+        "https://en.wikipedia.org/wiki/Paris",
+        "https://www.britannica.com/place/Paris",
+        "https://example.gov/policy",
+    ]
+    snippets = [_mk_snippet(doc_id=f"d{i}", url=u, text=u) for i, u in enumerate(inputs)]
+
+    # LLM-echoed URLs differ by one cosmetic detail each.
+    async def _drift(_prompt, max_tokens=400):
+        return (
+            '{"roles": ['
+            # trailing slash
+            '{"url": "https://en.wikipedia.org/wiki/Paris/", "role": "encyclopedic", "confidence": 0.95},'
+            # explicit default port
+            '{"url": "https://www.britannica.com:443/place/Paris", "role": "encyclopedic", "confidence": 0.9},'
+            # fragment appended
+            '{"url": "https://example.gov/policy#section-2", "role": "official", "confidence": 0.85}'
+            ']}'
+        )
+
+    monkeypatch.setattr("utils.provider_router.call_groq", _drift)
+
+    result = asyncio.run(classify_source_roles(snippets))
+    # Every input URL must resolve to a real classification, NOT "unclassified".
+    for url in inputs:
+        role, conf = result[url]
+        assert role != "unclassified", (
+            f"URL {url} fell back to 'unclassified' despite the LLM "
+            f"classifying it (with a 1-char cosmetic variation)."
+        )
+        assert conf > 0.0
+
+
 def test_source_role_classifier_caches_results(monkeypatch):
     snippets = [_mk_snippet(doc_id="d1", url="https://cache.test/a", text="x")]
     call_count = {"n": 0}

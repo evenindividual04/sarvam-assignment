@@ -22,8 +22,11 @@ _SCHOLAR_BASE = "https://google.serper.dev/scholar"
 
 
 def _domain(url: str) -> str:
+    """Same canonical extractor as agent.search._domain — strips leading-www
+    token only, drops port/trailing-dot. See utils/url_norm.py."""
     try:
-        return urlparse(url).netloc.replace("www.", "")
+        from utils.url_norm import normalize_domain
+        return normalize_domain(urlparse(url).netloc)
     except Exception:
         return url
 

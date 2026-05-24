@@ -105,7 +105,10 @@ def is_blocked(
     effective = BLOCKLIST | custom_blocklist
     if not effective:
         return False
-    d = domain.lower().lstrip(".")
+    from utils.url_norm import normalize_domain
+    d = normalize_domain(domain)
+    if not d:
+        return False
     for target in effective:
         t = target.lower().lstrip(".")
         if not t:
@@ -116,14 +119,24 @@ def is_blocked(
 
 
 def trust_for(domain: str) -> tuple[float, str]:
-    """Return (score, tier_name) for a domain. Unknown → (0.70, 'unknown')."""
-    if not domain:
+    """Return (score, tier_name) for a domain. Unknown → (0.70, 'unknown').
+
+    Matching is exact OR suffix-on-dot-boundary so `pib.gov.in` matches
+    `gov.in` but `notgov.in` does not. Previously the third condition
+    `d.endswith(s)` over-matched whenever `s` lacked a leading dot
+    (`notgov.in`.endswith(`gov.in`) is True), silently promoting
+    bogus-but-suffix-similar domains to tier_1_primary.
+    """
+    from utils.url_norm import normalize_domain
+    d = normalize_domain(domain)
+    if not d:
         return DEFAULT_TRUST, DEFAULT_TIER
-    d = domain.lower().lstrip(".")
     for tier in TRUST_TIERS:
         for s in tier.domains:
             target = s.lstrip(".")
-            if d == target or d.endswith("." + target) or d.endswith(s):
+            if not target:
+                continue
+            if d == target or d.endswith("." + target):
                 return tier.score, tier.name
     return DEFAULT_TRUST, DEFAULT_TIER
 

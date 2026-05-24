@@ -47,8 +47,15 @@ def _detect_language(text: str) -> str:
 
 
 def _domain(url: str) -> str:
+    """Extract a clean, lowercase, port-less domain from a URL.
+
+    Previously `urlparse(url).netloc.replace("www.", "")` which would also
+    strip "www." from the middle of a name (apiwww.example.com →
+    apiexample.com) and never stripped trailing dot / port.
+    """
     try:
-        return urlparse(url).netloc.replace("www.", "")
+        from utils.url_norm import normalize_domain
+        return normalize_domain(urlparse(url).netloc)
     except Exception:
         return url
 
