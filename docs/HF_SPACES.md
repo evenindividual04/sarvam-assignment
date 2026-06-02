@@ -121,7 +121,7 @@ expect:
 Set `ALLOWED_ORIGINS` to **your exact Vercel domain**:
 
 ```
-ALLOWED_ORIGINS=https://deep-research-agent.vercel.app
+ALLOWED_ORIGINS=https://sarvam-deep-research-agent.vercel.app
 ```
 
 Never use `*` in production — it disables the browser's same-origin

@@ -117,7 +117,7 @@ export function Sidebar() {
   // ---- active-session tracking (chat page broadcasts on change) -----------
   useEffect(() => {
     const stored = window.localStorage.getItem("dra:lastSessionId");
-    // eslint-disable-next-line react-hooks/set-state-in-effect
+     
     if (stored) setActiveSessionId(stored);
     const onSelect = (e: Event) => {
       const detail = (e as CustomEvent<{ sessionId: string }>).detail;

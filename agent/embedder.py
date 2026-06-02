@@ -1,5 +1,5 @@
 """
-V3.1 — Singleton wrapper over fastembed's BAAI/bge-small-en-v1.5 (384-dim, ~33MB ONNX, CPU only).
+Singleton wrapper over fastembed's BAAI/bge-small-en-v1.5 (384-dim, ~33MB ONNX, CPU only).
 
 fastembed is lazy-imported inside the singleton so importing this module does
 NOT trigger model load unless hybrid retrieval is on.

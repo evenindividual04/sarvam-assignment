@@ -134,7 +134,7 @@ export default function ChatPage() {
     // backend turn keeps running, and the user can pick the session up
     // again from the sidebar once it's done.
     const id = newSessionId();
-    // eslint-disable-next-line react-hooks/set-state-in-effect
+     
     setSessionId(id);
     if (typeof window !== "undefined") {
       window.localStorage.setItem("dra:lastSessionId", id);
@@ -142,7 +142,7 @@ export default function ChatPage() {
   }, []);
 
   useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect
+     
     setRows((prev) => {
       if (prev.length === 0) return prev;
       const last = prev[prev.length - 1];
@@ -483,10 +483,13 @@ function EmptyState({ onPick }: { onPick: (q: string) => void }) {
     setMounted(true);
   }, []);
   const suggestions = useMemo(
-    () =>
-      mounted
+    () => {
+      // Read shuffleTick to satisfy exhaustive-deps and trigger re-evaluation
+      void shuffleTick;
+      return mounted
         ? pickSuggestions(SUGGESTED_POOL, SUGGESTED_COUNT)
-        : SUGGESTED_POOL.slice(0, SUGGESTED_COUNT),
+        : SUGGESTED_POOL.slice(0, SUGGESTED_COUNT);
+    },
     [shuffleTick, mounted],
   );
   return (

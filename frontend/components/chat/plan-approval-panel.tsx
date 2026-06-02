@@ -13,7 +13,7 @@
  * we surface a read-only countdown badge so the user knows the window.
  */
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import type { PlannerOutput } from "@/lib/types";
@@ -47,19 +47,7 @@ export function PlanApprovalPanel({
 }: PlanApprovalPanelProps) {
   const [edited, setEdited] = useState<string[]>(() => [...subQueries]);
   const [submitting, setSubmitting] = useState(false);
-  // Anchor the countdown on the actual moment the approval event arrived
-  // (via `arrivedAt` prop). Falling back to component mount-time only
-  // matters during synthetic tests that don't supply the prop.
-  const anchorRef = useRef<number>(arrivedAt ?? Date.now());
-  useEffect(() => {
-    if (typeof arrivedAt === "number") anchorRef.current = arrivedAt;
-  }, [arrivedAt]);
-  const compute = () =>
-    Math.max(
-      0,
-      timeoutSeconds - Math.floor((Date.now() - anchorRef.current) / 1000),
-    );
-  const [remaining, setRemaining] = useState(compute);
+  const [remaining, setRemaining] = useState(timeoutSeconds);
 
   useEffect(() => {
     setEdited([...subQueries]);
@@ -67,17 +55,19 @@ export function PlanApprovalPanel({
 
   useEffect(() => {
     if (submitting) return;
+    // Anchor the countdown on the actual moment the approval event arrived
+    // (via `arrivedAt` prop). Falling back to effect-run-time only
+    // matters during synthetic tests that don't supply the prop.
+    const anchor = arrivedAt ?? Date.now();
+    const compute = () =>
+      Math.max(0, timeoutSeconds - Math.floor((Date.now() - anchor) / 1000));
+    
     setRemaining(compute());
     const id = window.setInterval(() => {
       setRemaining(compute());
     }, 1000);
     return () => window.clearInterval(id);
-    // `compute` reads from anchorRef + timeoutSeconds; both are stable for
-    // the lifetime of an approval gate (the ref is only updated when a
-    // different gate's arrivedAt prop lands), so omitting `compute` from
-    // the dep list is intentional.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [timeoutSeconds, submitting]);
+  }, [arrivedAt, timeoutSeconds, submitting]);
 
   const expired = remaining <= 0;
 

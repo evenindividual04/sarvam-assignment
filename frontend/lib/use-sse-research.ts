@@ -656,7 +656,6 @@ export function useSseResearch(): UseSseResearchReturn {
         // immediately, abort the dangling stream, and let the user
         // re-submit. The panel dismissal still happens so the user can
         // see the error banner instead.
-        // eslint-disable-next-line no-console
         console.warn("approveResearchPlan failed", e);
         setApprovalPending(null);
         setError(

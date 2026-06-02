@@ -35,7 +35,7 @@ import pydantic
 
 logger = logging.getLogger(__name__)
 
-# Phase 1.875: per-turn live-time-sensitivity override. When set to True,
+# per-turn live-time-sensitivity override. When set to True,
 # `score_chunk` doubles the recency weight (0.15 → 0.30) at the expense of
 # relevance for that turn only. Propagates through `asyncio.to_thread`.
 _TIME_SENSITIVITY_LIVE: contextvars.ContextVar[bool] = contextvars.ContextVar(

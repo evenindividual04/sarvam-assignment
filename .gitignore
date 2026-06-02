@@ -38,9 +38,12 @@ SPEC_FINAL.md
 sarvam-assignment.md
 Deep Research Agent Architecture Design.md
 AGENTS.md
-docs/FORENSIC_DIFFERENTIATION.md
-docs/SPEC_V3.md
-docs/MMR_VERIFICATION.md
+# Internal design notes — kept on disk for code archaeology, never pushed.
+# Anything placed under docs/internal/ is automatically excluded.
+docs/internal/
+
+# Demo-video prep — script + pre-flight checklists, never pushed.
+DEMO_VIDEO.md
 
 # Frontend
 frontend/node_modules/

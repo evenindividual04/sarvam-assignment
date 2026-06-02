@@ -101,7 +101,7 @@ export function StreamProgress({ events, status, error }: StreamProgressProps) {
   // setState-in-effect pattern is intentional here: wall-clock time is an
   // external input, captured at observation rather than at render.
   useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect
+     
     setFirstSeen((prev) => {
       let next: Map<StreamStep, number> | null = null;
       const stamp = Date.now();
