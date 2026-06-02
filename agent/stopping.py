@@ -1,10 +1,8 @@
-"""P1 — Adaptive Hop Stopping (Stop-RAG gate).
+"""Adaptive hop-stopping gate.
 
-Inspired by Park et al., "Stop-RAG: Value-Based Retrieval Control for
-Iterative RAG" (arXiv:2510.14337, NeurIPS 2025 MTI-LLM workshop). We
-approximate the value-based stopping signal with a fast Groq Llama 3.3
-70B JSON call that asks: given what we already grounded, is another
-search hop useful?
+A fast Groq Llama 3.3 70B JSON call decides whether another retrieval hop
+is likely to improve the answer given the evidence already grounded. This
+keeps iteration cost low without imposing a fixed hop count.
 
 Compliance constraint (sarvam-assignment.md L103: no hidden CoT
 streaming): the `reason` field MUST stay inside `run_metadata` only;

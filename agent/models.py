@@ -22,7 +22,7 @@ class SearchResult:
     domain: str
     retrieved_at: str
     raw_content: Optional[str] = None    # populated by Parallel/Tavily; skips Trafilatura
-    intent_origin: Optional[str] = None  # V2.1: intent of the query that produced this result
+    intent_origin: Optional[str] = None  # intent of the query that produced this result
     relevance: Optional[float] = None    # normalized to [0,1]; see `relevance_source` for provenance
     relevance_source: Optional[str] = None
     # "provider" → field surfaced directly by the provider (e.g. Tavily `score`); an
@@ -47,8 +47,8 @@ class ContextSnippet:
     recency_score: float = 0.0
     diversity_score: float = 0.0
     final_score: float = 0.0
-    intent_origin: Optional[str] = None  # V2.1: provenance from the originating typed query
-    trust_score: float = 0.7  # V2.3: deterministic source trust prior in [0.45, 1.00]
+    intent_origin: Optional[str] = None  # provenance from the originating typed query
+    trust_score: float = 0.7  # deterministic source trust prior in [0.45, 1.00]
     trust_tier: str = "unknown"
     # Provider-side relevance carried from `SearchResult` so the selector can
     # use it as an additional signal alongside BM25 / FlashRank / recency /
@@ -120,13 +120,13 @@ class ExecutionEvent:
     step: str           # planning | searching | fetching | selecting | generating | done | error
     label: str          # human-readable streaming label
     data: Any = None    # step-specific payload
-    # Phase 1.25: typed-event discriminator. When set, the SSE layer uses this
-    # as the `event:` field. Old emit sites leave it None (back-compat); new
-    # sites set one of the constants in EVENT_TYPES below.
+    # Typed-event discriminator. When set, the SSE layer uses this as the
+    # `event:` field. Old emit sites leave it None (back-compat); new sites
+    # set one of the constants in EVENT_TYPES below.
     event_type: str | None = None
 
 
-# Phase 1.25: typed-event discriminators (AG-UI / Vercel AI SDK 5 inspired).
+# Typed-event discriminators for structured SSE delivery.
 EVT_RUN_STARTED = "run_started"
 EVT_PHASE_STARTED = "phase_started"
 EVT_PHASE_PROGRESS = "phase_progress"
@@ -140,23 +140,22 @@ EVT_ANSWER_DELTA = "answer_delta"
 EVT_CITATION_RESOLVED = "citation_resolved"
 EVT_RUN_FINISHED = "run_finished"
 EVT_RUN_ERROR = "run_error"
-# Phase 1.5: structured uncertainty signal (weak / missing / conflict).
+# Structured uncertainty signal (weak / missing / conflict).
 EVT_UNCERTAINTY = "uncertainty"
-# Phase 1.875: plan-level clarification (ambiguity_flag) + per-sub-query
-# evidence-gap notifications surfaced after SELECTING.
+# Plan-level clarification (ambiguity_flag) + per-sub-query evidence-gap
+# notifications surfaced after SELECTING.
 EVT_CLARIFICATION_OFFERED = "clarification_offered"
 EVT_EVIDENCE_GAP = "evidence_gap"
-# Phase 2: human-in-the-loop plan approval gate. Emitted between PLANNING and
+# Human-in-the-loop plan approval gate. Emitted between PLANNING and
 # SEARCHING when the request opts in via `approval_required=True`.
 EVT_PLAN_APPROVAL = "plan_approval"
-# B3: retrieval-grounded reasoning events. Two emissions per hop carrying
+# Retrieval-grounded reasoning events. Two emissions per hop carrying
 # structured fields only (no model-generated prose):
 #   1. After SEARCHING: `{"hop", "intent", "queries"}` — intent comes verbatim
 #      from TypedQuery.rationale (planner JSON, not a free-form CoT stream).
 #   2. After SELECTING: `{"hop", "observation": [{title, domain, score}, ...]}`
 #      — pulled from retrieved chunk metadata, never from synthesizer output.
-# This is the *anti-CoT* counterpart to scripted "Thought: …" / "Action: …"
-# ReAct labels: nothing here is invented at stream time.
+# Nothing here is invented at stream time.
 EVT_REASONING = "reasoning"
 # Per-turn forensic events.
 # Mechanical, not LLM-narrated: `hop_evidence` and `source_contribution` are
@@ -197,7 +196,7 @@ class TypedQuery(BaseModel):
 class PlannerOutput(BaseModel):
     strategy: str
     queries: list[TypedQuery]
-    confidence: Literal["low", "medium", "high"] = "medium"  # V3.2 adaptive 2-hop gate
+    confidence: Literal["low", "medium", "high"] = "medium"  # gates eligibility for a second retrieval hop
     # Phase 1.875: enriched plan-level metadata. All optional with defaults
     # so older serialized planner outputs (without these fields) still parse.
     time_sensitivity: Literal["live", "recent", "static"] = "static"
@@ -209,7 +208,6 @@ class PlannerOutput(BaseModel):
     success_criteria: list[str] = Field(default_factory=list)  # 1-3 short bullets
 
 
-# P3: DRAGged-into-Conflict taxonomy (Cattan et al., arXiv:2506.08500).
 # Three kinds of source conflict + a "none" sentinel:
 #   - self        : a single source contradicts itself
 #   - pair        : two sources disagree on a fact (canonical RAG case)
@@ -226,8 +224,8 @@ class ClaimContradiction(BaseModel):
     position_b: str
     is_temporal_evolution: bool
     confidence: float
-    # P3: DRAGged taxonomy. Default "pair" so older serialized rows that
-    # lack the field still parse as the canonical RAG conflict case.
+    # Default "pair" so older serialized rows that lack the field still
+    # parse as the canonical pairwise conflict case.
     kind: ConflictKind = "pair"
     qualifier: Optional[str] = None  # populated when kind == "conditional"
 
@@ -237,7 +235,7 @@ class ConflictResult(BaseModel):
     conflict_summary: Optional[str] = None
     contradictions: list[ClaimContradiction] = []
     probe_skipped_reason: Optional[str] = None
-    # P3: overall verdict across all contradictions. "none" when has_conflict
+    # Overall verdict across all contradictions. "none" when has_conflict
     # is False or when the probe was skipped.
     dominant_kind: ConflictKind = "none"
 
@@ -310,7 +308,7 @@ class RunMetadata(BaseModel):
     8. Planner — planner_output, hop2_planner_output, plan_approval,
        vagueness_*, language_detection
     9. Budgets / timing — budget_distribution, probe_ms, verification_ms
-    10. Stop-RAG — stop_rag_decisions, stop_rag_terminator_*
+    10. Adaptive stopping — stop_rag_decisions, stop_rag_terminator_*
     """
 
     # 1. Config / provenance

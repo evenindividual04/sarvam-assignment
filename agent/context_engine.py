@@ -314,7 +314,7 @@ def select_with_diversity(
     return selected
 
 
-# ── V3.1 / V3.8: Hybrid RRF (BM25 + dense), capability-aware ──────────────
+# ── Hybrid RRF (BM25 + dense), capability-aware ───────────────────────────
 
 from utils.retrieval_mode import effective_mode_for_request
 
@@ -765,12 +765,13 @@ def rank_and_select_mmr(
 # ── Context XML formatting ─────────────────────────────────────────────────
 
 def _reorder_u_shape(selected: list[ContextSnippet]) -> list[ContextSnippet]:
-    """U-shape reordering for Lost-in-the-Middle mitigation.
+    """U-shape reordering to improve attention on the most relevant snippets.
 
-    Liu et al. 2023, "Lost in the Middle: How Language Models Use Long Contexts" —
-    LLMs attend strongest at the start and end of the context window. We place
-    the top-ranked snippet first and the second-ranked snippet last so the
-    middle holds lower-ranked items. No-op for lists shorter than 3.
+    LLMs tend to attend more strongly to content at the start and end of a
+    long context window. Placing the top-ranked snippet first and the
+    second-ranked snippet last keeps the highest-signal material in those
+    positions while lower-ranked items occupy the middle. No-op for lists
+    shorter than 3.
     """
     if len(selected) < 3:
         return selected
@@ -802,14 +803,14 @@ def format_context_xml(
     Returns (xml_string, doc_map).
     doc_map: {"doc_1": (title, url, domain)}
 
-    Phase 1.75:
-      - U-shape ordering at injection time (Liu et al. 2023). The persisted
-        ``Turn.doc_map`` and snippet ranks still reflect the U-shape output
-        order, but ``<relevance_score>`` carries the true editorial score so
-        audit fidelity is preserved.
-      - Each ``<document>`` carries ``<retrieved_at>``, ``<rank>``, and
-        ``<relevance_score>`` sub-elements (Vectara NAACL 2025: metadata
-        enrichment lifts QA accuracy).
+    Applies U-shape ordering at injection time. The persisted
+    ``Turn.doc_map`` and snippet ranks still reflect the U-shape output
+    order, but ``<relevance_score>`` carries the true editorial score so
+    audit fidelity is preserved.
+
+    Each ``<document>`` carries ``<retrieved_at>``, ``<rank>``, and
+    ``<relevance_score>`` sub-elements so the synthesizer and evaluators
+    have full provenance metadata per document.
     """
     ordered = _reorder_u_shape(chunks)
     doc_map: dict[str, tuple[str, str, str]] = {}
@@ -936,10 +937,9 @@ async def probe_contradictions(chunks: list[ContextSnippet], query: str) -> Conf
         # Mechanical kind correction. The LLM occasionally labels a
         # contradiction `pair` when in fact doc_ids_a and doc_ids_b
         # reference the SAME source (e.g. two chunks of the same Wikipedia
-        # page that quote different historical values). Per DRAGged-into-
-        # Conflict (arXiv:2506.08500) this is a `self` (internal)
-        # contradiction, not a pair. Detecting it from the doc_ids is
-        # deterministic — we don't need the model to get it right.
+        # page that quote different historical values). This is a `self`
+        # (internal) contradiction, not a pair. Detecting it from the
+        # doc_ids is deterministic — we don't need the model to get it right.
         for c in contradictions:
             a = set(c.doc_ids_a or [])
             b = set(c.doc_ids_b or [])

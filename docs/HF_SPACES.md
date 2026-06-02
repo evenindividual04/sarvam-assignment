@@ -11,7 +11,7 @@ data-residency), see [DEPLOY.md](./DEPLOY.md) instead.
 ┌────────────────┐    HTTPS    ┌─────────────────────┐    HTTPS    ┌──────────────┐
 │  Vercel        │ ──────────▶ │  HF Spaces (Docker) │ ──────────▶ │  Provider    │
 │  (frontend)    │             │  FastAPI + SQLite   │             │  APIs        │
-│  Next.js 15    │ ◀────────── │  agent/orchestrator │             │  (Parallel,  │
+│  Next.js 16    │ ◀────────── │  agent/orchestrator │             │  (Parallel,  │
 │                │   SSE       │                     │             │   Gemini,    │
 └────────────────┘             └─────────────────────┘             │   Groq, ...) │
                                                                     └──────────────┘
@@ -55,25 +55,27 @@ Set every env var as an HF Spaces **Secret** (Settings → Variables and secrets
 
 ### Required
 
+At minimum you need a search key and a synth key. The bundled `.env` sets `SYNTH_PROVIDER=sarvam`; if that env var is not set the code default is Gemini.
+
 | Secret name | Purpose |
 |-------------|---------|
 | `PARALLEL_API_KEY` | Primary search provider (16k free queries) |
-| `GEMINI_API_KEY` | Synthesis (Gemini 2.5 Flash), single-key mode |
+| `SARVAM_API_KEY` | Synthesis primary (`SYNTH_PROVIDER=sarvam`, bundled default); handles Indic queries automatically. Context windows: sarvam-m 7,192 / sarvam-30b 32,768 / sarvam-105b 131,072 |
+| `GEMINI_API_KEY` | Synthesis fallback 1 (Gemini 2.5 Flash), single-key mode; also used as primary when `SYNTH_PROVIDER=gemini` |
 | `GEMINI_API_KEYS` | **OR** multi-key mode: `AIzaSy_xxx,AIzaSy_yyy` — round-robin across N keys gives N× the 1500/day quota; takes precedence over `GEMINI_API_KEY` if both set |
-| `GROQ_API_KEY` | Planning + conflict probe (single-key mode) |
+| `GROQ_API_KEY` | Planning, conflict probe, and default eval judge (single-key mode) |
 | `GROQ_API_KEYS` | **OR** multi-key mode: `gsk_aaa,gsk_bbb,gsk_ccc` (preferred for eval ablations; takes precedence over `GROQ_API_KEY` if both set) |
-| `GITHUB_TOKEN` | GitHub Models eval judge (GPT-4o-mini, different family from generator) |
+| `GITHUB_TOKEN` | GitHub Models access for optional cross-family eval judge (GPT-4o-mini); default judge is Groq Llama 3.3 70B — this key enables the `--cross-family-judge` flag |
 
 ### Recommended (fallbacks + secondary providers)
 
 | Secret name | Purpose |
 |-------------|---------|
 | `TAVILY_API_KEY` | Search fallback when Parallel quota is exhausted |
-| `SERPER_API_KEY` | Last-resort search + Serper Scholar for academic intent |
-| `OPENROUTER_API_KEY` | Synthesis fallback (DeepSeek R1) when Gemini rate-limits |
+| `SERPER_API_KEY` | Last-resort search fallback |
+| `OPENROUTER_API_KEY` | Synthesis fallback 2 (DeepSeek R1) when Sarvam and Gemini are unavailable |
 | `CEREBRAS_API_KEY` | Very fast Llama inference (planner, 8K context cap auto-detected) |
-| `COHERE_API_KEY` | Rerank v3.5 between FlashRank and 5-factor scoring (English only) |
-| `SARVAM_API_KEY` | Indic-first synthesizer; auto-routes for Devanagari/Tamil/Bengali |
+| `COHERE_API_KEY` | Rerank v3.5 between FlashRank and 5-signal scoring (English only) |
 
 ### Tuning (string values)
 

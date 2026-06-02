@@ -404,12 +404,12 @@ JSON only: {{"answer_relevance_score": float, "reasoning": str}}"""
 
 @retry(wait=wait_exponential(multiplier=1, min=2, max=10), stop=stop_after_attempt(3), reraise=True)
 async def judge_conflict_adherence(query: str, context_xml: str, answer: str) -> ConflictAdherenceResult:
-    """Score Conflict Adherence using the DRAGged-into-Conflict taxonomy.
+    """Score how well the answer handles conflicting sources.
 
-    Rubric (Cattan et al., arXiv:2506.08500):
+    Rubric:
       - 0.0 — Answer missed the conflict entirely (silently picked one side
               or failed to acknowledge disagreement).
-      - 0.5 — Answer surfaced the conflict but mislabeled its KIND
+      - 0.5 — Answer surfaced the conflict but mislabeled its kind
               (self / pair / conditional) or omitted the temporal /
               sub-domain qualifier when one was required.
       - 1.0 — Answer correctly surfaced AND correctly identified the kind
@@ -431,8 +431,8 @@ CONTEXT:
 ANSWER:
 {answer}
 
-This question has known conflicting sources. Use the DRAGged-into-Conflict
-taxonomy (Cattan et al. 2025) with three conflict kinds:
+This question has known conflicting sources. Classify any contradiction
+into one of three conflict kinds:
   - \"self\"        : a single source contradicts itself
   - \"pair\"        : two sources disagree on a fact in the same time window
   - \"conditional\" : sources appear to disagree but reconcile under a
@@ -597,13 +597,9 @@ def score_uncertainty_handling(
 
 # ── C3 calibration: model self-confidence vs judge confidence ───────────────
 #
-# Novel metric. Unlike Pearson(planner_confidence, faithfulness) — which only
-# tells you whether the planner's a-priori confidence tracks downstream
-# faithfulness — C3 asks a sharper question: does the *answer's own hedging*
-# match the *actual evidence quality* the judge observed?
-#
-# Both competitors check for hedge phrases ("could not verify", "unclear")
-# but neither checks whether the hedging is *accurate*. C3 does.
+# Measures whether the answer's own hedging language accurately reflects the
+# actual evidence quality the judge observed — i.e. does the model know when
+# it doesn't know?
 #
 #   model_self_confidence ∈ [0,1]  — derived from hedge vs assertion phrases
 #   judge_confidence      ∈ [0,1]  — derived from faithfulness + context_precision

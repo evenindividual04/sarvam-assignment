@@ -13,9 +13,9 @@ JSON summary, and a human-readable markdown report per run.
 
 ## What we measure and why
 
-Six metrics, each scored by a **separate** GPT-4o-mini judge call so the model
-can't anchor one score on another. Citation Integrity is **deterministic** —
-URLs either appear in the retrieved doc pool or they don't, no LLM needed.
+Seven core metrics, each scored by a **separate** judge call so the model
+can't anchor one score on another. Citation Integrity and Claim Precision are
+**deterministic** — no LLM needed.
 
 | Metric | What it asks | Why it's here |
 |---|---|---|
@@ -23,17 +23,27 @@ URLs either appear in the retrieved doc pool or they don't, no LLM needed.
 | **Answer Relevance** | Does the answer address the user's actual question? | Faithfulness alone rewards a system that copies the source without answering. Relevance catches that. |
 | **Context Precision** | Did retrieval surface the *necessary* information? | Separates retrieval failures from synthesis failures. If context_precision is low but faithfulness is high, the agent honestly said "I don't know" — that's a pass for the *agent* but a fail for the *retriever*. |
 | **Citation Integrity** _(deterministic)_ | Do all `[N]` markers resolve to URLs that were actually fetched? | LLM judges over-credit citation work. A regex + URL set membership check is cheaper and more reliable. |
+| **Claim Precision** _(deterministic + LLM fallback)_ | Do cited sentences actually appear in the cited source chunks? | Distinguishes HALLUCINATION_ATTRIBUTION (valid URL, wrong claim) from HALLUCINATION_FACT (made-up content) — each has a different fix. |
 | **Conflict Adherence** | When sources contradict, does the answer surface the disagreement? | The assignment explicitly calls out "conflicting sources" as a behaviour to test. A confident answer that hides disagreement is worse than a hedged one that shows it. |
 | **Session Coherence** | In multi-turn scenarios, does turn N use turn N-1's context correctly? | Tests the rolling-summary + recent-turns memory design, not just single-shot QA. |
 
-**Two derived signals** computed across rows:
+**Auxiliary grounding signals** computed per-run (not part of the core seven,
+but reported for diagnostics):
 
-- **Failure taxonomy** — every row is bucketed into PASS / HALLUCINATION /
-  RETRIEVAL_FAILURE / CONFLICT_MISS / COHERENCE_FAIL / KNOWLEDGE_BLEED. This is
-  what tells you *what kind* of failure dominates, not just the headline rate.
-- **Confidence calibration** — Pearson correlation between the agent's
-  self-reported confidence and judge faithfulness. A well-calibrated agent
-  scores high here even when faithfulness is low, because it honestly hedges.
+- **Factual Accuracy** — substring/entity match against gold answers where available.
+- **Quote Grounding Ratio** — fraction of inline quotes that appear verbatim in their cited source.
+- **Numeric Grounding Ratio** — fraction of numeric tokens (years, percentages) found in cited sources.
+- **Criteria Coverage Ratio** — fraction of planner's success criteria present in the answer.
+- **Script Preservation Ratio** — for Indic-language answers, fraction of alphabetic chars in the expected Unicode script.
+- **Cross-language consistency** — Jaccard over cited URL sets for paired EN/Indic questions on the same concept.
+- **Confidence calibration** — whether the agent's hedging language tracks actual evidence quality.
+
+**Failure taxonomy** — every row is bucketed into one of seven mutually
+exclusive classes: PASS / HALLUCINATION_FACT / HALLUCINATION_ATTRIBUTION /
+KNOWLEDGE_BLEED / RETRIEVAL_FAILURE / CONFLICT_MISS / COHERENCE_FAIL.
+Splitting HALLUCINATION into two sub-classes reveals whether the root cause is
+bad retrieval (FACT: the information was never in the context) or bad synthesis
+(ATTRIBUTION: the citation format is valid but the claim isn't in the cited doc).
 
 ### Metrics we considered and rejected
 
@@ -49,53 +59,52 @@ URLs either appear in the retrieved doc pool or they don't, no LLM needed.
 
 ### Why the judge is a different model family
 
-The generator is Gemini 2.5 Flash. If the judge were also Gemini-family, it
-would systematically prefer its own outputs ([self-preference
-bias](https://arxiv.org/abs/2404.13076)). The judge defaults to **Groq
-Llama-3.3-70B** (Meta family) — cross-family vs Gemini, free at 14,400
-req/day, fast.
+A model tends to rate its own family's style more favorably, inflating scores
+by 5–15 percentage points compared to a cross-family judge. The judge defaults
+to **Groq Llama 3.3 70B** (Meta family) — cross-family when the synthesizer
+is Gemini, free at 14,400 req/day, fast.
 
 **Configurable via env:** `JUDGE_PROVIDER` in `{groq, github}` (default
 `groq`) and `JUDGE_MODEL` (default `llama-3.3-70b-versatile` for groq,
-`gpt-4o-mini` for github). If you switch the synthesizer to Sarvam (also
-Llama-based), set `JUDGE_PROVIDER=github` to keep the cross-family
-invariant.
+`gpt-4o-mini` for github). If you switch the synthesizer to Sarvam (which is
+also Llama/Meta-based), set `JUDGE_PROVIDER=github` to preserve the
+cross-family invariant with GPT-4o-mini (OpenAI family) as the secondary judge.
 
-The original GPT-4o-mini judge via GitHub Models is still available but has
-a 150 req/day ceiling, which can't finish a single 53-question × 6-metric
-eval run on a fresh day (~318 calls needed). Groq's 14,400/day removes the
-bottleneck.
+The GPT-4o-mini judge via GitHub Models has a 150 req/day ceiling, which
+can't finish a single 76-question × 7-metric eval run on a fresh day
+(~532 calls needed). Groq's 14,400/day removes the bottleneck and is the
+recommended default.
 
 ---
 
 ## Dataset
 
-53 questions in `dataset.json`, distributed across the categories the
+76 questions in `dataset.json`, distributed across the categories the
 assignment calls out:
 
 | Category | n | What it tests |
 |---|---:|---|
-| `factual` | 17 | Single-hop, single-source answers. Baseline for "does retrieval work at all." |
-| `multi_hop` | 7 | Answer requires combining two+ documents. Tests context_engine selection. |
-| `comparison` | 7 | "X vs Y" — tests whether the agent retrieves balanced sources. |
-| `conflicting` | 8 | Two sources disagree. Tests CONFLICT_CHECK + conflict adherence. |
-| `insufficient_evidence` | 6 | Web doesn't have the answer. Tests honest "I don't know" behaviour. |
-| `multi_turn` | 8 | Two turns where turn 2 depends on turn 1's context. Tests memory. |
+| `factual` | 21 | Single-hop, single-source answers. Baseline for "does retrieval work at all." |
+| `multi_hop` | 13 | Answer requires combining two+ documents. Tests context_engine selection. |
+| `comparison` | 10 | "X vs Y" — tests whether the agent retrieves balanced sources. |
+| `conflicting` | 10 | Two sources disagree. Tests conflict detection + conflict adherence metric. |
+| `insufficient_evidence` | 12 | Web doesn't have the answer. Tests honest "I don't know" behaviour. |
+| `multi_turn` | 10 | Two turns where turn 2 depends on turn 1's context. Tests memory. |
 
 **Language coverage** (cross-lingual robustness — explicitly asked for in the
 FDSE assignment because Sarvam is Indic-first):
 
 | Language | n |
 |---|---:|
-| English | 34 |
-| Hindi | 10 |
-| Tamil | 3 |
-| Bengali | 3 |
-| Marathi | 3 |
+| English | 44 |
+| Hindi | 17 |
+| Tamil | 5 |
+| Bengali | 5 |
+| Marathi | 5 |
 
-A subset of Hindi questions is a translation of English questions on the same
-factual concept, used to compute **cross-language consistency** (Jaccard over
-the cited URL sets — do EN and HI converge on the same evidence?).
+A subset of questions shares a `concept_id` tag linking English and Indic
+versions of the same question, used to compute **cross-language consistency**
+(Jaccard over the cited URL sets — do EN and HI converge on the same evidence?).
 
 ---
 
@@ -141,9 +150,13 @@ For an evaluator opening a fresh `report_<ts>.md`:
 
 - **Judge variance.** Single judge call per metric → ~±0.05 noise on means.
   Acceptable for relative comparisons across runs, not for absolute claims.
-- **Dataset size.** 53 questions is enough to catch dominant failure modes
+- **Dataset size.** 76 questions is enough to catch dominant failure modes
   but not enough to detect subtle regressions <5pp.
-- **Cost.** Each full run hits the generator stack 53× and the judge stack
-  ~6×53 ≈ 318×. Budget ~$0.05–0.15 per run depending on synthesis provider.
+- **Cost.** Each full run hits the generator stack 76× and the judge stack
+  ~5×76 ≈ 380× (LLM-judged metrics only). Budget ~$0.05–0.15 per run
+  depending on synthesis provider.
+- **Generator temperature.** The synthesizer runs at ~0.1–0.3 (not fully
+  deterministic); the judge runs at temperature 0. Repeat runs will produce
+  slightly different per-row scores.
 - **No human ground truth on Indic questions.** The judge is multilingual
   but its calibration on Tamil/Bengali/Marathi is weaker than English.

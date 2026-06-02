@@ -1,5 +1,5 @@
 """
-V2.3 — Deterministic source trust prior.
+Deterministic source trust prior.
 
 Tiered, bounded, additive contribution to chunk scoring.
 Python module (not JSON) so the tiers are import-time validated, mypy-aware,

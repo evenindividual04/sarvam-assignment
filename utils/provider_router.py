@@ -590,10 +590,9 @@ def _build_disagreement_block(
     conflict_result: object | None,
     doc_map: dict[str, tuple[str, str, str]] | None = None,
 ) -> str:
-    """V2.2 + B4 + DRAGged: enumerate non-temporal contradictions for the
-    synthesizer and demand a structured Markdown disagreement matrix.
-    Heading + column labels are chosen based on the DRAGged-into-Conflict
-    `kind` taxonomy (Cattan et al. 2025, arXiv:2506.08500):
+    """Enumerate non-temporal contradictions for the synthesizer and demand
+    a structured Markdown disagreement matrix. Heading and column labels
+    are chosen based on the conflict kind:
 
       - self        → "Internal contradiction within a source" + columns
                       "First mention / Second mention" — the *same* source

@@ -28,7 +28,7 @@ Research question: \"{query}\"
 Numbered sources (each tagged with its doc_id):
 {sources}
 
-Classify any disagreement into ONE of these kinds (DRAGged-into-Conflict taxonomy, Cattan et al. 2025):
+Classify any disagreement into ONE of these kinds:
 
 1. \"self\"        — a SINGLE source contradicts itself internally.
                    Example: doc_2 states \"repo rate is 6.50%\" in one paragraph and \"repo rate is 5.50%\" in another.

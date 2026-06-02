@@ -10,7 +10,6 @@ __pycache__/
 eval/results/*
 !eval/results/.gitkeep
 !eval/results/SAMPLE_REPORT.md
-!eval/results/JUDGE_FAMILY_COMPARISON.md
 # Eval result JSONL files are seeded into the deployed HF Space's
 # SQLite via utils/eval_seed.py on first boot. Track them.
 !eval/results/eval_*.jsonl
@@ -44,6 +43,24 @@ docs/internal/
 
 # Demo-video prep — script + pre-flight checklists, never pushed.
 DEMO_VIDEO.md
+
+# Internal prep & analysis docs — kept on disk, never pushed.
+INTERVIEW_PREP.md
+INTERVIEW_DOSSIER.md
+RESUME_PRESSURE_TEST.md
+docs/ARCHITECTURE_EXPLAINED.md
+docs/FDSE_INTERVIEW_GUIDE.md
+docs/DOC_INCONSISTENCIES_AND_CITATIONS.md
+
+# Working docs kept local — not part of the pushed repo.
+docs/ARCHITECTURE.md
+docs/API.md
+docs/EVAL_METHODOLOGY.md
+docs/README.md
+docs/RELATED_WORK.md
+
+# Eval forensic comparison — kept on disk, untracked.
+eval/results/JUDGE_FAMILY_COMPARISON.md
 
 # Frontend
 frontend/node_modules/

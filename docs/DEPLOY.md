@@ -48,9 +48,9 @@ PARALLEL_API_KEY=...
 GROQ_API_KEY=...
 GITHUB_TOKEN=...
 # Pick exactly one synthesizer for default operation:
-GEMINI_API_KEY=...        # if SYNTH_PROVIDER=gemini (default)
-SARVAM_API_KEY=sk_...     # if SYNTH_PROVIDER=sarvam
-SYNTH_PROVIDER=gemini     # or sarvam, or openrouter
+SARVAM_API_KEY=sk_...     # if SYNTH_PROVIDER=sarvam (bundled .env default)
+GEMINI_API_KEY=...        # if SYNTH_PROVIDER=gemini (code default when SYNTH_PROVIDER unset)
+SYNTH_PROVIDER=sarvam     # or gemini, or openrouter
 ```
 
 Persistent storage:
@@ -113,9 +113,9 @@ The agent supports multiple providers per stage. Switch via env var:
 | Stage | Default | Alternatives | Env var |
 |-------|--------|--------------|---------|
 | Planner | Groq Llama 3.3 70B | (Groq only at present) | `GROQ_API_KEY` |
-| Synth | Gemini 2.5 Flash | Sarvam-M / Sarvam-30B, OpenRouter DeepSeek R1 | `SYNTH_PROVIDER`, `SARVAM_MODEL` |
+| Synth | Sarvam-30B (bundled `.env` default) → Gemini 2.5 Flash → OpenRouter DeepSeek R1 → Cerebras → Ollama | Indic queries always use Sarvam | `SYNTH_PROVIDER`, `SARVAM_MODEL` |
 | Search | Parallel | Tavily, Serper (set the corresponding `*_API_KEY`) | `PARALLEL_API_KEY`, `TAVILY_API_KEY`, `SERPER_API_KEY` |
-| Judge (eval) | GitHub Models GPT-4o-mini | (any OpenAI-compatible — change `base_url` in `judge()`) | `GITHUB_TOKEN` |
+| Judge (eval) | Groq Llama 3.3 70B | GPT-4o-mini via GitHub Models (`--cross-family-judge` flag) | `GROQ_API_KEY`, `GITHUB_TOKEN` |
 
 Sarvam-specific:
 
